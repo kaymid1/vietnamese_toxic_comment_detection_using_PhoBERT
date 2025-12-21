@@ -2,30 +2,27 @@
 ```mermaid
 sequenceDiagram
   autonumber
-  actor User as User
-  participant Page as Web Page (Any site)
-  participant Ext as Browser Extension (Content Script / Popup)
-  participant API as Inference API (FastAPI/Flask)
+  actor User
+  participant Page as Web Page
+  participant Ext as Browser Extension
+  participant API as Inference API
   participant Pre as Preprocess
   participant Tok as PhoBERT Tokenizer
   participant Model as PhoBERT Classifier
-  participant Log as Logging/Monitoring (async)
+  participant Log as Logging
 
-  User->>Page: Select (highlight) a text segment
-  User->>Ext: Right-click / click extension → "Scan Toxicity"
-  Ext->>Ext: Read selected text from page\n(validate non-empty, length limit)
-  Ext->>API: POST /predict {text, page_url(optional), client_ts}
-  API->>Pre: clean_text(text)\n(strip, normalize whitespace, keep diacritics)
-  Pre-->>API: cleaned_text
-  API->>Tok: tokenize(cleaned_text)\n(max_length=128/256, truncation, padding)
-  Tok-->>API: input_ids, attention_mask
-  API->>Model: forward(input_ids, attention_mask)
-  Model-->>API: logits / probabilities
-  API->>API: thresholding + response formatting\n(label, confidence, request_id, latency_ms)
-  API-->>Ext: 200 OK {label, confidence, request_id, latency_ms}
-  Ext->>Page: Render inline overlay/tooltip\n(color badge + confidence)
-  Page-->>User: Show result next to selected text
+  User->>Page: Select highlight text
+  User->>Ext: Trigger Scan Toxicity from extension
+  Ext->>Ext: Read selected text and validate
+  Ext->>API: POST /predict with text
+  API->>Pre: Clean text
+  Pre-->>API: Cleaned text
+  API->>Tok: Tokenize cleaned text
+  Tok-->>API: Token IDs and mask
+  API->>Model: Run inference
+  Model-->>API: Probabilities
+  API-->>Ext: Return label and confidence and request_id
+  Ext->>Page: Show overlay tooltip near selection
+  API-->>Log: Async log request_id latency text_len prediction confidence
 
-  par Async observability
-    API-->>Log: log(request_id, latency_ms, text_len,\npred_label, confidence)
 ```
