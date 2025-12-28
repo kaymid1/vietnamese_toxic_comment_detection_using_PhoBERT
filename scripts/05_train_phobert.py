@@ -61,6 +61,32 @@ model = AutoModelForSequenceClassification.from_pretrained(
     num_labels=2
 )
 
+# Class weights for imbalanced dataset
+train_labels = torch.tensor(tokenized_dataset["train"]["labels"])
+label_counts = torch.bincount(train_labels, minlength=2)
+num_clean = label_counts[0].item()
+num_toxic = label_counts[1].item()
+weight_clean = 1.0
+weight_toxic = num_clean / num_toxic
+class_weights = torch.tensor([weight_clean, weight_toxic], dtype=torch.float)
+
+# Custom Trainer with weighted CrossEntropyLoss
+class WeightedTrainer(Trainer):
+    def __init__(self, *args, class_weights=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.class_weights = class_weights
+
+    def compute_loss(self, model, inputs, return_outputs=False):
+        labels = inputs.get("labels")
+        outputs = model(**inputs)
+        logits = outputs.get("logits")
+
+        weights = self.class_weights.to(logits.device)
+        loss_fct = torch.nn.CrossEntropyLoss(weight=weights)
+        loss = loss_fct(logits, labels)
+
+        return (loss, outputs) if return_outputs else loss
+
 # Compute metrics
 def compute_metrics(eval_pred):
     logits, labels = eval_pred
@@ -94,12 +120,13 @@ training_args = TrainingArguments(
     report_to=[]  # disable wandb
 )
 
-trainer = Trainer(
+trainer = WeightedTrainer(
     model=model,
     args=training_args,
     train_dataset=tokenized_dataset["train"],
     eval_dataset=tokenized_dataset["validation"],
-    compute_metrics=compute_metrics
+    compute_metrics=compute_metrics,
+    class_weights=class_weights
 )
 
 # Train
