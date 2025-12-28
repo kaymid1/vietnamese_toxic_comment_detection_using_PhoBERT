@@ -14,7 +14,7 @@ DATA_DIR = "data/processed/victsd_v1"
 MODEL_NAME = "vinai/phobert-base"
 MAX_LENGTH = 128
 BATCH_SIZE = 16
-EPOCHS = 5
+EPOCHS = 4
 LR = 2e-5
 SEED = 42
 
