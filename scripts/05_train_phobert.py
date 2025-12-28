@@ -105,7 +105,7 @@ def compute_metrics(eval_pred):
 # Training args
 training_args = TrainingArguments(
     output_dir="models/phobert/checkpoints",
-    eval_strategy="epoch",
+    evaluation_strategy="epoch",
     save_strategy="epoch",
     learning_rate=LR,
     per_device_train_batch_size=BATCH_SIZE,
