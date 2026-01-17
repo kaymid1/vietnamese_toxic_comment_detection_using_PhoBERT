@@ -5,6 +5,7 @@ from datasets import load_dataset
 from transformers import AutoTokenizer, AutoModelForSequenceClassification, Trainer, TrainingArguments
 from sklearn.metrics import f1_score, classification_report, confusion_matrix
 import torch
+import inspect
 import mlflow
 
 # -----------------------------
@@ -76,7 +77,7 @@ class WeightedTrainer(Trainer):
         super().__init__(*args, **kwargs)
         self.class_weights = class_weights
 
-    def compute_loss(self, model, inputs, return_outputs=False):
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         labels = inputs.get("labels")
         outputs = model(**inputs)
         logits = outputs.get("logits")
@@ -102,10 +103,9 @@ def compute_metrics(eval_pred):
         "f1_clean": f1_clean
     }
 
-# Training args
-training_args = TrainingArguments(
+# Training args (compat for transformers eval_strategy vs evaluation_strategy)
+training_args_kwargs = dict(
     output_dir="models/phobert/checkpoints",
-    evaluation_strategy="epoch",
     save_strategy="epoch",
     learning_rate=LR,
     per_device_train_batch_size=BATCH_SIZE,
@@ -117,8 +117,15 @@ training_args = TrainingArguments(
     greater_is_better=True,
     seed=SEED,
     logging_dir="models/phobert/logs",
-    report_to=[]  # disable wandb
+    report_to=[],  # disable wandb
 )
+ta_params = inspect.signature(TrainingArguments.__init__).parameters
+if "evaluation_strategy" in ta_params:
+    training_args_kwargs["evaluation_strategy"] = "epoch"
+elif "eval_strategy" in ta_params:
+    training_args_kwargs["eval_strategy"] = "epoch"
+
+training_args = TrainingArguments(**training_args_kwargs)
 
 trainer = WeightedTrainer(
     model=model,
