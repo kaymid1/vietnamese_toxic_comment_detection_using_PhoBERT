@@ -5,68 +5,75 @@ import { ResultsPage } from "@/app/components/ResultsPage";
 import { ModelPage } from "@/app/components/ModelPage";
 import { ContactPage } from "@/app/components/ContactPage";
 
-// Mock data generator for demonstration
-const generateMockResults = (urls: string[]) => {
-  const domains = urls.map((url) => {
-    try {
-      const urlObj = new URL(url.startsWith("http") ? url : `https://${url}`);
-      return urlObj.hostname;
-    } catch {
-      return "example.com";
-    }
-  });
+interface ApiSegment {
+  segment_id: string;
+  score: number;
+  text_preview: string;
+}
 
-  return urls.map((url, idx) => {
-    const toxicityScore = Math.floor(Math.random() * 70) + 15; // 15-85%
-    const numSegments = Math.floor(Math.random() * 5) + 3; // 3-7 segments
+interface ApiResult {
+  url: string;
+  status: "ok" | "error";
+  error?: string | null;
+  crawl_output_dir?: string | null;
+  segments_path?: string | null;
+  toxicity?: {
+    overall?: number | null;
+    by_segment?: ApiSegment[];
+  };
+}
 
-    const sampleTexts = [
-      "Bài viết này cung cấp thông tin hữu ích về chủ đề đang được quan tâm.",
-      "Theo nguồn tin đáng tin cậy, sự kiện này đã thu hút sự chú ý của cộng đồng.",
-      "Nội dung này thật là rác rưởi và vô giá trị, không nên đọc.",
-      "Chúng tôi khuyến nghị người đọc nên tham khảo thêm từ nhiều nguồn khác nhau.",
-      "Đây là một phân tích khách quan về tình hình hiện tại.",
-      "Những lời bình luận độc hại và thiếu văn hóa như thế này cần được lọc bỏ.",
-      "Tác giả đưa ra quan điểm rõ ràng và có căn cứ.",
-      "Thật kinh khủng khi lại có những người như vậy trong xã hội.",
-    ];
+interface AnalyzeResponse {
+  job_id: string;
+  results: ApiResult[];
+}
 
-    const segments = Array.from({ length: numSegments }, (_, i) => {
-      const isToxic = Math.random() < toxicityScore / 100;
-      return {
-        text: sampleTexts[Math.floor(Math.random() * sampleTexts.length)],
-        confidence: Math.random() * 0.3 + (isToxic ? 0.6 : 0.5),
-        isToxic,
-      };
-    });
-
-    return {
-      url,
-      title: `Bài Viết Phân Tích ${idx + 1}`,
-      domain: domains[idx],
-      toxicityScore,
-      toxicSegments: segments,
-    };
-  });
-};
+const API_BASE = "http://localhost:8000";
 
 export default function App() {
   const [currentPage, setCurrentPage] = useState("home");
-  const [analysisResults, setAnalysisResults] = useState<any[]>([]);
+  const [analysisResults, setAnalysisResults] = useState<ApiResult[]>([]);
+  const [jobId, setJobId] = useState<string | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const handleNavigate = (page: string) => {
     setCurrentPage(page);
   };
 
-  const handleAnalyze = (urls: string[]) => {
-    const results = generateMockResults(urls);
-    setAnalysisResults(results);
-    setCurrentPage("results");
+  const handleAnalyze = async (urls: string[]) => {
+    try {
+      setErrorMessage(null);
+      const response = await fetch(`${API_BASE}/api/analyze`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          urls,
+          options: {
+            batch_size: 8,
+            max_length: 256,
+            page_threshold: 0.25,
+            seg_threshold: 0.4,
+          },
+        }),
+      });
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(text || "API request failed");
+      }
+      const data = (await response.json()) as AnalyzeResponse;
+      setJobId(data.job_id);
+      setAnalysisResults(data.results || []);
+      setCurrentPage("results");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error";
+      setErrorMessage(message);
+    }
   };
 
   const handleScanAgain = () => {
     setCurrentPage("home");
     setAnalysisResults([]);
+    setJobId(null);
   };
 
   const handleTryNow = () => {
@@ -77,10 +84,20 @@ export default function App() {
     <div className="min-h-screen">
       <Navigation currentPage={currentPage} onNavigate={handleNavigate} />
 
-      {currentPage === "home" && <HomePage onAnalyze={handleAnalyze} />}
+      {currentPage === "home" && (
+        <HomePage
+          onAnalyze={handleAnalyze}
+          errorMessage={errorMessage}
+          onClearError={() => setErrorMessage(null)}
+        />
+      )}
       
       {currentPage === "results" && (
-        <ResultsPage results={analysisResults} onScanAgain={handleScanAgain} />
+        <ResultsPage
+          results={analysisResults}
+          jobId={jobId}
+          onScanAgain={handleScanAgain}
+        />
       )}
       
       {currentPage === "model" && <ModelPage onTryNow={handleTryNow} />}

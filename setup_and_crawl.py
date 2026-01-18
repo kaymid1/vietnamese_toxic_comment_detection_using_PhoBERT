@@ -217,11 +217,14 @@ def make_driver(timeout: int = 90, headless: bool = True):
 # Hybrid crawl
 # =========================
 
-def crawl_and_save(url: str, segmenter: Segmenter, timeout: int = 90) -> str:
+def hash_url(url: str) -> str:
+    return hashlib.md5(url.encode()).hexdigest()
+
+def crawl_and_save(url: str, segmenter: Segmenter, timeout: int = 90, out_root: str = DATA_DIR) -> dict:
     import trafilatura
 
-    url_hash = hashlib.md5(url.encode()).hexdigest()
-    save_folder = os.path.join(DATA_DIR, url_hash)
+    url_hash = hash_url(url)
+    save_folder = os.path.join(out_root, url_hash)
     os.makedirs(save_folder, exist_ok=True)
 
     start_total = time.time()
@@ -269,7 +272,15 @@ def crawl_and_save(url: str, segmenter: Segmenter, timeout: int = 90) -> str:
         }
         with open(os.path.join(save_folder, "meta.json"), "w", encoding="utf-8") as f:
             json.dump(meta, f, ensure_ascii=False, indent=2)
-        return f"FAILED | {method} | {duration}s"
+        return {
+            "url": url,
+            "url_hash": url_hash,
+            "status": "error",
+            "error": f"Crawl failed via {method}",
+            "output_dir": save_folder,
+            "segments_path": None,
+            "num_segments": 0,
+        }
 
     # success -> segment + save
     segments = segmenter.segment_text(text)
@@ -299,7 +310,17 @@ def crawl_and_save(url: str, segmenter: Segmenter, timeout: int = 90) -> str:
     with open(os.path.join(save_folder, "meta.json"), "w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)
 
-    return f"SUCCESS | {method} | {len(cleaned_segments)} segments | {duration}s"
+    return {
+        "url": url,
+        "url_hash": url_hash,
+        "status": "ok",
+        "error": None,
+        "output_dir": save_folder,
+        "segments_path": os.path.join(save_folder, "segments.jsonl"),
+        "num_segments": len(cleaned_segments),
+        "method": method,
+        "duration_sec": duration,
+    }
 
 def run_crawl():
     from tqdm import tqdm
@@ -316,10 +337,14 @@ def run_crawl():
 
     success_count = 0
     for url in tqdm(URL_LIST):
-        result = crawl_and_save(url.strip(), seg)
-        log_lines.append(f"- {url} → {result}")
-        if "SUCCESS" in result:
+        result = crawl_and_save(url.strip(), seg, out_root=DATA_DIR)
+        status = result.get("status")
+        if status == "ok":
+            line = f"SUCCESS | {result.get('method', 'unknown')} | {result.get('num_segments', 0)} segments | {result.get('duration_sec', 0)}s"
             success_count += 1
+        else:
+            line = f"FAILED | {result.get('error', 'unknown')}"
+        log_lines.append(f"- {url} → {line}")
         time.sleep(3)
 
     log_lines.append(f"\n**Summary**: {success_count}/{len(URL_LIST)} success")
@@ -396,6 +421,36 @@ def main():
 
         ensure_runtime_deps()
         run_crawl()
+
+
+def crawl_urls(urls: List[str], out_dir: str = DATA_DIR, timeout: int = 90) -> List[dict]:
+    """
+    Crawl a list of URLs and return per-URL crawl info.
+    This does NOT auto-install dependencies.
+    """
+    os.makedirs(out_dir, exist_ok=True)
+    ensure_vncorenlp_assets()
+    seg = Segmenter(VNC_JAR_PATH)
+
+    results: List[dict] = []
+    for url in urls:
+        url = url.strip()
+        if not url:
+            continue
+        try:
+            info = crawl_and_save(url, seg, timeout=timeout, out_root=out_dir)
+        except Exception as e:
+            info = {
+                "url": url,
+                "url_hash": hash_url(url),
+                "status": "error",
+                "error": f"Unexpected crawl error: {e}",
+                "output_dir": os.path.join(out_dir, hash_url(url)),
+                "segments_path": None,
+                "num_segments": 0,
+            }
+        results.append(info)
+    return results
 
 
 if __name__ == "__main__":

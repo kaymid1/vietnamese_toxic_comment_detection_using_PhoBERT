@@ -1,2 +1,11 @@
 models_2/
 model.safetensors
+__pycache__/
+*.pyc
+.DS_Store
+.venv/
+venv/
+comprehensive_ui/node_modules/
+comprehensive_ui/package-lock.json
+data/processed/
+data/raw/crawled_urls/

@@ -5,15 +5,17 @@ import { AlertCircle, Brain, FileSearch, TrendingUp } from "lucide-react";
 import { Progress } from "@/app/components/ui/progress";
 
 interface HomePageProps {
-  onAnalyze: (urls: string[]) => void;
+  onAnalyze: (urls: string[]) => Promise<void>;
+  errorMessage?: string | null;
+  onClearError?: () => void;
 }
 
-export function HomePage({ onAnalyze }: HomePageProps) {
+export function HomePage({ onAnalyze, errorMessage, onClearError }: HomePageProps) {
   const [urlInput, setUrlInput] = useState("");
   const [isProcessing, setIsProcessing] = useState(false);
   const [progress, setProgress] = useState(0);
 
-  const handleAnalyze = () => {
+  const handleAnalyze = async () => {
     if (!urlInput.trim()) return;
 
     // Parse URLs (separated by newlines or commas)
@@ -24,23 +26,21 @@ export function HomePage({ onAnalyze }: HomePageProps) {
 
     if (urls.length === 0) return;
 
+    onClearError?.();
     setIsProcessing(true);
-    setProgress(0);
+    setProgress(10);
 
-    // Simulate processing
     const interval = setInterval(() => {
-      setProgress((prev) => {
-        if (prev >= 100) {
-          clearInterval(interval);
-          setTimeout(() => {
-            setIsProcessing(false);
-            onAnalyze(urls);
-          }, 500);
-          return 100;
-        }
-        return prev + 10;
-      });
-    }, 300);
+      setProgress((prev) => (prev >= 90 ? 90 : prev + 10));
+    }, 500);
+
+    try {
+      await onAnalyze(urls);
+      setProgress(100);
+      setTimeout(() => setIsProcessing(false), 300);
+    } finally {
+      clearInterval(interval);
+    }
   };
 
   return (
@@ -148,6 +148,12 @@ export function HomePage({ onAnalyze }: HomePageProps) {
                   </span>
                 </div>
                 <Progress value={progress} className="h-2" />
+              </div>
+            )}
+
+            {errorMessage && (
+              <div className="mb-6 p-4 rounded-lg border border-red-200 bg-red-50 text-sm text-red-700">
+                {errorMessage}
               </div>
             )}
 

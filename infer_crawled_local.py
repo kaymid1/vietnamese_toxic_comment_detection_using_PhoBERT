@@ -23,7 +23,7 @@ Notes:
 
 import json
 import argparse
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 from pathlib import Path
 
 import torch
@@ -101,29 +101,22 @@ def iter_url_folders(root_dir: Path) -> List[Path]:
     return [p for p in root_dir.iterdir() if p.is_dir()]
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--model_path", type=str, required=True, help="Local checkpoint dir (e.g. ./experiments/.../checkpoint-best)")
-    ap.add_argument("--tokenizer_name", type=str, default="vinai/phobert-base", help="HF tokenizer name or local tokenizer path")
-    ap.add_argument("--data_dir", type=str, default="data/raw/crawled_urls", help="Root of crawled url folders")
-    ap.add_argument("--out_dir", type=str, default="data/processed", help="Output directory")
-
-    ap.add_argument("--max_length", type=int, default=256)
-    ap.add_argument("--batch_size", type=int, default=8)
-
-    # Thresholds
-    ap.add_argument("--seg_threshold", type=float, default=0.5, help="Segment toxic label threshold (prob > seg_threshold => toxic)")
-    ap.add_argument("--page_threshold", type=float, default=0.25, help="Page toxic threshold over ratio of toxic segments")
-
-    # Device & perf
-    ap.add_argument("--device", type=str, default="auto", choices=["auto", "cuda", "mps", "cpu"])
-    ap.add_argument("--fp16", action="store_true", help="Use fp16 on CUDA (ignored on CPU/MPS)")
-    ap.add_argument("--limit_pages", type=int, default=0, help="Debug: process only first N pages (0 = all)")
-    ap.add_argument("--quiet", action="store_true")
-
-    args = ap.parse_args()
-
-    model_path = Path(args.model_path).expanduser()
+def infer_crawled(
+    model_path: str,
+    data_dir: str,
+    out_dir: str,
+    batch_size: int = 8,
+    max_length: int = 256,
+    page_threshold: float = 0.25,
+    seg_threshold: float = 0.5,
+    tokenizer_name: str = "vinai/phobert-base",
+    device: str = "auto",
+    fp16: bool = False,
+    limit_pages: int = 0,
+    quiet: bool = False,
+    only_url_hashes: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    model_path = Path(model_path).expanduser()
     resolved_model_path = model_path.resolve()
     if not resolved_model_path.exists():
         cwd = Path.cwd()
@@ -150,20 +143,20 @@ def main():
             f"{missing_str}. Files found: {files}"
         )
 
-    data_dir = Path(args.data_dir)
-    out_dir = Path(args.out_dir)
+    data_dir = Path(data_dir)
+    out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    device = pick_device(args.device)
-    if not args.quiet:
+    device = pick_device(device)
+    if not quiet:
         print(f"[INFO] Device: {device}")
 
     # Load tokenizer & model
-    if not args.quiet:
-        print("[INFO] Loading tokenizer:", args.tokenizer_name)
-    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_name)
+    if not quiet:
+        print("[INFO] Loading tokenizer:", tokenizer_name)
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
 
-    if not args.quiet:
+    if not quiet:
         print("[INFO] Loading model from local path:", str(resolved_model_path))
     config = AutoConfig.from_pretrained(
         str(resolved_model_path),
@@ -177,9 +170,9 @@ def main():
 
     # dtype / device placement
     model.to(device)
-    if args.fp16 and device.type == "cuda":
+    if fp16 and device.type == "cuda":
         model.half()
-        if not args.quiet:
+        if not quiet:
             print("[INFO] Using FP16 on CUDA")
     model.eval()
 
@@ -190,12 +183,22 @@ def main():
 
     # Scan folders
     url_folders = iter_url_folders(data_dir)
-    if args.limit_pages and args.limit_pages > 0:
-        url_folders = url_folders[: args.limit_pages]
+    if only_url_hashes:
+        allow = set(only_url_hashes)
+        url_folders = [p for p in url_folders if p.name in allow]
+    if limit_pages and limit_pages > 0:
+        url_folders = url_folders[: limit_pages]
 
     if not url_folders:
         print(f"[WARN] No url folders found in: {data_dir}")
-        return
+        return {
+            "page_results": [],
+            "segment_results": [],
+            "out_dir": str(out_dir),
+            "page_out_path": str(out_dir / "page_level_results.json"),
+            "seg_out_path": str(out_dir / "crawled_predictions.jsonl"),
+            "csv_out_path": str(out_dir / "page_level_results.csv"),
+        }
 
     predictions_all: List[Dict[str, Any]] = []
     page_results: List[Dict[str, Any]] = []
@@ -220,13 +223,13 @@ def main():
         page_preds: List[Dict[str, Any]] = []
 
         # Batch inference
-        for i in range(0, len(segments), args.batch_size):
-            batch_texts = segments[i : i + args.batch_size]
+        for i in range(0, len(segments), batch_size):
+            batch_texts = segments[i : i + batch_size]
             probs = predict_probs(
-                batch_texts, tokenizer, model, device=device, max_length=args.max_length
+                batch_texts, tokenizer, model, device=device, max_length=max_length
             )
             for text, prob in zip(batch_texts, probs):
-                label = 1 if prob > args.seg_threshold else 0
+                label = 1 if prob > seg_threshold else 0
                 page_preds.append(
                     {
                         "text": text,
@@ -239,7 +242,7 @@ def main():
         total_segs = len(page_preds)
         toxic_count = sum(1 for p in page_preds if p["toxic_label"] == 1)
         toxic_ratio = toxic_count / total_segs if total_segs else 0.0
-        page_toxic = 1 if toxic_ratio > args.page_threshold else 0
+        page_toxic = 1 if toxic_ratio > page_threshold else 0
         avg_prob = sum(p["toxic_prob"] for p in page_preds) / total_segs if total_segs else 0.0
 
         top5 = sorted(page_preds, key=lambda x: x["toxic_prob"], reverse=True)[:5]
@@ -285,28 +288,75 @@ def main():
     df_pages.to_csv(csv_out_path, index=False, encoding="utf-8-sig")
 
     # Summary
-    print("\n" + "=" * 60)
-    print(f"PAGE-LEVEL SUMMARY (max_length={args.max_length})")
-    print("=" * 60)
-    if len(df_pages) > 0:
-        cols = ["url", "total_segments", "toxic_ratio", "page_toxic", "avg_toxic_prob", "method"]
-        cols = [c for c in cols if c in df_pages.columns]
-        print(df_pages[cols].to_string(index=False))
+    if not quiet:
+        print("\n" + "=" * 60)
+        print(f"PAGE-LEVEL SUMMARY (max_length={max_length})")
+        print("=" * 60)
+        if len(df_pages) > 0:
+            cols = ["url", "total_segments", "toxic_ratio", "page_toxic", "avg_toxic_prob", "method"]
+            cols = [c for c in cols if c in df_pages.columns]
+            print(df_pages[cols].to_string(index=False))
 
-        print("\nMetrics tổng hợp:")
-        print(f"- Số trang processed: {len(df_pages)}")
-        print(f"- Avg toxic_ratio trên tất cả pages: {df_pages['toxic_ratio'].mean():.4f}")
-        print(f"- % trang toxic (page_threshold {args.page_threshold}): {(df_pages['page_toxic'] == 1).mean() * 100:.2f}%")
-        print(f"- Avg segments/page: {df_pages['total_segments'].mean():.1f}")
-    else:
-        print("[WARN] No pages produced results. Check your data_dir structure & segments.jsonl existence.")
-    print("=" * 60)
+            print("\nMetrics tổng hợp:")
+            print(f"- Số trang processed: {len(df_pages)}")
+            print(f"- Avg toxic_ratio trên tất cả pages: {df_pages['toxic_ratio'].mean():.4f}")
+            print(f"- % trang toxic (page_threshold {page_threshold}): {(df_pages['page_toxic'] == 1).mean() * 100:.2f}%")
+            print(f"- Avg segments/page: {df_pages['total_segments'].mean():.1f}")
+        else:
+            print("[WARN] No pages produced results. Check your data_dir structure & segments.jsonl existence.")
+        print("=" * 60)
 
-    print("\nKết quả đã lưu tại:")
-    print(f"- {seg_out_path}  (segment-level)")
-    print(f"- {page_out_path}  (page-level json)")
-    print(f"- {csv_out_path}   (page-level csv)")
+        print("\nKết quả đã lưu tại:")
+        print(f"- {seg_out_path}  (segment-level)")
+        print(f"- {page_out_path}  (page-level json)")
+        print(f"- {csv_out_path}   (page-level csv)")
 
+    return {
+        "page_results": page_results,
+        "segment_results": predictions_all,
+        "out_dir": str(out_dir),
+        "page_out_path": str(page_out_path),
+        "seg_out_path": str(seg_out_path),
+        "csv_out_path": str(csv_out_path),
+    }
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--model_path", type=str, required=True, help="Local checkpoint dir (e.g. ./experiments/.../checkpoint-best)")
+    ap.add_argument("--tokenizer_name", type=str, default="vinai/phobert-base", help="HF tokenizer name or local tokenizer path")
+    ap.add_argument("--data_dir", type=str, default="data/raw/crawled_urls", help="Root of crawled url folders")
+    ap.add_argument("--out_dir", type=str, default="data/processed", help="Output directory")
+
+    ap.add_argument("--max_length", type=int, default=256)
+    ap.add_argument("--batch_size", type=int, default=8)
+
+    # Thresholds
+    ap.add_argument("--seg_threshold", type=float, default=0.5, help="Segment toxic label threshold (prob > seg_threshold => toxic)")
+    ap.add_argument("--page_threshold", type=float, default=0.25, help="Page toxic threshold over ratio of toxic segments")
+
+    # Device & perf
+    ap.add_argument("--device", type=str, default="auto", choices=["auto", "cuda", "mps", "cpu"])
+    ap.add_argument("--fp16", action="store_true", help="Use fp16 on CUDA (ignored on CPU/MPS)")
+    ap.add_argument("--limit_pages", type=int, default=0, help="Debug: process only first N pages (0 = all)")
+    ap.add_argument("--quiet", action="store_true")
+
+    args = ap.parse_args()
+
+    infer_crawled(
+        model_path=args.model_path,
+        data_dir=args.data_dir,
+        out_dir=args.out_dir,
+        batch_size=args.batch_size,
+        max_length=args.max_length,
+        page_threshold=args.page_threshold,
+        seg_threshold=args.seg_threshold,
+        tokenizer_name=args.tokenizer_name,
+        device=args.device,
+        fp16=args.fp16,
+        limit_pages=args.limit_pages,
+        quiet=args.quiet,
+    )
 
 if __name__ == "__main__":
     main()
