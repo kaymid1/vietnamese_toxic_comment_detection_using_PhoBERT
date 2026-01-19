@@ -67,5 +67,126 @@ curl -X POST http://localhost:8000/api/analyze \
 ```
 
 ### Notes
-- CORS: backend allows `http://localhost:5173` and `http://127.0.0.1:5173` by default.
+- CORS: backend currently allows all origins (`*`) for ease of local/ngrok testing.
 - Default model path: `models_2/phobert/new` (override with `options.model_path` if needed).
+
+## Expose Backend via ngrok
+
+Public URL (reserved):
+`https://living-rare-ram.ngrok-free.app`
+
+### 1) Start server + ngrok
+```bash
+./scripts/run_server_ngrok.sh
+```
+
+The script:
+- Activates `venv` or `.venv` if present.
+- Starts `uvicorn` on `0.0.0.0:8000`.
+- Starts ngrok with:
+  `ngrok http 8000 --domain=living-rare-ram.ngrok-free.app`
+- Warns if `~/.ngrok/ngrok.yml` or `NGROK_AUTHTOKEN` is missing.
+
+### 2) Sample request (public)
+```bash
+curl -X POST https://living-rare-ram.ngrok-free.app/api/analyze \
+  -H "Content-Type: application/json" \
+  -d '{
+    "urls": ["https://example.com"],
+    "options": {
+      "batch_size": 8,
+      "max_length": 256,
+      "page_threshold": 0.25,
+      "seg_threshold": 0.4
+    }
+  }'
+```
+
+### ngrok config (example only)
+```yaml
+version: "2"
+authtoken: <NGROK_AUTHTOKEN>
+tunnels:
+  backend:
+    addr: 8000
+    proto: http
+    domain: living-rare-ram.ngrok-free.app
+```
+
+Note: ngrok tunnel depends on the running process; keep the server + ngrok alive.
+
+## Run with ngrok (Free tier, 2 tunnels)
+
+This uses a single ngrok agent session with two tunnels: `api` (fixed domain) + `ui` (dynamic).
+
+### 1) Run backend
+```bash
+./scripts/run_backend.sh
+```
+
+### 2) Run UI (Vite)
+```bash
+VITE_API_BASE_URL=https://living-rare-ram.ngrok-free.app ./scripts/run_ui.sh
+```
+
+### 3) Start ngrok tunnels
+```bash
+./scripts/run_ngrok_all.sh
+```
+
+### ngrok config (example only)
+```yaml
+version: "2"
+authtoken: <NGROK_AUTHTOKEN>
+tunnels:
+  api:
+    addr: 8000
+    proto: http
+    domain: living-rare-ram.ngrok-free.app
+  ui:
+    addr: 5173
+    proto: http
+```
+
+### How it works
+- API domain is fixed: `https://living-rare-ram.ngrok-free.app`
+- UI domain is assigned by ngrok each time; use the URL printed by ngrok.
+- UI reads API base from `VITE_API_BASE_URL` and calls `${API_BASE}/api/analyze`.
+
+### End-to-end test
+1) Open the public UI URL printed by ngrok (for the `ui` tunnel).
+2) Submit a URL; UI will call the API via the fixed ngrok domain.
+
+### Notes
+- Restarting ngrok changes the UI URL, but API domain stays the same.
+- Keep backend/UI/ngrok processes running for the tunnel to work.
+
+## Quick Restart Guide (UI + Backend + ngrok)
+
+Backend (8000)  <-- API  
+UI (5173)       <-- Vite dev  
+ngrok           <-- expose cả 2 (1 agent, 2 tunnels)
+
+This setup requires **3 terminals**:
+- Terminal 1: Backend
+- Terminal 2: UI
+- Terminal 3: ngrok
+
+Run in this exact order:
+
+```text
+Terminal 1 — Backend API
+./scripts/run_backend.sh
+
+Terminal 2 — Frontend UI
+VITE_API_BASE_URL=https://living-rare-ram.ngrok-free.app ./scripts/run_ui.sh
+
+Terminal 3 — ngrok (2 tunnels, 1 agent)
+./scripts/run_ngrok_all.sh
+```
+
+After everything is running:
+- Open the **UI public URL** printed by ngrok (the `ui` tunnel). It will look like `https://<random>.ngrok-free.app`.
+- The UI will call the API at `https://living-rare-ram.ngrok-free.app` automatically.
+
+If you only see JSON like `{"status":"ok"...}`, you opened the API domain. Use the **UI** tunnel URL instead.
