@@ -18,6 +18,7 @@ interface ApiResult {
   error?: string | null;
   crawl_output_dir?: string | null;
   segments_path?: string | null;
+  videos?: Record<string, unknown>[];
   toxicity?: {
     overall?: number | null;
     by_segment?: ApiSegment[];
@@ -59,6 +60,7 @@ export default function App() {
             max_length: 256,
             page_threshold: 0.25,
             seg_threshold: 0.4,
+            enable_video: true,
           },
         }),
       });

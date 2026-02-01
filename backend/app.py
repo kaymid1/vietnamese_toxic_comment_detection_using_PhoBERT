@@ -68,6 +68,7 @@ class AnalyzeOptions(BaseModel):
     page_threshold: float = Field(default=0.25, ge=0.0, le=1.0)
     seg_threshold: float = Field(default=0.4, ge=0.0, le=1.0)
     model_path: Optional[str] = None
+    enable_video: bool = False
 
 
 class AnalyzeRequest(BaseModel):
@@ -128,6 +129,93 @@ def load_segment_results(out_dir: Path) -> List[Dict[str, Any]]:
     return results
 
 
+def load_video_results(url_hash: str) -> List[Dict[str, Any]]:
+    video_path = DATA_DIR / url_hash / "video_data.jsonl"
+    if not video_path.exists():
+        return []
+    results: List[Dict[str, Any]] = []
+    with video_path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                results.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return results
+
+
+def build_merged_segments(
+    url_hash: str,
+    data_dir: Path,
+    merged_root: Path,
+) -> bool:
+    src_folder = data_dir / url_hash
+    seg_path = src_folder / "segments.jsonl"
+    meta_path = src_folder / "meta.json"
+    video_path = src_folder / "video_data.jsonl"
+    if not (seg_path.exists() and meta_path.exists()):
+        return False
+
+    merged_folder = merged_root / url_hash
+    merged_folder.mkdir(parents=True, exist_ok=True)
+
+    try:
+        meta_text = meta_path.read_text(encoding="utf-8")
+        (merged_folder / "meta.json").write_text(meta_text, encoding="utf-8")
+    except Exception:
+        return False
+
+    segments: List[str] = []
+    try:
+        with seg_path.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                    text = obj.get("text")
+                    if text:
+                        segments.append(text)
+                except json.JSONDecodeError:
+                    continue
+    except Exception:
+        return False
+
+    if video_path.exists():
+        try:
+            with video_path.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    transcript = obj.get("transcript") or []
+                    for seg in transcript:
+                        text = seg.get("text") if isinstance(seg, dict) else None
+                        if text:
+                            segments.append(text)
+        except Exception:
+            pass
+
+    if not segments:
+        return False
+
+    try:
+        with (merged_folder / "segments.jsonl").open("w", encoding="utf-8") as f:
+            for text in segments:
+                f.write(json.dumps({"text": text}, ensure_ascii=False) + "\n")
+    except Exception:
+        return False
+
+    return True
+
+
 def normalize_score(value: Any) -> Optional[float]:
     if value is None:
         return None
@@ -158,15 +246,38 @@ def analyze(request: AnalyzeRequest) -> Dict[str, Any]:
 
         logger.info("Job %s: start analyze for %s urls", job_id, len(urls))
         logger.info("Job %s: crawling", job_id)
-        crawl_results = crawl_urls(urls, out_dir=str(DATA_DIR))
+        crawl_results = crawl_urls(urls, out_dir=str(DATA_DIR), enable_video=options.enable_video)
+        for r in crawl_results:
+            logger.info(
+                "Job %s: crawl result url=%s status=%s method=%s segments_path=%s error=%s",
+                job_id,
+                r.get("url"),
+                r.get("status"),
+                r.get("method"),
+                r.get("segments_path"),
+                r.get("error"),
+            )
 
         ok_hashes = [r["url_hash"] for r in crawl_results if r.get("status") == "ok"]
+
+        infer_data_dir = DATA_DIR
+        if options.enable_video and ok_hashes:
+            merged_root = out_dir / "merged_crawl"
+            merged_root.mkdir(parents=True, exist_ok=True)
+            merged_ok: List[str] = []
+            for h in ok_hashes:
+                if build_merged_segments(h, DATA_DIR, merged_root):
+                    merged_ok.append(h)
+            if merged_ok:
+                logger.info("Job %s: using merged segments (text+video) for %s urls", job_id, len(merged_ok))
+                infer_data_dir = merged_root
+                ok_hashes = merged_ok
 
         if ok_hashes:
             logger.info("Job %s: running inference on %s crawled urls", job_id, len(ok_hashes))
             infer_crawled(
                 model_path=str(model_path),
-                data_dir=str(DATA_DIR),
+                data_dir=str(infer_data_dir),
                 out_dir=str(out_dir),
                 batch_size=options.batch_size,
                 max_length=options.max_length,
@@ -201,6 +312,12 @@ def analyze(request: AnalyzeRequest) -> Dict[str, Any]:
 
             segments_path = crawl.get("segments_path")
             if status == "ok" and (not segments_path or not Path(segments_path).exists()):
+                logger.warning(
+                    "Job %s: segments missing for url=%s path=%s",
+                    job_id,
+                    url,
+                    segments_path,
+                )
                 status = "error"
                 error = "segments.jsonl not found after crawl"
 
@@ -208,6 +325,7 @@ def analyze(request: AnalyzeRequest) -> Dict[str, Any]:
             if status == "ok":
                 page_info = page_by_hash.get(url_hash) or page_by_url.get(url)
                 if not page_info:
+                    logger.warning("Job %s: no inference result for url=%s hash=%s", job_id, url, url_hash)
                     status = "error"
                     error = "No inference result for this URL"
 
@@ -238,6 +356,7 @@ def analyze(request: AnalyzeRequest) -> Dict[str, Any]:
                     "error": error,
                     "crawl_output_dir": to_relative(crawl.get("output_dir")),
                     "segments_path": to_relative(segments_path),
+                    "videos": load_video_results(url_hash),
                     "toxicity": {
                         "overall": overall,
                         "by_segment": by_segment,

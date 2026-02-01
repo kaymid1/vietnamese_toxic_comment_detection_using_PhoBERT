@@ -18,6 +18,21 @@ interface ResultData {
   error?: string | null;
   crawl_output_dir?: string | null;
   segments_path?: string | null;
+  videos?: Array<{
+    video_id?: string | null;
+    platform?: string | null;
+    video_url?: string | null;
+    page_url?: string | null;
+    title?: string | null;
+    channel?: string | null;
+    upload_date?: string | null;
+    duration?: number | null;
+    view_count?: number | null;
+    transcript?: Array<{ text: string; start?: number; duration?: number }> | null;
+    language?: string | null;
+    has_auto_generated?: boolean | null;
+    error?: string | null;
+  }>;
   toxicity?: {
     overall?: number | null;
     by_segment?: SegmentData[];
@@ -72,6 +87,7 @@ export function ResultsPage({ results, jobId, thresholds, onScanAgain }: Results
           const toxicCount = segments.filter((s) => s.score >= segThreshold).length;
           const safeCount = segments.length - toxicCount;
           const isToxic = overallPercent !== null ? overallPercent > 50 : false;
+          const videos = result.videos ?? [];
           const topSegments = [...segments]
             .sort((a, b) => b.score - a.score)
             .slice(0, 3);
@@ -328,6 +344,57 @@ export function ResultsPage({ results, jobId, thresholds, onScanAgain }: Results
                           }
                         </p>
                       </div>
+                    </div>
+                  </div>
+
+                  {/* Videos */}
+                  <div className="mt-8">
+                    <h3 className="text-xl mb-4" style={{ color: "var(--viet-primary)" }}>
+                      Video Phát Hiện
+                    </h3>
+                    {videos.length === 0 && (
+                      <p className="text-sm text-gray-500">Không phát hiện video.</p>
+                    )}
+                    <div className="space-y-4">
+                      {videos.map((video, vIdx) => (
+                        <div key={`${video.video_id || vIdx}`} className="p-4 rounded-lg border border-gray-200 bg-white">
+                          <div className="flex items-start justify-between gap-4">
+                            <div className="flex-1">
+                              <p className="text-sm text-gray-600">
+                                {video.platform || "video"} {video.video_id ? `• ${video.video_id}` : ""}
+                              </p>
+                              <p className="text-base font-semibold mt-1" style={{ color: "var(--viet-primary)" }}>
+                                {video.title || "Untitled"}
+                              </p>
+                              {video.video_url && (
+                                <p className="text-xs text-gray-500 break-all mt-1">{video.video_url}</p>
+                              )}
+                              {video.error && (
+                                <p className="text-xs text-red-600 mt-2">Lỗi video: {video.error}</p>
+                              )}
+                              <div className="mt-2 text-xs text-gray-600">
+                                {video.channel && <span>Kênh: {video.channel} </span>}
+                                {video.upload_date && <span>• Ngày: {video.upload_date} </span>}
+                                {typeof video.duration === "number" && <span>• {Math.round(video.duration)}s </span>}
+                              </div>
+                            </div>
+                          </div>
+                          {video.transcript && video.transcript.length > 0 && (
+                            <details className="mt-3 text-sm text-gray-700">
+                              <summary className="cursor-pointer">
+                                Xem transcript ({video.transcript.length} dòng)
+                              </summary>
+                              <div className="mt-2 space-y-1">
+                                {video.transcript.slice(0, 5).map((seg, sIdx) => (
+                                  <p key={sIdx} className="text-xs text-gray-700">
+                                    {seg.text}
+                                  </p>
+                                ))}
+                              </div>
+                            </details>
+                          )}
+                        </div>
+                      ))}
                     </div>
                   </div>
                 </>
