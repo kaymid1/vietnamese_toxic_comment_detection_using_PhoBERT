@@ -40,7 +40,7 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
   // Model comparison data
   const comparisonData = [
     { model: "TF-IDF + Logistic Regression", macroF1: 0.62, toxicF1: 0.35 },
-    { model: "PhoBERT (Fine-tuned)", macroF1: 0.71, toxicF1: 0.49 },
+    { model: "PhoBERT (Fine-tuned)", macroF1: 0.73, toxicF1: 0.52 },
   ];
 
   return (
@@ -138,7 +138,7 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
               <h4 className="text-sm text-gray-600 mb-2">Macro F1-Score</h4>
               <div className="flex items-end gap-2">
                 <span className="text-4xl" style={{ color: "var(--viet-primary)" }}>
-                  0.71
+                  0.73
                 </span>
                 <Badge className="mb-2" style={{ backgroundColor: "var(--viet-safe)" }}>
                   Tốt
@@ -153,7 +153,7 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
               <h4 className="text-sm text-gray-600 mb-2">Toxic Class F1</h4>
               <div className="flex items-end gap-2">
                 <span className="text-4xl" style={{ color: "var(--viet-toxic)" }}>
-                  0.49
+                  0.52
                 </span>
                 <Badge className="mb-2 bg-orange-500">Trung Bình</Badge>
               </div>
@@ -208,9 +208,9 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
                   </TableRow>
                   <TableRow>
                     <TableCell>F1-Score</TableCell>
-                    <TableCell className="text-right font-medium">0.49</TableCell>
+                    <TableCell className="text-right font-medium">0.52</TableCell>
                     <TableCell className="text-right font-medium">0.93</TableCell>
-                    <TableCell className="text-right font-medium">0.71</TableCell>
+                    <TableCell className="text-right font-medium">0.73</TableCell>
                   </TableRow>
                 </TableBody>
               </Table>

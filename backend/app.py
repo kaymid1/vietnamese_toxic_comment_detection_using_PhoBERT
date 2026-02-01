@@ -227,6 +227,7 @@ def analyze(request: AnalyzeRequest) -> Dict[str, Any]:
                         "segment_id": f"{url_hash}:{idx}",
                         "score": score if score is not None else 0.0,
                         "text_preview": text[:160],
+                        "text": text,
                     }
                 )
 
@@ -245,7 +246,14 @@ def analyze(request: AnalyzeRequest) -> Dict[str, Any]:
             )
 
         logger.info("Job %s: completed", job_id)
-        return {"job_id": job_id, "results": response_results}
+        return {
+            "job_id": job_id,
+            "thresholds": {
+                "seg_threshold": options.seg_threshold,
+                "page_threshold": options.page_threshold,
+            },
+            "results": response_results,
+        }
     except HTTPException:
         raise
     except Exception as exc:

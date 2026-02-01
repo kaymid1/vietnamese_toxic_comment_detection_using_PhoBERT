@@ -9,6 +9,7 @@ interface ApiSegment {
   segment_id: string;
   score: number;
   text_preview: string;
+  text?: string;
 }
 
 interface ApiResult {
@@ -25,6 +26,10 @@ interface ApiResult {
 
 interface AnalyzeResponse {
   job_id: string;
+  thresholds?: {
+    seg_threshold?: number;
+    page_threshold?: number;
+  };
   results: ApiResult[];
 }
 
@@ -35,6 +40,7 @@ export default function App() {
   const [analysisResults, setAnalysisResults] = useState<ApiResult[]>([]);
   const [jobId, setJobId] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [thresholds, setThresholds] = useState<AnalyzeResponse["thresholds"] | null>(null);
 
   const handleNavigate = (page: string) => {
     setCurrentPage(page);
@@ -62,6 +68,7 @@ export default function App() {
       }
       const data = (await response.json()) as AnalyzeResponse;
       setJobId(data.job_id);
+      setThresholds(data.thresholds || null);
       setAnalysisResults(data.results || []);
       setCurrentPage("results");
     } catch (error) {
@@ -74,6 +81,7 @@ export default function App() {
     setCurrentPage("home");
     setAnalysisResults([]);
     setJobId(null);
+    setThresholds(null);
   };
 
   const handleTryNow = () => {
@@ -96,6 +104,7 @@ export default function App() {
         <ResultsPage
           results={analysisResults}
           jobId={jobId}
+          thresholds={thresholds}
           onScanAgain={handleScanAgain}
         />
       )}

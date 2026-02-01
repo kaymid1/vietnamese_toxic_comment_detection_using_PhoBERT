@@ -1,13 +1,15 @@
 import { Button } from "@/app/components/ui/button";
 import { Card } from "@/app/components/ui/card";
 import { Progress } from "@/app/components/ui/progress";
-import { AlertTriangle, CheckCircle, Download, ExternalLink, RotateCcw } from "lucide-react";
-import { PieChart, Pie, Cell, ResponsiveContainer, Legend, Tooltip } from "recharts";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/app/components/ui/tooltip";
+import { AlertTriangle, CheckCircle, Download, ExternalLink, Info, RotateCcw } from "lucide-react";
+import { PieChart, Pie, Cell, ResponsiveContainer, Legend, Tooltip as RechartTooltip } from "recharts";
 
 interface SegmentData {
   segment_id: string;
   score: number;
   text_preview: string;
+  text?: string;
 }
 
 interface ResultData {
@@ -25,6 +27,10 @@ interface ResultData {
 interface ResultsPageProps {
   results: ResultData[];
   jobId?: string | null;
+  thresholds?: {
+    seg_threshold?: number;
+    page_threshold?: number;
+  } | null;
   onScanAgain: () => void;
 }
 
@@ -37,7 +43,7 @@ const parseDomain = (url: string) => {
   }
 };
 
-export function ResultsPage({ results, jobId, onScanAgain }: ResultsPageProps) {
+export function ResultsPage({ results, jobId, thresholds, onScanAgain }: ResultsPageProps) {
   return (
     <div style={{ backgroundColor: "var(--viet-bg)" }} className="min-h-screen py-12 px-4 sm:px-6 lg:px-8">
       <div className="max-w-6xl mx-auto">
@@ -62,9 +68,13 @@ export function ResultsPage({ results, jobId, onScanAgain }: ResultsPageProps) {
           const segments = result.toxicity?.by_segment ?? [];
           const overallScore = result.toxicity?.overall;
           const overallPercent = typeof overallScore === "number" ? Math.round(overallScore * 100) : null;
-          const toxicCount = segments.filter((s) => s.score >= 0.5).length;
+          const segThreshold = thresholds?.seg_threshold ?? 0.5;
+          const toxicCount = segments.filter((s) => s.score >= segThreshold).length;
           const safeCount = segments.length - toxicCount;
           const isToxic = overallPercent !== null ? overallPercent > 50 : false;
+          const topSegments = [...segments]
+            .sort((a, b) => b.score - a.score)
+            .slice(0, 3);
 
           return (
             <Card key={index} className="bg-white p-8 mb-6 shadow-lg">
@@ -100,9 +110,19 @@ export function ResultsPage({ results, jobId, onScanAgain }: ResultsPageProps) {
                   {/* Toxicity Score */}
                   <div className="mb-8">
                     <div className="flex items-center justify-between mb-3">
-                      <h3 className="text-xl" style={{ color: "var(--viet-primary)" }}>
-                        Điểm Độc Hại Tổng Thể
-                      </h3>
+                <h3 className="text-xl flex items-center gap-2" style={{ color: "var(--viet-primary)" }}>
+                  Điểm Độc Hại Tổng Thể
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <span className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-blue-50 text-blue-700">
+                        <Info className="w-4 h-4" />
+                      </span>
+                    </TooltipTrigger>
+                    <TooltipContent side="top">
+                      Điểm này là ước lượng rủi ro ở mức toàn trang (tính từ xác suất mô hình trên các đoạn), không đồng nghĩa chắc chắn có đoạn bị gắn nhãn độc hại.
+                    </TooltipContent>
+                  </Tooltip>
+                </h3>
                       <span className="text-3xl" style={{ 
                         color: isToxic ? "var(--viet-toxic)" : "var(--viet-safe)" 
                       }}>
@@ -147,11 +167,11 @@ export function ResultsPage({ results, jobId, onScanAgain }: ResultsPageProps) {
                             <Cell fill="var(--viet-toxic)" />
                             <Cell fill="var(--viet-safe)" />
                           </Pie>
-                          <Tooltip />
-                          <Legend />
-                        </PieChart>
-                      </ResponsiveContainer>
-                    </div>
+                    <RechartTooltip />
+                    <Legend />
+                  </PieChart>
+                </ResponsiveContainer>
+              </div>
 
                     {/* Stats */}
                     <div className="space-y-4">
@@ -174,9 +194,64 @@ export function ResultsPage({ results, jobId, onScanAgain }: ResultsPageProps) {
                           <span className="text-xl" style={{ color: "var(--viet-safe)" }}>
                             {safeCount}
                           </span>
+                </div>
+              </div>
+            </div>
+
+            {segments.length > 0 && (
+              <div className="mb-8">
+                <h3 className="text-xl mb-4" style={{ color: "var(--viet-primary)" }}>
+                  Đoạn có rủi ro cao nhất (Top 3)
+                </h3>
+                <div className="space-y-3">
+                  {topSegments.map((segment, idx) => {
+                    const segmentIsToxic = segment.score >= segThreshold;
+                    const percent = (segment.score * 100).toFixed(1);
+                    const fullText = segment.text || segment.text_preview;
+                    return (
+                      <div
+                        key={segment.segment_id || idx}
+                        className="p-4 rounded-lg border border-gray-200 bg-white"
+                      >
+                        <div className="flex items-start justify-between gap-4 mb-2">
+                          <div className="flex items-center gap-3">
+                            <span className="text-sm font-medium text-gray-600">#{idx + 1}</span>
+                            <span className="text-sm font-semibold" style={{ color: "var(--viet-primary)" }}>
+                              {percent}%
+                            </span>
+                          </div>
+                          <span
+                            className={`text-xs px-2 py-1 rounded-full ${
+                              segmentIsToxic ? "bg-red-100 text-red-700" : "bg-yellow-100 text-yellow-800"
+                            }`}
+                          >
+                            {segmentIsToxic ? "Độc hại (>= seg_threshold)" : "Rủi ro (chưa vượt ngưỡng)"}
+                          </span>
                         </div>
+                        <details className="text-sm text-gray-700">
+                          <summary className="cursor-pointer">
+                            {segment.text_preview}
+                          </summary>
+                          <div className="mt-2 flex items-center justify-between gap-3">
+                            <p className="whitespace-pre-wrap flex-1">{fullText}</p>
+                            <button
+                              type="button"
+                              className="text-xs text-blue-700 hover:underline"
+                              onClick={() => navigator.clipboard?.writeText(fullText)}
+                            >
+                              Copy
+                            </button>
+                          </div>
+                        </details>
                       </div>
-                    </div>
+                    );
+                  })}
+                </div>
+                <p className="text-xs text-gray-500 mt-3">
+                  Các đoạn dưới đây có xác suất độc hại cao nhất theo mô hình. Chúng có thể chưa đủ để được gắn nhãn ‘Độc hại’ nếu chưa vượt ngưỡng seg_threshold.
+                </p>
+              </div>
+            )}
                   </div>
 
                   {/* Content Explainability */}
@@ -191,7 +266,7 @@ export function ResultsPage({ results, jobId, onScanAgain }: ResultsPageProps) {
                     )}
                     <div className="space-y-3">
                       {segments.map((segment, idx) => {
-                        const segmentIsToxic = segment.score >= 0.5;
+                        const segmentIsToxic = segment.score >= segThreshold;
                         return (
                           <div
                             key={segment.segment_id || idx}
