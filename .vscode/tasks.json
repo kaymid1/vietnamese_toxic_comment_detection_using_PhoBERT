@@ -1,0 +1,54 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Run Backend",
+      "type": "shell",
+      "command": "./scripts/run_backend.sh",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "isBackground": true,
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": false,
+        "panel": "dedicated",
+        "group": "servers",
+        "clear": false,
+        "showReuseMessage": false
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Run UI",
+      "type": "shell",
+      "command": "./scripts/run_ui.sh",
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "VITE_API_BASE_URL": "https://living-rare-ram.ngrok-free.app"
+        }
+      },
+      "isBackground": true,
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": false,
+        "panel": "dedicated",
+        "group": "servers",
+        "clear": false,
+        "showReuseMessage": false
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Run App",
+      "dependsOrder": "parallel",
+      "dependsOn": [
+        "Run Backend",
+        "Run UI"
+      ]
+    }
+  ]
+}
