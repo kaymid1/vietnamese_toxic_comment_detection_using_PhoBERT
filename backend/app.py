@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from setup_and_crawl import crawl_urls
-from infer_crawled_local import infer_crawled
+from backup_infer_crawled_local import infer_crawled
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = BASE_DIR / "data" / "raw" / "crawled_urls"

@@ -1,266 +1,96 @@
 [
   {
-    "url_hash":"5fd540408b8760415dc9c517b0873a10",
-    "url":"https:\/\/vnexpress.net\/giai-tri",
+    "url_hash":"1f36c55dd5f0ba10c573e1eedcd729e8",
+    "url":"https:\/\/hanoionline.vn\/tong-thong-my-nang-thue-quan-toan-cau-len-15-387090.htm",
+    "domain_category":"unknown",
+    "seg_threshold_used":0.5,
+    "method":"selenium_fallback",
+    "status":"success",
+    "total_segments":2,
+    "toxic_segments":0,
+    "toxic_ratio":0.0,
+    "page_toxic":0,
+    "avg_toxic_prob":0.0503,
+    "top5_toxic_segments":[
+      "Quyết_định này được đưa ra chỉ 24 giờ sau khi mức thuế 10% được công_bố , cho thấy sự kiên_quyết của Nhà_Trắng trong việc theo_đuổi chính_sách bảo_hộ ...",
+      "Tổng_thống Mỹ nâng thuế_quan toàn_cầu lên 15% Tổng_thống Mỹ Donald_Trump ngày 21\/2 thông_báo tiếp_tục nâng mức thuế_quan toàn_cầu đối_với hàng_hoá nhậ..."
+    ]
+  },
+  {
+    "url_hash":"3784e987d5a08cb3f538c0c54621f7ce",
+    "url":"https:\/\/vietnamnet.vn\/phim-co-nghe-si-xuan-hinh-quoc-tuan-dong-bi-cat-canh-nong-2489305.html",
+    "domain_category":"news",
+    "seg_threshold_used":0.78,
+    "method":"trafilatura_fast",
+    "status":"success",
+    "total_segments":43,
+    "toxic_segments":0,
+    "toxic_ratio":0.0,
+    "page_toxic":0,
+    "avg_toxic_prob":0.0198,
+    "top5_toxic_segments":[
+      "Tôi không muốn giải_thích quá nhiều , để khán_giả tự_cảm nhận ....",
+      "\" Có lúc tôi từng chán_nản , muốn bỏ nghề ....",
+      "\" Từ trước đến nay tôi chưa bao_giờ đóng cảnh nóng ....",
+      "Nghệ_sĩ Xuân_Hinh chia_sẻ về cảnh nóng Đạo_diễn Quốc_Tuấn cho biết rất lâu mới nhận_lời đóng phim_điện_ảnh , dù trước đó 2 năm từng góp_mặt ở phim khá...",
+      "\" Tôi học từ các thầy_cô , anh_chị đi trước , từ những khoá học ngắn_hạn đến đào_tạo chuyên_môn ...."
+    ]
+  },
+  {
+    "url_hash":"f7a6c4eca3eeb1b784c0ea7285ccdde3",
+    "url":"https:\/\/nhandan.vn\/video-iran-liet-hai-quan-va-khong-quan-eu-vao-danh-sach-khung-bo-post943220.html",
+    "domain_category":"news",
+    "seg_threshold_used":0.78,
+    "method":"selenium_fallback",
+    "status":"success",
+    "total_segments":2,
+    "toxic_segments":0,
+    "toxic_ratio":0.0,
+    "page_toxic":0,
+    "avg_toxic_prob":0.1517,
+    "top5_toxic_segments":[
+      "Tehran cho rằng quyết_định của EU liệt Lực_lượng Vệ_binh Cách_mạng Hồi_giáo là tổ_chức khủng_bố vi_phạm luật_pháp quốc_tế và áp_dụng nguyên_tắc “ có_đ...",
+      "Phía EU khẳng_định việc bổ_sung IRGC vào danh_sách trừng_phạt là kết_quả của đồng_thuận chính_trị và không liên_quan đến bất_kỳ chiến_dịch quân_sự nào..."
+    ]
+  },
+  {
+    "url_hash":"afa9f519dfedb231b4b78d34f2354b88",
+    "url":"https:\/\/znews.vn\/chang-trai-lao-xuong-song-cuu-cu-ong-giua-troi-ret-10-do-c-post1626551.html",
+    "domain_category":"news",
+    "seg_threshold_used":0.78,
     "method":"trafilatura_fast",
     "status":"success",
     "total_segments":20,
-    "toxic_segments":2,
-    "toxic_ratio":0.1,
-    "page_toxic":0,
-    "avg_toxic_prob":0.2193,
-    "top5_toxic_segments":[
-      "Minh_tinh Hong_Kong_Tuyên_Huyên tiết_lộ từng bị bạn trai lừa_phỉnh , vì_thế cảnh_giác với đàn_ông tiếp_cận mình ....",
-      "Trung_Quốc Nhiều người nhận_xét bức tượng điêu_khắc Hán_Vũ_Đế tạo cảm_giác \" nhân_vật bị chôn sống \" ....",
-      "James - 20 tuổi , thành_viên nhóm Kpop_Cortis - được khen thần_thái khi diện vest , gây ấn_tượng với gương_mặt góc_cạnh ....",
-      "Tuấn_Hưng cho biết màn song_ca \" Vẫn nhớ \" với Bùi_Lan_Hương kém do tâm_lý căng_thẳng và chưa quen không_gian biểu_diễn ....",
-      "Diễn_viên Trung_Quốc Lưu_Hiểu_Khánh , 76 tuổi , chuẩn_bị thực_hiện phim ngắn \" Võ_Tắc_Thiên truyền_kỳ \" do bà đóng vai chính ...."
-    ]
-  },
-  {
-    "url_hash":"c677f4a35a34e5158d78bfa61799c2b0",
-    "url":"https:\/\/voz.vn\/f\/oto-xe-may.8\/",
-    "method":"selenium_fallback",
-    "status":"success",
-    "total_segments":3,
     "toxic_segments":0,
     "toxic_ratio":0.0,
     "page_toxic":0,
-    "avg_toxic_prob":0.0891,
+    "avg_toxic_prob":0.0143,
     "top5_toxic_segments":[
-      "Enable_JavaScript and cookies to continue...",
-      "voz.vn Xác_minh bạn là con_người bằng cách hoàn_thành hành_động bên dưới . voz.vn cần đánh_giá tính bảo_mật kết_nối của bạn trước khi tiếp_tục ....",
-      "Xác_minh thành_công Đang chờ voz.vn phản_hồi ......"
+      "Khoảng 14h , khi tới khu_vực đường đê gần chùa Dâu , cả hai phát_hiện một cụ ông đang chới_với dưới dòng nước ....",
+      "Trên mạng xã_hội , hành_động của cặp vợ_chồng trẻ và người đàn_ông tốt_bụng nhận nhiều lời tán_dương ....",
+      "Ban_đầu , Hùng định nhảy luôn xuống sông cứu người song Trang ngăn lại vì anh bơi không giỏi , sợ chưa kịp cứu được người lại tự đưa bản_thân vào nguy...",
+      "Sau chuỗi ngày rối_loạn lo_âu , mất_ngủ , sợ_hãi , Đặng_Phước_Thắng ( TP. HCM ) tìm đến sách và ngành tâm_lý_học để chữa lành ....",
+      "Lúc này , đường khá vắng , thời_tiết chỉ hơn 10 độ C và đôi_lúc có mưa buốt ...."
     ]
   },
   {
-    "url_hash":"b466057e287eacb2d09af69b471c68da",
-    "url":"https:\/\/vnexpress.net\/mot-nam-khung-hoang-hinh-anh-nghe-si-viet-4996888.html",
-    "method":"trafilatura_fast",
-    "status":"success",
-    "total_segments":45,
-    "toxic_segments":24,
-    "toxic_ratio":0.5333,
-    "page_toxic":1,
-    "avg_toxic_prob":0.4355,
-    "top5_toxic_segments":[
-      "Cơ_quan quản_lý đánh_giá ca_khúc của ca_sĩ phản_cảm , trái thuần_phong_mỹ_tục , ảnh_hưởng xấu đến giới trẻ ....",
-      "Ngoài các hành_vi vi_phạm pháp_luật , mất uy_tín vì quảng_cáo lố , hàng_loạt nghệ_sĩ trong năm qua còn bị chỉ_trích vì các sản_phẩm âm_nhạc có ca_từ t...",
-      "Hàng chục nhóm anti Thuỳ_Tiên được lập nên , thu_hút hàng nghìn thành_viên cùng thảo_luận , kêu_gọi làm rõ trách_nhiệm các cá_nhân liên_quan , đồng_th...",
-      "Những lùm xùm này khiến công_chúng trở_nên thiếu tin_tưởng với giới nghệ_sĩ , sự ngưỡng_mộ vô_điều_kiện dần nhường chỗ cho sự hoài_nghi ....",
-      "Những bình_luận thể_hiện nỗi hoang_mang , sự thất_vọng cùng những lời chỉ_trích nghệ_sĩ bán rẻ danh_tiếng để quảng_cáo lố , thổi_phồng công_dụng của s..."
-    ]
-  },
-  {
-    "url_hash":"f2197b6baeb36b5e3965c0720114e4f8",
-    "url":"https:\/\/tuoitre.vn\/cach-nao-de-cham-dut-viec-chui-boi-xuc-pham-tren-mang-20211027223924572.htm",
-    "method":"trafilatura_fast",
-    "status":"success",
-    "total_segments":31,
-    "toxic_segments":12,
-    "toxic_ratio":0.3871,
-    "page_toxic":1,
-    "avg_toxic_prob":0.3642,
-    "top5_toxic_segments":[
-      "Lên mạng xã_hội nói_xấu , lăng_mạ , chửi_bới thì không_thể chấp_nhận được ....",
-      "Nhà_báo Hàn_Ni gửi đơn đề_nghị khởi_tố bà Phương_Hằng vì cho rằng bà Hằng đã livestream vu_khống , làm_nhục người khác , lợi_dụng quyền tự_do dân_chủ ...",
-      "Cần xử_lý nhanh Đại_biểu Quốc_hội Phạm_Văn_Hoà ( Đồng_Tháp ) cho rằng việc dùng mạng xã_hội livestream để nói_xấu , chửi_bới với lời_lẽ thô_tục là hàn...",
-      "Về trách_nhiệm hình_sự , người sử_dụng mạng xã_hội để vu_khống , xúc_phạm , tấn_công người khác tuỳ mức_độ có_thể bị xử_lý hình_sự về tội_danh \" vu_kh...",
-      "Trong đó , những vụ_lợi dụng truyền_thông , mạng xã_hội để bôi_nhọ , tấn_công , xúc_phạm người khác gần đây nhưng không bị xử_lý sẽ khiến họ nhầm tưởn..."
-    ]
-  },
-  {
-    "url_hash":"5de5595d292530efc909dc352f8a8738",
-    "url":"https:\/\/vnexpress.net\/bao-thai-lan-dung-trach-chu-nha-vi-trong-tai-huy-ban-thang-cua-viet-nam-4995254.html",
-    "method":"trafilatura_fast",
-    "status":"success",
-    "total_segments":28,
-    "toxic_segments":9,
-    "toxic_ratio":0.3214,
-    "page_toxic":1,
-    "avg_toxic_prob":0.3538,
-    "top5_toxic_segments":[
-      "Tờ báo hàng_đầu Thái_Lan còn dẫn một_số bình_luận của CĐV trên mạng xã_hội , mà không nói rõ danh_tính những người viết , như \" một trận đấu bẩn_thỉu ...",
-      "\" Tức_giận trọng_tài thì được ....",
-      "Có những đoàn còn đuổi đánh trọng_tài vì cho rằng bị đối_xử bất_công ....",
-      "Không hiểu vì sao lại đổ lỗi cho chủ nhà ....",
-      "\" Họ chỉ_trích trọng_tài biên , nhầm trọng_tài biên là người Thái_Lan dù thực_tế là người Lào \" , báo_viết ...."
-    ]
-  },
-  {
-    "url_hash":"eef2b6c6c2529bc359461089bb8b69bf",
-    "url":"https:\/\/vnexpress.net\/bong-da",
-    "method":"trafilatura_fast",
-    "status":"success",
-    "total_segments":25,
-    "toxic_segments":0,
-    "toxic_ratio":0.0,
-    "page_toxic":0,
-    "avg_toxic_prob":0.1453,
-    "top5_toxic_segments":[
-      "Arab_Saudi_Bị tiền_đạo Real chọc_tức trong trận bán_kết Siêu_Cup_Tây_Ban Nha , HLV của Atletico_Diego_Simeone cuốn vào tranh_cãi tay_đôi rồi đáp trả b...",
-      "Anh HLV Mikel_Arteta thừa_nhận áp_lực thành_tích và nhấn_mạnh Arsenal đang theo_đuổi các danh_hiệu cả bốn đấu_trường , trước trận gặp Portsmouth ở vòn...",
-      "Lionel_Messi không có ý_định trở_thành HLV trong tương_lai , thay vào đó anh hứng_thú với việc sở_hữu và phát_triển một CLB bóng_đá riêng sau khi chín...",
-      "Anh Đội hạng Sáu_Macclesfield tạo cú sốc lớn bậc nhất lịch_sử Cup_FA , khi đánh_bại đương_kim vô_địch Crystal_Palace 2-1 ở vòng ba ngày 10\/1 ....",
-      "Theo Bolasport và nhiều báo Indonesia khác , chiến_thắng 2-1 của Việt_Nam trước Kyrgyzstan ở lượt hai vòng bảng U23 châu_Á 2026 đến nhờ may_mắn ...."
-    ]
-  },
-  {
-    "url_hash":"afa1168f2662e3fb5b562576652d1bcf",
-    "url":"https:\/\/tuoitre.vn\/chui-boi-tung-toe-tren-mang-cung-hong-luc-ra-toa-20190907220922579.htm",
-    "method":"trafilatura_fast",
-    "status":"success",
-    "total_segments":51,
-    "toxic_segments":21,
-    "toxic_ratio":0.4118,
-    "page_toxic":1,
-    "avg_toxic_prob":0.4273,
-    "top5_toxic_segments":[
-      "Cái loại thằng này nó có học thức , mẹ nó tần_tảo nuôi nó ăn_học thành_tài , giờ mẹ nó mắc nợ , nó kêu mẹ nó chết đi lấy tiền đi đám_ma mà trả nợ \" ....",
-      "Do có mâu_thuẫn trong việc chơi hụi với mẹ ông Y. nên ông này đã có những lời xúc_phạm bà như \" không có học thức , xấu_xa bần_cùng của xã_hội ... \" ....",
-      "Sau đó , bà Q. tiếp_tục đăng hình_ảnh ông Y. và clip mẹ ông Y. đang nói_chuyện điện_thoại kèm nội_dung : \" Mẹ nuôi cho ăn_học , nay lên phó phòng chửi...",
-      "Bà K. trả_lời lại : \" Tao không phải là quân ăn_cướp , mày mới là ăn_cướp \" ....",
-      "Khi hoà_giải xong , ông X. nói : \" Bà là quân ăn_cướp , tôi quá sợ bà rồi ... \" ...."
-    ]
-  },
-  {
-    "url_hash":"638ea2c0fdd1ca89893cd83e53349fe9",
-    "url":"https:\/\/www.webtretho.com\/f\/tam-su",
-    "method":"selenium_fallback",
-    "status":"success",
-    "total_segments":3,
-    "toxic_segments":0,
-    "toxic_ratio":0.0,
-    "page_toxic":0,
-    "avg_toxic_prob":0.0768,
-    "top5_toxic_segments":[
-      "Trang bạn truy_cập có_thể đã bị xoá hoặc không tồn_tại Quay lại trang trước Về trang_chủ Lên đầu trang...",
-      "Đăng_nhập Đăng_nhập Tạo tài_khoản Đăng_nhập qua Facebook Đăng_nhập qua Google Chúng_tôi rất tiếc !...",
-      "Thịnh_hành Cộng_đồng Thông_báo Đánh_dấu đã đọc Loading ......"
-    ]
-  },
-  {
-    "url_hash":"cab99e8c23ec67d6fee715e67908731c",
-    "url":"https:\/\/vnexpress.net\/nhieu-nguoi-gioi-tranh-cai-thay-vi-tranh-luan-4335581.html",
-    "method":"trafilatura_fast",
-    "status":"success",
-    "total_segments":38,
-    "toxic_segments":8,
-    "toxic_ratio":0.2105,
-    "page_toxic":0,
-    "avg_toxic_prob":0.3147,
-    "top5_toxic_segments":[
-      "Nhất_là với những kẻ háo thắng và không chịu nhường_nhịn người khác ....",
-      "Tôi gọi đó là công_kích cá_nhân ....",
-      "Cuộc tranh_luận tưởng_chừng khoa_học lại trở_nên rất hỗn_độn và không có tinh_thần hợp_tác ....",
-      "Nhiều người cho rằng đó là việc sinh_viên được lựa_chọn môn để học , hay sinh_viên có_thể đi làm thêm , còn học_sinh phải học nặng hơn ......",
-      "Tôi còn nhớ rất rõ khi mới vào năm đầu_tiên , những gì chúng_tôi tranh_luận với nhau chủ_yếu là sự cãi_vã qua_lại , không bên nào nhường bên nào , \" k..."
-    ]
-  },
-  {
-    "url_hash":"fad290d2ed9cf748eb7a82be215c31f8",
-    "url":"https:\/\/vnexpress.net\/tranh-cai-ve-so-danh-hieu-cua-messi-4991489.html",
-    "method":"trafilatura_fast",
-    "status":"success",
-    "total_segments":33,
-    "toxic_segments":0,
-    "toxic_ratio":0.0,
-    "page_toxic":0,
-    "avg_toxic_prob":0.1764,
-    "top5_toxic_segments":[
-      "Một_số ý_kiến cho rằng MLS vốn quyết_định nhà vô_địch tổng qua vòng playoff ( tức MLS Cup ) , nên việc dùng thành_tích Supporters ’ Shield để làm chuẩ...",
-      "Hoàng_Thông tổng_hợp...",
-      "Danh_sách đăng_ký thời này chỉ gồm 18 cầu_thủ , và Messi , khi ấy ở tuổi 18 , không được HLV Frank_Rijkaard điền vào đội_hình ....",
-      "Nhưng về sau , chính CLB xứ Catalonia lại quyết_định ghi_nhận cựu thủ_quân của họ cũng là thành_viên đội_hình đoạt Siêu_Cup_Tây_Ban Nha 2005 , làm nảy...",
-      "Tuy_vậy , danh_hiệu vô_địch miền Đông_MLS 2025 còn mâu_thuẫn , bởi nhiều trang thống_kê xem nó chỉ mang tính_danh dự ...."
-    ]
-  },
-  {
-    "url_hash":"7958117e3a99d7304d8e2c88fa397326",
-    "url":"https:\/\/tuoitre.vn",
-    "method":"trafilatura_fast",
-    "status":"success",
-    "total_segments":40,
-    "toxic_segments":1,
-    "toxic_ratio":0.025,
-    "page_toxic":0,
-    "avg_toxic_prob":0.1841,
-    "top5_toxic_segments":[
-      "Phần_lớn những người viết lời sống bên rìa hào_quang ....",
-      "Liên_đoàn Bóng_đá Malaysia ( FAM ) đã tự_ý phục_chức cho Tổng_thư_ký Azman mà không đợi phán_quyết từ FIFA ....",
-      "Một phạm_nhân thuộc trại_giam Phước_Hoà lợi_dụng sơ_hở trong lúc lao_động bên ngoài đã trốn khỏi trại_giam ....",
-      "Bộ Công_an đã ra quyết_định truy_nã phạm_nhân Huỳnh_Văn_Đời ở tỉnh Đồng_Tháp vì lợi_dụng sơ_hở trong lúc lao_động để bỏ trốn khỏi trại_giam Phước_Hoà ...",
-      "Những tranh_luận về chương_trình môn lịch_sử theo chương_trình giáo_dục_phổ_thông 2018 đang thu_hút sự quan_tâm của dư_luận , khiến nhiều giáo_viên bă..."
-    ]
-  },
-  {
-    "url_hash":"1d68dabb7c91942ba623b9726068a1ac",
-    "url":"https:\/\/tuoitre.vn\/xa-hoi.htm",
-    "method":"trafilatura_fast",
-    "status":"success",
-    "total_segments":40,
-    "toxic_segments":1,
-    "toxic_ratio":0.025,
-    "page_toxic":0,
-    "avg_toxic_prob":0.1841,
-    "top5_toxic_segments":[
-      "Phần_lớn những người viết lời sống bên rìa hào_quang ....",
-      "Liên_đoàn Bóng_đá Malaysia ( FAM ) đã tự_ý phục_chức cho Tổng_thư_ký Azman mà không đợi phán_quyết từ FIFA ....",
-      "Một phạm_nhân thuộc trại_giam Phước_Hoà lợi_dụng sơ_hở trong lúc lao_động bên ngoài đã trốn khỏi trại_giam ....",
-      "Bộ Công_an đã ra quyết_định truy_nã phạm_nhân Huỳnh_Văn_Đời ở tỉnh Đồng_Tháp vì lợi_dụng sơ_hở trong lúc lao_động để bỏ trốn khỏi trại_giam Phước_Hoà ...",
-      "Những tranh_luận về chương_trình môn lịch_sử theo chương_trình giáo_dục_phổ_thông 2018 đang thu_hút sự quan_tâm của dư_luận , khiến nhiều giáo_viên bă..."
-    ]
-  },
-  {
-    "url_hash":"f6462bb75a5998dbb386c55b708952ea",
-    "url":"https:\/\/thanhnien.vn\/cong-nghe",
+    "url_hash":"9f829b99ed1991f91bd28106d2a87daa",
+    "url":"https:\/\/vietnamnet.vn\/tuyen-viet-nam-dau-malaysia-van-hau-khien-hlv-kim-sang-sik-kho-nghi-2491799.html",
+    "domain_category":"news",
+    "seg_threshold_used":0.78,
     "method":"trafilatura_fast",
     "status":"success",
     "total_segments":14,
     "toxic_segments":0,
     "toxic_ratio":0.0,
     "page_toxic":0,
-    "avg_toxic_prob":0.1188,
+    "avg_toxic_prob":0.0124,
     "top5_toxic_segments":[
-      "Tin_tức công_nghệ iOS 26 kém hấp_dẫn hay người dùng iPhone đã ' mệt_mỏi vì cập_nhật ' ?...",
-      "Thông_tin cá_nhân thu_thập qua các liên_kết giả_danh lừa_đảo trực_tuyến đang được xử_lý tự_động và bán với giá từ 15 USD ....",
-      "mượt , nhẹ , pin trâu Sản_phẩm Tất_cả Điện_thoại Máy_tính Tiêu_dùng Tai nghe giá rẻ Trung_Quốc chiếm_lĩnh thị_trường thiết_bị âm_thanh Khi nói đến thế...",
-      "Tin_tức công_nghệ iPhone 4 bất_ngờ quay lại thời hoàng_kim Apple gặp lại ' bóng_ma ' iPhone 4 trên iPhone 17 Blockchain_Từ bất_động_sản đến Bitcoin : ...",
-      "Thủ_thuật Tính_năng Wi-Fi ẩn trên điện_thoại Samsung nhiều người chưa từng mở 5 cách giúp điện_thoại Samsung Galaxy chạy nhanh hơn Tin_tức công_nghệ G..."
-    ]
-  },
-  {
-    "url_hash":"9e2b820e93f083cbe1482deeebf25d95",
-    "url":"https:\/\/voz.vn\/t\/van-hoa-tranh-luan-cua-voz-hien-nay-qua-toxic.354362\/",
-    "method":"selenium_fallback",
-    "status":"success",
-    "total_segments":3,
-    "toxic_segments":0,
-    "toxic_ratio":0.0,
-    "page_toxic":0,
-    "avg_toxic_prob":0.0891,
-    "top5_toxic_segments":[
-      "Enable_JavaScript and cookies to continue...",
-      "voz.vn Xác_minh bạn là con_người bằng cách hoàn_thành hành_động bên dưới . voz.vn cần đánh_giá tính bảo_mật kết_nối của bạn trước khi tiếp_tục ....",
-      "Xác_minh thành_công Đang chờ voz.vn phản_hồi ......"
-    ]
-  },
-  {
-    "url_hash":"be7f325e7d66261657f4ca69a4a9802c",
-    "url":"https:\/\/vnexpress.net\/thoi-su",
-    "method":"trafilatura_fast",
-    "status":"success",
-    "total_segments":41,
-    "toxic_segments":2,
-    "toxic_ratio":0.0488,
-    "page_toxic":0,
-    "avg_toxic_prob":0.1821,
-    "top5_toxic_segments":[
-      "Quán bar có nhân_viên cầm xẻng doạ đánh khách bị phạt 50 triệu đồng_Khánh_HoàQuán bar ở biển Trần_Phú , Nha_Trang , có nhân_viên cầm xẻng doạ đánh khá...",
-      "Thanh_niên bị thu xe SH vì lái_xe bằng hai chân Đi xe_máy trên đường ven sông Đồng_Nai , nam thanh_niên 25 tuổi thả hai tay , dùng hai chân lái_xe gây...",
-      "Nữ tài_xế nhầm chân ga gây tai_nạn liên_hoàn , một người chết Hà_NộiTài xế ô_tô đạp nhầm chân ga gây tai_nạn liên_hoàn trên cầu_vượt ngã tư Vọng , khi...",
-      "Chất_lượng không_khí Hà_Nội trở_lại mức rất xấu Sau nhiều ngày chất_lượng không_khí mức trung_bình , từ sáng 9\/1 , tình_trạng ô_nhiễm ở Hà_Nội đã gia_...",
-      "Thi_công đường gây ùn_tắc , chủ đầu_tư ở TP HCM bị CSGT phạt Không bố_trí người điều_tiết giao_thông gây ùn_tắc thường_xuyên khi thi_công dự_án ở TP T..."
+      "Những pha vào bóng của cầu_thủ quê Hưng_Yên thay_vì va_đập mạnh , thì nay là những động_tác tinh_tế , tiết_chế hơn rất nhiều ....",
+      "Quang_Vinh là người đá chính ở tuyển Việt_Nam trong những trận đấu gần đây , ngoài_ra còn có Văn_Vĩ hay Phan_Tuấn_Tài ....",
+      "Một phương_án hoàn_toàn có_thể được HLV Kim_Sang_Sik tính tới là dùng Văn_Hậu ở vị_trí trung_vệ lệch phải , trong khi Quang_Vinh chạy cánh ....",
+      "Ở đợt tập_trung tới đây , HLV Kim_Sang_Sik nhiều khả_năng làm mới vị_trí này bằng cầu_thủ cũ : Đoàn văn Hậu ....",
+      "Nếu cả Văn_Hậu và Quang_Vinh cùng ra sân ở trận tuyển Việt_Nam tái đấu Malaysia ngày 31\/3 , đây sẽ là quyết_định mà HLV Kim_Sang_Sik gây bất_ngờ với đ..."
     ]
   }
 ]

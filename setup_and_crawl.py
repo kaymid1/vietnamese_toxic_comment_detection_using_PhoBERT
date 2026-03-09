@@ -419,23 +419,30 @@ def _format_upload_date(ud: Optional[str]) -> Optional[str]:
         return f"{ud[0:4]}-{ud[4:6]}-{ud[6:8]}"
     return ud
 
-def _run_yt_dlp_video(video_url: str, videos_dir: str) -> Optional[dict]:
-    os.makedirs(videos_dir, exist_ok=True)
+def _run_yt_dlp_video(video_url: str, videos_dir: str, keep_artifacts: bool = False) -> Optional[dict]:
+    if keep_artifacts:
+        os.makedirs(videos_dir, exist_ok=True)
+        work_dir = videos_dir
+    else:
+        work_dir = tempfile.mkdtemp(prefix="yt_dlp_")
+
     cmd = [
         "yt-dlp",
         "--skip-download",
         "--write-info-json",
         "--write-auto-sub",
         "--sub-lang", "vi,en,vi.*?,en.*?",
-        "--output", os.path.join(videos_dir, "%(id)s.%(ext)s"),
+        "--output", os.path.join(work_dir, "%(id)s.%(ext)s"),
         video_url,
     ]
     try:
         subprocess.run(cmd, check=False, capture_output=True, text=True)
     except Exception:
+        if not keep_artifacts:
+            shutil.rmtree(work_dir, ignore_errors=True)
         return None
 
-    info_files = glob.glob(os.path.join(videos_dir, "*.info.json"))
+    info_files = glob.glob(os.path.join(work_dir, "*.info.json"))
     info = None
     if info_files:
         try:
@@ -444,7 +451,7 @@ def _run_yt_dlp_video(video_url: str, videos_dir: str) -> Optional[dict]:
         except Exception:
             info = None
 
-    vtt_files = glob.glob(os.path.join(videos_dir, "*.vtt"))
+    vtt_files = glob.glob(os.path.join(work_dir, "*.vtt"))
     transcript_segments = []
     if vtt_files:
         try:
@@ -453,6 +460,11 @@ def _run_yt_dlp_video(video_url: str, videos_dir: str) -> Optional[dict]:
         except Exception:
             transcript_segments = []
 
+    if not keep_artifacts:
+        shutil.rmtree(work_dir, ignore_errors=True)
+        info_files = []
+        vtt_files = []
+
     return {
         "info": info,
         "transcript_segments": transcript_segments,
@@ -460,8 +472,9 @@ def _run_yt_dlp_video(video_url: str, videos_dir: str) -> Optional[dict]:
         "info_files": info_files,
     }
 
-def _run_yt_dlp_page(page_url: str, videos_dir: str) -> List[dict]:
-    os.makedirs(videos_dir, exist_ok=True)
+def _run_yt_dlp_page(page_url: str, videos_dir: str, keep_artifacts: bool = False) -> List[dict]:
+    if keep_artifacts:
+        os.makedirs(videos_dir, exist_ok=True)
     cmd = ["yt-dlp", "--dump-json", "--skip-download", page_url]
     try:
         cp = subprocess.run(cmd, check=False, capture_output=True, text=True)
@@ -478,12 +491,13 @@ def _run_yt_dlp_page(page_url: str, videos_dir: str) -> List[dict]:
             info = json.loads(line)
         except Exception:
             continue
-        info_path = os.path.join(videos_dir, f"page_fallback.{idx}.info.json")
-        try:
-            with open(info_path, "w", encoding="utf-8") as f:
-                json.dump(info, f, ensure_ascii=False, indent=2)
-        except Exception:
-            pass
+        if keep_artifacts:
+            info_path = os.path.join(videos_dir, f"page_fallback.{idx}.info.json")
+            try:
+                with open(info_path, "w", encoding="utf-8") as f:
+                    json.dump(info, f, ensure_ascii=False, indent=2)
+            except Exception:
+                pass
         records.append(info)
     return records
 
@@ -517,6 +531,7 @@ def _build_video_record(
     oembed: Optional[dict],
     ytdlp: Optional[dict],
     video_url: str,
+    artifacts_kept: bool = False,
 ) -> dict:
     title = None
     channel = None
@@ -527,6 +542,7 @@ def _build_video_record(
     has_auto_generated = None
     transcript = []
     metadata = {}
+    transcript_source = "none"
 
     if oembed:
         metadata["oembed"] = oembed
@@ -546,6 +562,8 @@ def _build_video_record(
         is_generated = transcript_data.get("is_generated")
         if is_generated is not None:
             has_auto_generated = bool(is_generated)
+        if transcript:
+            transcript_source = "youtube_transcript_api"
 
     if ytdlp and ytdlp.get("info"):
         info = ytdlp["info"]
@@ -562,6 +580,8 @@ def _build_video_record(
 
     if ytdlp and ytdlp.get("transcript_segments"):
         transcript = ytdlp.get("transcript_segments") or transcript
+        if transcript:
+            transcript_source = "yt_dlp_caption"
 
     return {
         "video_id": video_id,
@@ -577,24 +597,51 @@ def _build_video_record(
         "language": language,
         "has_auto_generated": has_auto_generated,
         "metadata": metadata if metadata else {},
+        "transcript_source": transcript_source,
+        "artifacts_kept": bool(artifacts_kept),
     }
 
-def _run_asr_on_video_url(video_url: str, work_dir: str, language: str = "vi") -> Optional[dict]:
+def _run_asr_on_video_url(
+    video_url: str,
+    language: str = "vi",
+    asr_max_seconds: int = 600,
+    keep_artifacts: bool = False,
+    artifacts_dir: Optional[str] = None,
+    known_duration: Optional[float] = None,
+) -> dict:
+    result: dict = {
+        "segments": [],
+        "full_segments": [],
+        "model": None,
+        "device": None,
+        "compute_type": None,
+        "reason": None,
+    }
     if not shutil.which("yt-dlp"):
         print("[WARN] yt-dlp not found; skip ASR")
-        return None
+        result["reason"] = "missing_yt_dlp"
+        return result
     if not shutil.which("ffmpeg"):
         print("[WARN] ffmpeg not found; skip ASR")
-        return None
+        result["reason"] = "missing_ffmpeg"
+        return result
 
     try:
         from faster_whisper import WhisperModel
     except Exception:
         print("[WARN] faster-whisper not available; skip ASR")
-        return None
+        result["reason"] = "missing_whisper"
+        return result
 
-    os.makedirs(work_dir, exist_ok=True)
-    media_path = os.path.join(work_dir, "media.%(ext)s")
+    if known_duration and asr_max_seconds and known_duration > asr_max_seconds:
+        result["reason"] = "too_long"
+        return result
+
+    temp_dir_ctx = tempfile.TemporaryDirectory(prefix="asr_tmp_")
+    work_dir = temp_dir_ctx.name
+    print(f"[DEBUG] ASR temp dir created: {work_dir}")
+
+    media_path = os.path.join(work_dir, "%(id)s.%(ext)s")
     try:
         subprocess.run(
             ["yt-dlp", "-f", "bestaudio/best", "--no-playlist", "-o", media_path, video_url],
@@ -604,12 +651,19 @@ def _run_asr_on_video_url(video_url: str, work_dir: str, language: str = "vi") -
         )
     except Exception as e:
         print(f"[WARN] ASR yt-dlp download failed: {e}")
-        return None
+        result["reason"] = "download_failed"
+        if temp_dir_ctx:
+            temp_dir_ctx.cleanup()
+        return result
 
-    media_files = glob.glob(os.path.join(work_dir, "media.*"))
+    media_files = glob.glob(os.path.join(work_dir, "*.*"))
+    media_files = [p for p in media_files if not p.endswith(".json") and not p.endswith(".vtt")]
     if not media_files:
         print("[WARN] ASR yt-dlp produced no media")
-        return None
+        result["reason"] = "download_failed"
+        if temp_dir_ctx:
+            temp_dir_ctx.cleanup()
+        return result
     media_file = media_files[0]
 
     wav_path = os.path.join(work_dir, "audio_16k.wav")
@@ -622,17 +676,24 @@ def _run_asr_on_video_url(video_url: str, work_dir: str, language: str = "vi") -
         )
     except Exception as e:
         print(f"[WARN] ASR ffmpeg failed: {e}")
-        return None
+        result["reason"] = "ffmpeg_failed"
+        if temp_dir_ctx:
+            temp_dir_ctx.cleanup()
+        return result
 
     device = "cuda" if shutil.which("nvidia-smi") else "cpu"
     compute_type = "float16" if device == "cuda" else "int8"
     model_name = os.getenv("ASR_MODEL", "small")
     try:
         model = WhisperModel(model_name, device=device, compute_type=compute_type)
-        segments_gen, info = model.transcribe(wav_path, language=language, vad_filter=True, beam_size=5)
+        language_arg = None if language == "auto" else language
+        segments_gen, info = model.transcribe(wav_path, language=language_arg, vad_filter=True, beam_size=5)
     except Exception as e:
         print(f"[WARN] ASR whisper failed: {e}")
-        return None
+        result["reason"] = "whisper_failed"
+        if temp_dir_ctx:
+            temp_dir_ctx.cleanup()
+        return result
 
     segments = []
     full_segments = []
@@ -648,22 +709,40 @@ def _run_asr_on_video_url(video_url: str, work_dir: str, language: str = "vi") -
             "avg_logprob": round(float(seg.avg_logprob), 4),
         })
 
-    return {
+    result.update({
         "segments": segments,
         "full_segments": full_segments,
         "model": model_name,
         "device": device,
         "compute_type": compute_type,
-    }
+        "reason": None,
+    })
 
-def _fetch_youtube_video_data(video_id: str, page_url: str, videos_dir: str) -> dict:
+    if keep_artifacts:
+        dst_dir = artifacts_dir
+        if dst_dir:
+            os.makedirs(dst_dir, exist_ok=True)
+            for fname in os.listdir(work_dir):
+                src = os.path.join(work_dir, fname)
+                if os.path.isfile(src):
+                    try:
+                        shutil.copy2(src, os.path.join(dst_dir, fname))
+                    except Exception:
+                        pass
+            print(f"[DEBUG] ASR artifacts copied to: {dst_dir}")
+
+    temp_dir_ctx.cleanup()
+    print(f"[DEBUG] ASR temp dir cleaned: {work_dir}")
+    return result
+
+def _fetch_youtube_video_data(video_id: str, page_url: str, videos_dir: str, keep_artifacts: bool = False) -> dict:
     video_url = f"https://www.youtube.com/watch?v={video_id}"
     oembed = _fetch_oembed_metadata(video_url)
     transcript_data = _fetch_transcript_with_retry(video_id)
 
     ytdlp = None
     if transcript_data is None or oembed is None:
-        ytdlp = _run_yt_dlp_video(video_url, videos_dir)
+        ytdlp = _run_yt_dlp_video(video_url, videos_dir, keep_artifacts=keep_artifacts)
 
     return _build_video_record(
         video_id=video_id,
@@ -672,6 +751,7 @@ def _fetch_youtube_video_data(video_id: str, page_url: str, videos_dir: str) -> 
         oembed=oembed,
         ytdlp=ytdlp,
         video_url=video_url,
+        artifacts_kept=keep_artifacts,
     )
 
 def crawl_and_save(
@@ -679,7 +759,11 @@ def crawl_and_save(
     segmenter: Segmenter,
     timeout: int = 90,
     out_root: str = DATA_DIR,
-    enable_video: bool = False,
+    enable_video: bool = True,
+    enable_asr: bool = True,
+    keep_artifacts: bool = False,
+    asr_max_seconds: int = 600,
+    asr_language: str = "vi",
 ) -> dict:
     import trafilatura
 
@@ -782,6 +866,8 @@ def crawl_and_save(
     if enable_video and html_for_video:
         try:
             videos_dir = os.path.join(save_folder, "videos")
+            if not keep_artifacts and os.path.exists(videos_dir):
+                shutil.rmtree(videos_dir, ignore_errors=True)
             detected = _detect_videos_from_html(html_for_video, url)
             youtube_ids = detected.get("youtube_ids", [])
             video_records: List[dict] = []
@@ -789,7 +875,7 @@ def crawl_and_save(
             if youtube_ids:
                 with ThreadPoolExecutor(max_workers=5) as executor:
                     future_map = {
-                        executor.submit(_fetch_youtube_video_data, vid, url, videos_dir): vid
+                        executor.submit(_fetch_youtube_video_data, vid, url, videos_dir, keep_artifacts): vid
                         for vid in youtube_ids
                     }
                     for future in as_completed(future_map):
@@ -799,24 +885,26 @@ def crawl_and_save(
                             if record:
                                 video_records.append(record)
                         except Exception as e:
-                            video_records.append({
-                                "video_id": vid,
-                                "platform": "youtube",
-                                "video_url": f"https://www.youtube.com/watch?v={vid}",
-                                "page_url": url,
-                                "title": None,
-                                "channel": None,
-                                "upload_date": None,
-                                "duration": None,
-                                "view_count": None,
-                                "transcript": [],
-                                "language": None,
-                                "has_auto_generated": None,
-                                "metadata": {},
-                                "error": str(e),
-                            })
+                                video_records.append({
+                                    "video_id": vid,
+                                    "platform": "youtube",
+                                    "video_url": f"https://www.youtube.com/watch?v={vid}",
+                                    "page_url": url,
+                                    "title": None,
+                                    "channel": None,
+                                    "upload_date": None,
+                                    "duration": None,
+                                    "view_count": None,
+                                    "transcript": [],
+                                    "language": None,
+                                    "has_auto_generated": None,
+                                    "metadata": {},
+                                    "error": str(e),
+                                    "transcript_source": "none",
+                                    "artifacts_kept": bool(keep_artifacts),
+                                })
 
-            page_infos = _run_yt_dlp_page(url, videos_dir)
+            page_infos = _run_yt_dlp_page(url, videos_dir, keep_artifacts=keep_artifacts)
             for info in page_infos:
                 entries = info.get("entries")
                 if entries:
@@ -828,20 +916,31 @@ def crawl_and_save(
                             continue
                         transcript = []
                         asr_meta = None
-                        work_dir = os.path.join(videos_dir, f"asr_{entry.get('id') or 'unknown'}")
-                        asr = _run_asr_on_video_url(video_url, work_dir, language="vi")
-                        if asr and asr.get("segments"):
-                            transcript = asr["segments"]
-                            asr_meta = {
-                                "model": asr.get("model"),
-                                "device": asr.get("device"),
-                                "compute_type": asr.get("compute_type"),
-                            }
-                            try:
-                                with open(os.path.join(work_dir, "segments_full_asr.json"), "w", encoding="utf-8") as f:
-                                    json.dump(asr.get("full_segments", []), f, ensure_ascii=False, indent=2)
-                            except Exception:
-                                pass
+                        asr_reason = None
+                        if enable_asr:
+                            work_dir = os.path.join(videos_dir, f"asr_{entry.get('id') or 'unknown'}") if keep_artifacts else None
+                            asr = _run_asr_on_video_url(
+                                video_url,
+                                language=asr_language,
+                                asr_max_seconds=asr_max_seconds,
+                                keep_artifacts=keep_artifacts,
+                                artifacts_dir=work_dir,
+                                known_duration=entry.get("duration"),
+                            )
+                            if asr and asr.get("segments"):
+                                transcript = asr["segments"]
+                                asr_meta = {
+                                    "model": asr.get("model"),
+                                    "device": asr.get("device"),
+                                    "compute_type": asr.get("compute_type"),
+                                }
+                                if keep_artifacts and work_dir:
+                                    try:
+                                        with open(os.path.join(work_dir, "segments_full_asr.json"), "w", encoding="utf-8") as f:
+                                            json.dump(asr.get("full_segments", []), f, ensure_ascii=False, indent=2)
+                                    except Exception:
+                                        pass
+                            asr_reason = asr.get("reason") if asr else "unknown"
                         video_records.append({
                             "video_id": entry.get("id") or hash_url(entry.get("url") or ""),
                             "platform": "native",
@@ -856,6 +955,9 @@ def crawl_and_save(
                             "language": entry.get("language"),
                             "has_auto_generated": None,
                             "metadata": {"ytdlp": entry, "asr": asr_meta} if asr_meta else entry,
+                            "transcript_source": "asr_ephemeral" if transcript else "none",
+                            "artifacts_kept": bool(keep_artifacts),
+                            "reason": asr_reason,
                         })
                 else:
                     video_url = _select_best_format_url(info)
@@ -863,20 +965,31 @@ def crawl_and_save(
                         continue
                     transcript = []
                     asr_meta = None
-                    work_dir = os.path.join(videos_dir, f"asr_{info.get('id') or 'unknown'}")
-                    asr = _run_asr_on_video_url(video_url, work_dir, language="vi")
-                    if asr and asr.get("segments"):
-                        transcript = asr["segments"]
-                        asr_meta = {
-                            "model": asr.get("model"),
-                            "device": asr.get("device"),
-                            "compute_type": asr.get("compute_type"),
-                        }
-                        try:
-                            with open(os.path.join(work_dir, "segments_full_asr.json"), "w", encoding="utf-8") as f:
-                                json.dump(asr.get("full_segments", []), f, ensure_ascii=False, indent=2)
-                        except Exception:
-                            pass
+                    asr_reason = None
+                    if enable_asr:
+                        work_dir = os.path.join(videos_dir, f"asr_{info.get('id') or 'unknown'}") if keep_artifacts else None
+                        asr = _run_asr_on_video_url(
+                            video_url,
+                            language=asr_language,
+                            asr_max_seconds=asr_max_seconds,
+                            keep_artifacts=keep_artifacts,
+                            artifacts_dir=work_dir,
+                            known_duration=info.get("duration"),
+                        )
+                        if asr and asr.get("segments"):
+                            transcript = asr["segments"]
+                            asr_meta = {
+                                "model": asr.get("model"),
+                                "device": asr.get("device"),
+                                "compute_type": asr.get("compute_type"),
+                            }
+                            if keep_artifacts and work_dir:
+                                try:
+                                    with open(os.path.join(work_dir, "segments_full_asr.json"), "w", encoding="utf-8") as f:
+                                        json.dump(asr.get("full_segments", []), f, ensure_ascii=False, indent=2)
+                                except Exception:
+                                    pass
+                        asr_reason = asr.get("reason") if asr else "unknown"
                     video_records.append({
                         "video_id": info.get("id") or hash_url(info.get("url") or ""),
                         "platform": "native",
@@ -891,6 +1004,9 @@ def crawl_and_save(
                         "language": info.get("language"),
                         "has_auto_generated": None,
                         "metadata": {"ytdlp": info, "asr": asr_meta} if asr_meta else info,
+                        "transcript_source": "asr_ephemeral" if transcript else "none",
+                        "artifacts_kept": bool(keep_artifacts),
+                        "reason": asr_reason,
                     })
 
             if video_records:
@@ -926,7 +1042,13 @@ def crawl_and_save(
         "duration_sec": duration,
     }
 
-def run_crawl(enable_video: bool = False):
+def run_crawl(
+    enable_video: bool = True,
+    enable_asr: bool = True,
+    keep_artifacts: bool = False,
+    asr_max_seconds: int = 600,
+    asr_language: str = "vi",
+):
     from tqdm import tqdm
 
     ensure_dirs()
@@ -941,7 +1063,16 @@ def run_crawl(enable_video: bool = False):
 
     success_count = 0
     for url in tqdm(URL_LIST):
-        result = crawl_and_save(url.strip(), seg, out_root=DATA_DIR, enable_video=enable_video)
+        result = crawl_and_save(
+            url.strip(),
+            seg,
+            out_root=DATA_DIR,
+            enable_video=enable_video,
+            enable_asr=enable_asr,
+            keep_artifacts=keep_artifacts,
+            asr_max_seconds=asr_max_seconds,
+            asr_language=asr_language,
+        )
         status = result.get("status")
         if status == "ok":
             line = f"SUCCESS | {result.get('method', 'unknown')} | {result.get('num_segments', 0)} segments | {result.get('duration_sec', 0)}s"
@@ -971,8 +1102,24 @@ def parse_args(argv: List[str]):
     parser.add_argument("--setup", action="store_true", help="Setup dependencies and assets")
     parser.add_argument("--crawl", action="store_true", help="Run crawler")
     parser.add_argument("--enable-video", action="store_true", help="Enable video crawling")
+    parser.add_argument("--disable-video", action="store_true", help="Disable video crawling")
+    parser.add_argument("--enable-asr", action="store_true", help="Enable ASR for native video")
+    parser.add_argument("--disable-asr", action="store_true", help="Disable ASR for native video")
+    parser.add_argument("--keep-artifacts", action="store_true", help="Keep video/ASR artifacts on disk")
+    parser.add_argument("--asr-max-seconds", type=int, default=600, help="Skip ASR if duration > cap (seconds)")
+    parser.add_argument("--asr-language", default="vi", help='ASR language code or "auto"')
     args = parser.parse_args(argv)
-    return args.setup, args.crawl, args.enable_video
+    return (
+        args.setup,
+        args.crawl,
+        args.enable_video,
+        args.disable_video,
+        args.enable_asr,
+        args.disable_asr,
+        args.keep_artifacts,
+        args.asr_max_seconds,
+        args.asr_language,
+    )
 
 def ensure_runtime_deps():
     """
@@ -1008,11 +1155,29 @@ def ensure_runtime_deps():
         subprocess.check_call([sys.executable, "-m", "pip", "install", *missing])
 def main():
     argv = sys.argv[1:]
-    do_setup, do_crawl, enable_video = parse_args(argv)
+    (
+        do_setup,
+        do_crawl,
+        enable_video_flag,
+        disable_video,
+        enable_asr_flag,
+        disable_asr,
+        keep_artifacts,
+        asr_max_seconds,
+        asr_language,
+    ) = parse_args(argv)
 
     # Mặc định: nếu không truyền flag gì thì chạy crawl luôn (đỡ phiền)
     if not do_setup and not do_crawl:
         do_crawl = True
+
+    enable_video = not disable_video
+    if enable_video_flag:
+        enable_video = True
+
+    enable_asr = not disable_asr
+    if enable_asr_flag:
+        enable_asr = True
 
     # Setup: chỉ check Java + đảm bảo deps trong current venv
     if do_setup:
@@ -1033,10 +1198,27 @@ def main():
         ensure_runtime_deps()
         if enable_video:
             print("[INFO] Video crawling enabled.")
-        run_crawl(enable_video=enable_video)
+        if enable_asr:
+            print("[INFO] Native ASR enabled.")
+        run_crawl(
+            enable_video=enable_video,
+            enable_asr=enable_asr,
+            keep_artifacts=keep_artifacts,
+            asr_max_seconds=asr_max_seconds,
+            asr_language=asr_language,
+        )
 
 
-def crawl_urls(urls: List[str], out_dir: str = DATA_DIR, timeout: int = 90, enable_video: bool = False) -> List[dict]:
+def crawl_urls(
+    urls: List[str],
+    out_dir: str = DATA_DIR,
+    timeout: int = 90,
+    enable_video: bool = True,
+    enable_asr: bool = True,
+    keep_artifacts: bool = False,
+    asr_max_seconds: int = 600,
+    asr_language: str = "vi",
+) -> List[dict]:
     """
     Crawl a list of URLs and return per-URL crawl info.
     This does NOT auto-install dependencies.
@@ -1051,7 +1233,17 @@ def crawl_urls(urls: List[str], out_dir: str = DATA_DIR, timeout: int = 90, enab
         if not url:
             continue
         try:
-            info = crawl_and_save(url, seg, timeout=timeout, out_root=out_dir, enable_video=enable_video)
+            info = crawl_and_save(
+                url,
+                seg,
+                timeout=timeout,
+                out_root=out_dir,
+                enable_video=enable_video,
+                enable_asr=enable_asr,
+                keep_artifacts=keep_artifacts,
+                asr_max_seconds=asr_max_seconds,
+                asr_language=asr_language,
+            )
         except Exception as e:
             info = {
                 "url": url,

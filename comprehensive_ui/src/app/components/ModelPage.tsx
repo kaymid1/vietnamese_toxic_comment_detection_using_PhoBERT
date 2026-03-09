@@ -153,7 +153,7 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
               <h4 className="text-sm text-gray-600 mb-2">Toxic Class F1</h4>
               <div className="flex items-end gap-2">
                 <span className="text-4xl" style={{ color: "var(--viet-toxic)" }}>
-                  0.52
+                  0.53
                 </span>
                 <Badge className="mb-2 bg-orange-500">Trung Bình</Badge>
               </div>
