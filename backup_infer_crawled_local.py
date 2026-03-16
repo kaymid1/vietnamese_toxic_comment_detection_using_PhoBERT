@@ -30,6 +30,7 @@ import torch
 import pandas as pd
 from tqdm import tqdm
 from transformers import AutoTokenizer, AutoModelForSequenceClassification, AutoConfig
+from domain_classifier import DomainClassifier
 
 
 def pick_device(prefer: str = "auto") -> torch.device:
@@ -115,6 +116,7 @@ def infer_crawled(
     limit_pages: int = 0,
     quiet: bool = False,
     only_url_hashes: Optional[List[str]] = None,
+    debug_force_prob: Optional[float] = None,
 ) -> Dict[str, Any]:
     model_path = Path(model_path).expanduser()
     resolved_model_path = model_path.resolve()
@@ -147,34 +149,49 @@ def infer_crawled(
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # Domain-aware threshold: keep seg_threshold as fallback for unknown domains
+    domain_clf = DomainClassifier(threshold_overrides={"unknown": seg_threshold})
+
     device = pick_device(device)
     if not quiet:
         print(f"[INFO] Device: {device}")
+        print("[INFO] Domain-aware thresholds:")
+        for cat, thr in domain_clf.thresholds.items():
+            marker = " <- CLI fallback (--seg_threshold)" if cat == "unknown" else ""
+            print(f"         {cat:<10} -> {thr}{marker}")
 
-    # Load tokenizer & model
-    if not quiet:
-        print("[INFO] Loading tokenizer:", tokenizer_name)
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
-
-    if not quiet:
-        print("[INFO] Loading model from local path:", str(resolved_model_path))
-    config = AutoConfig.from_pretrained(
-        str(resolved_model_path),
-        local_files_only=True,
-    )
-    model = AutoModelForSequenceClassification.from_pretrained(
-        str(resolved_model_path),
-        config=config,
-        local_files_only=True,
-    )
-
-    # dtype / device placement
-    model.to(device)
-    if fp16 and device.type == "cuda":
-        model.half()
+    tokenizer = None
+    model = None
+    if debug_force_prob is None:
+        # Load tokenizer & model for normal inference
         if not quiet:
-            print("[INFO] Using FP16 on CUDA")
-    model.eval()
+            print("[INFO] Loading tokenizer:", tokenizer_name)
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+
+        if not quiet:
+            print("[INFO] Loading model from local path:", str(resolved_model_path))
+        config = AutoConfig.from_pretrained(
+            str(resolved_model_path),
+            local_files_only=True,
+        )
+        model = AutoModelForSequenceClassification.from_pretrained(
+            str(resolved_model_path),
+            config=config,
+            local_files_only=True,
+        )
+
+        # dtype / device placement
+        model.to(device)
+        if fp16 and device.type == "cuda":
+            model.half()
+            if not quiet:
+                print("[INFO] Using FP16 on CUDA")
+        model.eval()
+    else:
+        if debug_force_prob < 0.0 or debug_force_prob > 1.0:
+            raise ValueError("debug_force_prob must be in [0.0, 1.0]")
+        if not quiet:
+            print(f"[INFO] Debug mode: force toxic_prob={debug_force_prob} for all segments")
 
     # Output files
     seg_out_path = out_dir / "crawled_predictions.jsonl"
@@ -202,6 +219,7 @@ def infer_crawled(
 
     predictions_all: List[Dict[str, Any]] = []
     page_results: List[Dict[str, Any]] = []
+    category_counts: Dict[str, int] = {}
 
     for folder in tqdm(url_folders, desc="Processing pages"):
         meta_path = folder / "meta.json"
@@ -215,6 +233,9 @@ def infer_crawled(
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
         except Exception:
             meta = {}
+        url = meta.get("url", "unknown")
+        domain_category, effective_threshold = domain_clf.classify(url)
+        category_counts[domain_category] = category_counts.get(domain_category, 0) + 1
 
         segments = load_segments_jsonl(segs_path)
         if not segments:
@@ -225,11 +246,14 @@ def infer_crawled(
         # Batch inference
         for i in range(0, len(segments), batch_size):
             batch_texts = segments[i : i + batch_size]
-            probs = predict_probs(
-                batch_texts, tokenizer, model, device=device, max_length=max_length
-            )
+            if debug_force_prob is None:
+                probs = predict_probs(
+                    batch_texts, tokenizer, model, device=device, max_length=max_length
+                )
+            else:
+                probs = [float(debug_force_prob)] * len(batch_texts)
             for text, prob in zip(batch_texts, probs):
-                label = 1 if prob > seg_threshold else 0
+                label = 1 if prob > effective_threshold else 0
                 page_preds.append(
                     {
                         "text": text,
@@ -251,7 +275,9 @@ def infer_crawled(
         page_results.append(
             {
                 "url_hash": url_hash,
-                "url": meta.get("url", "unknown"),
+                "url": url,
+                "domain_category": domain_category,
+                "seg_threshold_used": round(float(effective_threshold), 4),
                 "method": meta.get("method", "unknown"),
                 "status": meta.get("status", "unknown"),
                 "total_segments": total_segs,
@@ -269,7 +295,9 @@ def infer_crawled(
             predictions_all.append(
                 {
                     "url_hash": url_hash,
-                    "url": meta.get("url", "unknown"),
+                    "url": url,
+                    "domain_category": domain_category,
+                    "seg_threshold_used": round(float(effective_threshold), 4),
                     **p,
                 }
             )
@@ -293,7 +321,7 @@ def infer_crawled(
         print(f"PAGE-LEVEL SUMMARY (max_length={max_length})")
         print("=" * 60)
         if len(df_pages) > 0:
-            cols = ["url", "total_segments", "toxic_ratio", "page_toxic", "avg_toxic_prob", "method"]
+            cols = ["url", "domain_category", "seg_threshold_used", "total_segments", "toxic_ratio", "page_toxic", "avg_toxic_prob", "method"]
             cols = [c for c in cols if c in df_pages.columns]
             print(df_pages[cols].to_string(index=False))
 
@@ -302,6 +330,10 @@ def infer_crawled(
             print(f"- Avg toxic_ratio trên tất cả pages: {df_pages['toxic_ratio'].mean():.4f}")
             print(f"- % trang toxic (page_threshold {page_threshold}): {(df_pages['page_toxic'] == 1).mean() * 100:.2f}%")
             print(f"- Avg segments/page: {df_pages['total_segments'].mean():.1f}")
+            print("- Domain category breakdown:")
+            for cat, cnt in sorted(category_counts.items()):
+                thr = domain_clf.thresholds.get(cat, "?")
+                print(f"  {cat:<10}: {cnt:>4} pages (threshold={thr})")
         else:
             print("[WARN] No pages produced results. Check your data_dir structure & segments.jsonl existence.")
         print("=" * 60)
@@ -340,6 +372,12 @@ def main():
     ap.add_argument("--fp16", action="store_true", help="Use fp16 on CUDA (ignored on CPU/MPS)")
     ap.add_argument("--limit_pages", type=int, default=0, help="Debug: process only first N pages (0 = all)")
     ap.add_argument("--quiet", action="store_true")
+    ap.add_argument(
+        "--debug_force_prob",
+        type=float,
+        default=None,
+        help="Debug only: force toxic_prob for every segment (0..1), bypass model inference",
+    )
 
     args = ap.parse_args()
 
@@ -356,6 +394,7 @@ def main():
         fp16=args.fp16,
         limit_pages=args.limit_pages,
         quiet=args.quiet,
+        debug_force_prob=args.debug_force_prob,
     )
 
 if __name__ == "__main__":

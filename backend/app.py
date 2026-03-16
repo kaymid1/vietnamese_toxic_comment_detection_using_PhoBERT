@@ -2,6 +2,7 @@ import csv
 import hashlib
 import json
 import logging
+import os
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -11,11 +12,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from setup_and_crawl import crawl_urls
-from backup_infer_crawled_local import infer_crawled
+from infer_crawled_local import infer_crawled
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = BASE_DIR / "data" / "raw" / "crawled_urls"
-DEFAULT_MODEL_PATH = BASE_DIR / "models_2" / "phobert" / "new"
+DEFAULT_MODEL_BASE_DIR = Path(os.getenv("VIETTOXIC_MODEL_BASE_DIR", "/models_2/phobert")).expanduser()
+if not DEFAULT_MODEL_BASE_DIR.exists():
+    repo_local_model_dir = BASE_DIR / "models_2" / "phobert"
+    if repo_local_model_dir.exists():
+        DEFAULT_MODEL_BASE_DIR = repo_local_model_dir
 
 logging.basicConfig(
     level=logging.INFO,
@@ -67,6 +72,7 @@ class AnalyzeOptions(BaseModel):
     max_length: int = Field(default=256, ge=16)
     page_threshold: float = Field(default=0.25, ge=0.0, le=1.0)
     seg_threshold: float = Field(default=0.4, ge=0.0, le=1.0)
+    model_name: Optional[str] = None
     model_path: Optional[str] = None
     enable_video: bool = False
 
@@ -74,6 +80,55 @@ class AnalyzeOptions(BaseModel):
 class AnalyzeRequest(BaseModel):
     urls: List[str] = Field(min_items=1)
     options: Optional[AnalyzeOptions] = None
+
+
+def list_available_models(base_dir: Path) -> List[str]:
+    if not base_dir.exists():
+        return []
+    if not base_dir.is_dir():
+        raise NotADirectoryError(f"Model base path must be a directory: {base_dir}")
+    try:
+        return sorted(
+            [
+                p.name
+                for p in base_dir.iterdir()
+                if p.is_dir() and not p.name.startswith(".")
+            ]
+        )
+    except PermissionError as exc:
+        raise PermissionError(f"Permission denied while reading model directory: {base_dir}") from exc
+
+
+def get_default_model(base_dir: Path) -> Optional[str]:
+    models = list_available_models(base_dir)
+    if not models:
+        return None
+    if "v2" in models:
+        return "v2"
+    return models[0]
+
+
+def resolve_model_path(base_dir: Path, model_name: Optional[str]) -> Path:
+    models = list_available_models(base_dir)
+    if not models:
+        raise ValueError(f"No models found under {base_dir}")
+
+    if not model_name:
+        model_name = get_default_model(base_dir)
+
+    if model_name is None:
+        raise ValueError("No default model available")
+
+    if any(x in model_name for x in ("..", "/", "\\")):
+        raise ValueError(f"Invalid model name: {model_name}")
+
+    if model_name not in models:
+        raise ValueError(f"Model '{model_name}' not found. Available: {models}")
+
+    model_path = base_dir / model_name
+    if not model_path.is_dir():
+        raise ValueError(f"Model '{model_name}' is not a directory under {base_dir}")
+    return model_path
 
 
 def hash_url(url: str) -> str:
@@ -237,14 +292,28 @@ def analyze(request: AnalyzeRequest) -> Dict[str, Any]:
         out_dir = BASE_DIR / "data" / "processed" / f"job_{job_id}"
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        model_path = Path(options.model_path).expanduser() if options.model_path else DEFAULT_MODEL_PATH
-        if not model_path.exists():
-            raise HTTPException(
-                status_code=500,
-                detail=f"Model path not found: {model_path}",
-            )
+        try:
+            if options.model_path:
+                requested_model_path = Path(options.model_path).expanduser().resolve()
+                base_dir_resolved = DEFAULT_MODEL_BASE_DIR.resolve()
+                try:
+                    requested_model_path.relative_to(base_dir_resolved)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"Model path must be under {base_dir_resolved}: {requested_model_path}"
+                    ) from exc
+                model_name = requested_model_path.name
+                model_path = resolve_model_path(DEFAULT_MODEL_BASE_DIR, model_name)
+            else:
+                model_path = resolve_model_path(DEFAULT_MODEL_BASE_DIR, options.model_name)
+                model_name = model_path.name
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except (PermissionError, OSError) as exc:
+            raise HTTPException(status_code=500, detail=f"Unable to access model directory: {exc}") from exc
 
         logger.info("Job %s: start analyze for %s urls", job_id, len(urls))
+        logger.info("Job %s: using model '%s' from %s", job_id, model_name, model_path)
         logger.info("Job %s: crawling", job_id)
         crawl_results = crawl_urls(urls, out_dir=str(DATA_DIR), enable_video=options.enable_video)
         for r in crawl_results:
@@ -367,6 +436,7 @@ def analyze(request: AnalyzeRequest) -> Dict[str, Any]:
         logger.info("Job %s: completed", job_id)
         return {
             "job_id": job_id,
+            "model_name": model_name,
             "thresholds": {
                 "seg_threshold": options.seg_threshold,
                 "page_threshold": options.page_threshold,
@@ -378,3 +448,15 @@ def analyze(request: AnalyzeRequest) -> Dict[str, Any]:
     except Exception as exc:
         logger.exception("Analyze failed")
         raise HTTPException(status_code=500, detail=f"Analyze failed: {exc}")
+
+
+@app.get("/api/models")
+def get_models() -> Dict[str, Any]:
+    try:
+        models = list_available_models(DEFAULT_MODEL_BASE_DIR)
+        return {
+            "models": models,
+            "default": get_default_model(DEFAULT_MODEL_BASE_DIR),
+        }
+    except (PermissionError, OSError, NotADirectoryError) as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to list models: {exc}") from exc

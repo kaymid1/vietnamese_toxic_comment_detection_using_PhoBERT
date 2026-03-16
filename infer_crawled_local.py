@@ -9,7 +9,8 @@ Domain-aware thresholding: seg_threshold is adjusted per URL category
 
 Example:
   python infer_crawled_local.py \
-    --model_path ./experiments/phobert_exp-01/checkpoint-best \
+    --model_name v2 \
+    --model_base_dir /models_2/phobert \
     --data_dir data/raw/crawled_urls \
     --out_dir data/processed \
     --batch_size 8 \
@@ -29,6 +30,7 @@ Notes:
 
 import json
 import argparse
+import os
 from typing import List, Dict, Any, Tuple, Optional
 from pathlib import Path
 
@@ -39,6 +41,13 @@ from transformers import AutoTokenizer, AutoModelForSequenceClassification, Auto
 
 # Domain-aware threshold classifier (same directory)
 from domain_classifier import DomainClassifier
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+BASE_MODEL_DIR = Path(os.getenv("VIETTOXIC_MODEL_BASE_DIR", "/models_2/phobert")).expanduser()
+if not BASE_MODEL_DIR.exists():
+    repo_local_model_dir = SCRIPT_DIR / "models_2" / "phobert"
+    if repo_local_model_dir.exists():
+        BASE_MODEL_DIR = repo_local_model_dir
 
 
 # ---------------------------------------------------------------------------
@@ -88,6 +97,59 @@ def iter_url_folders(root_dir: Path) -> List[Path]:
 
 
 # ---------------------------------------------------------------------------
+# Model selection
+# ---------------------------------------------------------------------------
+
+def list_available_models(base_dir: Path) -> List[str]:
+    if not base_dir.exists():
+        return []
+    if not base_dir.is_dir():
+        raise NotADirectoryError(f"Model base path must be a directory: {base_dir}")
+    try:
+        return sorted(
+            [
+                p.name
+                for p in base_dir.iterdir()
+                if p.is_dir() and not p.name.startswith(".")
+            ]
+        )
+    except PermissionError as exc:
+        raise PermissionError(f"Permission denied while reading model directory: {base_dir}") from exc
+
+
+def get_default_model(base_dir: Path) -> Optional[str]:
+    models = list_available_models(base_dir)
+    if not models:
+        return None
+    if "v2" in models:
+        return "v2"
+    return models[0]
+
+
+def resolve_model_path(base_dir: Path, model_name: Optional[str]) -> Path:
+    models = list_available_models(base_dir)
+    if not models:
+        raise ValueError(f"No models found under {base_dir}")
+
+    if not model_name:
+        model_name = get_default_model(base_dir)
+
+    if model_name is None:
+        raise ValueError("No default model available")
+
+    if any(x in model_name for x in ("..", "/", "\\")):
+        raise ValueError(f"Invalid model name: {model_name}")
+
+    if model_name not in models:
+        raise ValueError(f"Model '{model_name}' not found. Available: {models}")
+
+    model_path = base_dir / model_name
+    if not model_path.is_dir():
+        raise ValueError(f"Model '{model_name}' is not a directory under {base_dir}")
+    return model_path
+
+
+# ---------------------------------------------------------------------------
 # Inference
 # ---------------------------------------------------------------------------
 
@@ -118,7 +180,7 @@ def predict_probs(
 # ---------------------------------------------------------------------------
 
 def infer_crawled(
-    model_path: str,
+    model_path: Optional[str],
     data_dir: str,
     out_dir: str,
     batch_size: int = 8,
@@ -131,6 +193,9 @@ def infer_crawled(
     limit_pages: int = 0,
     quiet: bool = False,
     only_url_hashes: Optional[List[str]] = None,
+    debug_force_prob: Optional[float] = None,
+    model_name: Optional[str] = None,
+    model_base_dir: Optional[str] = None,
     # Per-category threshold overrides (None = use DomainClassifier defaults)
     threshold_news:    Optional[float] = None,
     threshold_social:  Optional[float] = None,
@@ -139,8 +204,14 @@ def infer_crawled(
 ) -> Dict[str, Any]:
 
     # ── Validate model path ──────────────────────────────────────────────
-    model_path = Path(model_path).expanduser()
-    resolved_model_path = model_path.resolve()
+    if model_path:
+        resolved_model_path = Path(model_path).expanduser().resolve()
+        selected_model_name = resolved_model_path.name
+    else:
+        base_dir = Path(model_base_dir).expanduser() if model_base_dir else BASE_MODEL_DIR
+        resolved_model_path = resolve_model_path(base_dir, model_name).resolve()
+        selected_model_name = resolved_model_path.name
+
     if not resolved_model_path.exists():
         raise FileNotFoundError(f"Model path not found: {resolved_model_path}")
     if not resolved_model_path.is_dir():
@@ -182,29 +253,39 @@ def infer_crawled(
         for cat, thr in domain_clf.thresholds.items():
             marker = " ← CLI default (--seg_threshold)" if cat == "unknown" and threshold_unknown is None else ""
             print(f"         {cat:<10} → {thr}{marker}")
+        print(f"[INFO] Selected model: {selected_model_name}")
+        print(f"[INFO] Model path: {resolved_model_path}")
 
     # ── Device ───────────────────────────────────────────────────────────
     device = pick_device(device)
     if not quiet:
         print(f"[INFO] Device: {device}")
 
-    # ── Load tokenizer & model ───────────────────────────────────────────
-    if not quiet:
-        print("[INFO] Loading tokenizer:", tokenizer_name)
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
-
-    if not quiet:
-        print("[INFO] Loading model from:", str(resolved_model_path))
-    config = AutoConfig.from_pretrained(str(resolved_model_path), local_files_only=True)
-    model  = AutoModelForSequenceClassification.from_pretrained(
-        str(resolved_model_path), config=config, local_files_only=True
-    )
-    model.to(device)
-    if fp16 and device.type == "cuda":
-        model.half()
+    # ── Load tokenizer & model (skip in debug force-prob mode) ───────────
+    tokenizer = None
+    model = None
+    if debug_force_prob is None:
         if not quiet:
-            print("[INFO] Using FP16 on CUDA")
-    model.eval()
+            print("[INFO] Loading tokenizer:", tokenizer_name)
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+
+        if not quiet:
+            print("[INFO] Loading model from:", str(resolved_model_path))
+        config = AutoConfig.from_pretrained(str(resolved_model_path), local_files_only=True)
+        model  = AutoModelForSequenceClassification.from_pretrained(
+            str(resolved_model_path), config=config, local_files_only=True
+        )
+        model.to(device)
+        if fp16 and device.type == "cuda":
+            model.half()
+            if not quiet:
+                print("[INFO] Using FP16 on CUDA")
+        model.eval()
+    else:
+        if debug_force_prob < 0.0 or debug_force_prob > 1.0:
+            raise ValueError("debug_force_prob must be in [0.0, 1.0]")
+        if not quiet:
+            print(f"[INFO] Debug mode: force toxic_prob={debug_force_prob} for all segments")
 
     # ── Output paths ─────────────────────────────────────────────────────
     seg_out_path  = out_dir / "crawled_predictions.jsonl"
@@ -263,7 +344,10 @@ def infer_crawled(
         # ── Batch inference ───────────────────────────────────────────
         for i in range(0, len(segments), batch_size):
             batch_texts = segments[i: i + batch_size]
-            probs = predict_probs(batch_texts, tokenizer, model, device=device, max_length=max_length)
+            if debug_force_prob is None:
+                probs = predict_probs(batch_texts, tokenizer, model, device=device, max_length=max_length)
+            else:
+                probs = [float(debug_force_prob)] * len(batch_texts)
             for text, prob in zip(batch_texts, probs):
                 label = 1 if prob > effective_threshold else 0   # ← domain-aware threshold
                 page_preds.append({
@@ -364,7 +448,24 @@ def infer_crawled(
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model_path",      type=str, required=True)
+    ap.add_argument(
+        "--model_name",
+        type=str,
+        default=None,
+        help="Model directory name under --model_base_dir (e.g. v2, v1, lstm)",
+    )
+    ap.add_argument(
+        "--model_base_dir",
+        type=str,
+        default=str(BASE_MODEL_DIR),
+        help="Base dir that contains model subdirectories",
+    )
+    ap.add_argument(
+        "--model_path",
+        type=str,
+        default=None,
+        help="Explicit model directory path. If provided, overrides --model_name",
+    )
     ap.add_argument("--tokenizer_name",  type=str, default="vinai/phobert-base")
     ap.add_argument("--data_dir",        type=str, default="data/raw/crawled_urls")
     ap.add_argument("--out_dir",         type=str, default="data/processed")
@@ -385,11 +486,15 @@ def main():
     ap.add_argument("--fp16",        action="store_true")
     ap.add_argument("--limit_pages", type=int, default=0)
     ap.add_argument("--quiet",       action="store_true")
+    ap.add_argument("--debug_force_prob", type=float, default=None,
+                    help="Debug only: force toxic_prob for every segment (0..1), bypass model inference")
 
     args = ap.parse_args()
 
     infer_crawled(
         model_path      = args.model_path,
+        model_name      = args.model_name,
+        model_base_dir  = args.model_base_dir,
         data_dir        = args.data_dir,
         out_dir         = args.out_dir,
         batch_size      = args.batch_size,
@@ -401,6 +506,7 @@ def main():
         fp16            = args.fp16,
         limit_pages     = args.limit_pages,
         quiet           = args.quiet,
+        debug_force_prob = args.debug_force_prob,
         threshold_news    = args.threshold_news,
         threshold_social  = args.threshold_social,
         threshold_forum   = args.threshold_forum,

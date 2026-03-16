@@ -5,12 +5,26 @@ import { AlertCircle, Brain, FileSearch, TrendingUp } from "lucide-react";
 import { Progress } from "@/app/components/ui/progress";
 
 interface HomePageProps {
-  onAnalyze: (urls: string[]) => Promise<void>;
+  onAnalyze: (urls: string[], modelName?: string | null) => Promise<void>;
+  availableModels: string[];
+  selectedModel: string | null;
+  onSelectModel: (modelName: string) => void;
+  modelsLoading: boolean;
+  modelsError?: string | null;
   errorMessage?: string | null;
   onClearError?: () => void;
 }
 
-export function HomePage({ onAnalyze, errorMessage, onClearError }: HomePageProps) {
+export function HomePage({
+  onAnalyze,
+  availableModels,
+  selectedModel,
+  onSelectModel,
+  modelsLoading,
+  modelsError,
+  errorMessage,
+  onClearError,
+}: HomePageProps) {
   const [urlInput, setUrlInput] = useState("");
   const [isProcessing, setIsProcessing] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -24,7 +38,7 @@ export function HomePage({ onAnalyze, errorMessage, onClearError }: HomePageProp
       .map((url) => url.trim())
       .filter((url) => url.length > 0);
 
-    if (urls.length === 0) return;
+    if (urls.length === 0 || !selectedModel) return;
 
     onClearError?.();
     setIsProcessing(true);
@@ -35,7 +49,7 @@ export function HomePage({ onAnalyze, errorMessage, onClearError }: HomePageProp
     }, 500);
 
     try {
-      await onAnalyze(urls);
+      await onAnalyze(urls, selectedModel);
       setProgress(100);
       setTimeout(() => setIsProcessing(false), 300);
     } finally {
@@ -129,6 +143,36 @@ export function HomePage({ onAnalyze, errorMessage, onClearError }: HomePageProp
               disabled={isProcessing}
             />
 
+            <div className="mb-4">
+              <label className="block text-sm font-medium text-gray-700 mb-2">Model</label>
+              <select
+                className="w-full h-11 rounded-md border border-gray-300 px-3 text-sm bg-white disabled:bg-gray-100 disabled:text-gray-500"
+                value={selectedModel ?? ""}
+                onChange={(e) => onSelectModel(e.target.value)}
+                disabled={isProcessing || modelsLoading || availableModels.length === 0}
+              >
+                {modelsLoading && <option value="">Đang tải danh sách model...</option>}
+                {!modelsLoading && availableModels.length === 0 && (
+                  <option value="">Không có model khả dụng</option>
+                )}
+                {availableModels.map((model) => (
+                  <option key={model} value={model}>
+                    {model}
+                  </option>
+                ))}
+              </select>
+              {modelsError && (
+                <p className="mt-2 text-sm text-red-700">
+                  Không thể tải danh sách model: {modelsError}
+                </p>
+              )}
+              {!modelsLoading && !modelsError && availableModels.length === 0 && (
+                <p className="mt-2 text-sm text-amber-700">
+                  Không tìm thấy model trong thư mục `/models_2/phobert/`. Vui lòng kiểm tra backend.
+                </p>
+              )}
+            </div>
+
             <div className="flex items-start gap-3 mb-6 p-4 bg-blue-50 rounded-lg">
               <AlertCircle className="w-5 h-5 text-blue-600 mt-0.5 flex-shrink-0" />
               <p className="text-sm text-gray-700">
@@ -141,7 +185,7 @@ export function HomePage({ onAnalyze, errorMessage, onClearError }: HomePageProp
               <div className="mb-6">
                 <div className="flex items-center justify-between mb-2">
                   <span className="text-sm text-gray-600">
-                    Đang cào dữ liệu và chạy mô hình PhoBERT…
+                    Đang cào dữ liệu và chạy mô hình {selectedModel ?? "N/A"}…
                   </span>
                   <span className="text-sm" style={{ color: "var(--viet-primary)" }}>
                     {progress}%
@@ -159,10 +203,13 @@ export function HomePage({ onAnalyze, errorMessage, onClearError }: HomePageProp
 
             <Button
               onClick={handleAnalyze}
-              disabled={isProcessing || !urlInput.trim()}
+              disabled={isProcessing || !urlInput.trim() || modelsLoading || !selectedModel}
               className="w-full h-12 text-base"
               style={{
-                backgroundColor: isProcessing || !urlInput.trim() ? "#94a3b8" : "var(--viet-primary)",
+                backgroundColor:
+                  isProcessing || !urlInput.trim() || modelsLoading || !selectedModel
+                    ? "#94a3b8"
+                    : "var(--viet-primary)",
               }}
             >
               {isProcessing ? "Đang xử lý..." : "Quét Nội Dung"}

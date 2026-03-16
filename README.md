@@ -58,6 +58,7 @@ curl -X POST http://localhost:8000/api/analyze \
       "https://tuoitre.vn/cach-nao-de-cham-dut-viec-chui-boi-xuc-pham-tren-mang-20211027223924572.htm"
     ],
     "options": {
+      "model_name": "v2",
       "batch_size": 8,
       "max_length": 256,
       "page_threshold": 0.25,
@@ -68,7 +69,14 @@ curl -X POST http://localhost:8000/api/analyze \
 
 ### Notes
 - CORS: backend currently allows all origins (`*`) for ease of local/ngrok testing.
-- Default model path: `models_2/phobert/new` (override with `options.model_path` if needed).
+- Model list endpoint: `GET /api/models`.
+- Default model selection: ưu tiên `v2` nếu tồn tại trong `/models_2/phobert/`, nếu không chọn model đầu tiên theo sort.
+- Backward compatibility: vẫn có thể gửi `options.model_path` nếu muốn override trực tiếp.
+
+### List available models
+```bash
+curl -X GET http://localhost:8000/api/models
+```
 
 ## Expose Backend via ngrok
 
@@ -94,6 +102,7 @@ curl -X POST https://living-rare-ram.ngrok-free.app/api/analyze \
   -d '{
     "urls": ["https://example.com"],
     "options": {
+      "model_name": "v2",
       "batch_size": 8,
       "max_length": 256,
       "page_threshold": 0.25,
@@ -190,3 +199,22 @@ After everything is running:
 - The UI will call the API at `https://living-rare-ram.ngrok-free.app` automatically.
 
 If you only see JSON like `{"status":"ok"...}`, you opened the API domain. Use the **UI** tunnel URL instead.
+
+## Inference Sanity Check with Mock Data
+
+We added a mock-data sanity check to verify that the inference script and domain-aware thresholding behave correctly.
+
+- Mock inputs use toxic Vietnamese comment segments for both:
+  - `news` URL: `https://vnexpress.net/gia-lap-bai-viet-test-domain-news-12345.html`
+  - `social` URL: `https://facebook.com/mock-toxic-thread-99999`
+- Run with forced probability (`--debug_force_prob`) to validate threshold logic deterministically.
+
+Observed results:
+
+- `mock_debug_060` (`debug_force_prob=0.60`)
+  - `social` threshold `0.50` => toxic (`toxic_ratio=1.0`)
+  - `news` threshold `0.72` => non-toxic (`toxic_ratio=0.0`)
+- `mock_debug_099` (`debug_force_prob=0.99`)
+  - both `social` and `news` => toxic (`toxic_ratio=1.0`)
+
+Conclusion: inference flow and domain filter are working as expected in this mock test setup.

@@ -14,6 +14,16 @@ export default defineConfig({
     host: true,
     port: 5173,
     allowedHosts: ['.ngrok-free.app', 'localhost', '127.0.0.1'],
+    proxy: {
+      '/api': {
+        target: 'http://127.0.0.1:8000',
+        changeOrigin: true,
+      },
+      '/health': {
+        target: 'http://127.0.0.1:8000',
+        changeOrigin: true,
+      },
+    },
   },
   resolve: {
     alias: {
