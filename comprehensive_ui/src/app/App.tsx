@@ -94,7 +94,8 @@ export default function App() {
 
         const sortedModels = [...models].sort((a, b) => a.localeCompare(b));
         const apiDefault = data.default && sortedModels.includes(data.default) ? data.default : null;
-        const resolvedDefault = apiDefault || (sortedModels.includes("v2") ? "v2" : sortedModels[0] || null);
+        const resolvedDefault =
+          apiDefault || (sortedModels.includes("phobert/v2") ? "phobert/v2" : sortedModels[0] || null);
 
         if (!isMounted) return;
 

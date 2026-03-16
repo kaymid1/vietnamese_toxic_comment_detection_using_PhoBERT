@@ -132,7 +132,7 @@ These files / folders are **not the main source**:
 
 ### Models / results
 
-- `models_2/phobert/`
+- `models/options/phobert/`
   - local checkpoints used by the backend / inference script
 - `results/baseline/`
   - baseline metrics + serialized LR/vectorizer
@@ -272,7 +272,7 @@ Metrics currently committed in the repo:
 Important note:
 
 - this script writes to `models/phobert/` and `results/phobert/`
-- but the backend / inference path currently reads checkpoints from `models_2/phobert/` or `VIETTOXIC_MODEL_BASE_DIR`
+- but the backend / inference path currently reads checkpoints from `models/options/phobert/` or `VIETTOXIC_MODEL_OPTIONS_DIR`
 - this is an **important mismatch** in the current repo
 
 ### Existing optimization log
@@ -290,14 +290,16 @@ Current information there:
 
 If there is a conflict between static UI text and this log, trust the log + source code.
 
+Note: model options now live under `models/options/` (with type/name IDs like `phobert/v1`, `tfidf_lr/baseline`).
+
 ---
 
 ## 7. Model directory and model selection
 
 The backend and inference script resolve checkpoints in this order:
 
-1. `VIETTOXIC_MODEL_BASE_DIR` if the env var exists
-2. otherwise local repo fallback: `models_2/phobert`
+1. `VIETTOXIC_MODEL_OPTIONS_DIR` if the env var exists
+2. otherwise local repo fallback: `models/options`
 
 `get_default_model()` logic:
 
@@ -306,13 +308,13 @@ The backend and inference script resolve checkpoints in this order:
 
 Repo snapshot on 2026-03-16:
 
-- `models_2/phobert/backup`
-- `models_2/phobert/backup_no2`
-- `models_2/phobert/new`
-- `models_2/phobert/v1`
+- `models/options/phobert/backup`
+- `models/options/phobert/backup_no2`
+- `models/options/phobert/new`
+- `models/options/phobert/v1`
 
 There is **no `v2` in the repo snapshot**, so the local default may not match the README.
-However, the user machine may still have `/models_2/phobert/v2` outside the repo via env var.
+However, the user machine may still have `/models/options/phobert/v2` outside the repo via env var.
 
 A valid checkpoint directory must contain at least:
 
@@ -738,10 +740,10 @@ Important note:
 1. The README, static UI text, and actual code are not fully synchronized.
    - If they conflict, trust the source code + real artifacts.
 
-2. `scripts/05_train_phobert.py` writes to `models/phobert`, but serving reads from `models_2/phobert`.
+2. `scripts/05_train_phobert.py` writes to `models/phobert`, but serving reads from `models/options/phobert`.
    - If training a new model for the API, resolve this path mismatch explicitly.
 
-3. In this repo snapshot there is no `v2` under `models_2/phobert`.
+3. In this repo snapshot there is no `v2` under `models/options/phobert`.
    - The actual default model may differ from the README.
 
 4. `enable_video=True` from the frontend can trigger transcript + ASR paths as well.

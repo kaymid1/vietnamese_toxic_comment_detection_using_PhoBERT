@@ -5,7 +5,7 @@ import logging
 import os
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -16,11 +16,20 @@ from infer_crawled_local import infer_crawled
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = BASE_DIR / "data" / "raw" / "crawled_urls"
-DEFAULT_MODEL_BASE_DIR = Path(os.getenv("VIETTOXIC_MODEL_BASE_DIR", "/models_2/phobert")).expanduser()
-if not DEFAULT_MODEL_BASE_DIR.exists():
-    repo_local_model_dir = BASE_DIR / "models_2" / "phobert"
-    if repo_local_model_dir.exists():
-        DEFAULT_MODEL_BASE_DIR = repo_local_model_dir
+MODEL_OPTIONS_DIR = Path(
+    os.getenv("VIETTOXIC_MODEL_OPTIONS_DIR", str(BASE_DIR / "models" / "options"))
+).expanduser()
+
+MODEL_TYPES = {
+    "phobert": {
+        "required": ("config.json",),
+        "required_any": ("model.safetensors", "pytorch_model.bin"),
+    },
+    "tfidf_lr": {
+        "required": ("vectorizer.pkl", "model_lr.pkl"),
+        "required_any": (),
+    },
+}
 
 logging.basicConfig(
     level=logging.INFO,
@@ -82,7 +91,27 @@ class AnalyzeRequest(BaseModel):
     options: Optional[AnalyzeOptions] = None
 
 
-def list_available_models(base_dir: Path) -> List[str]:
+def list_model_types(model_root: Path) -> List[str]:
+    if not model_root.exists():
+        return []
+    if not model_root.is_dir():
+        raise NotADirectoryError(f"Model root path must be a directory: {model_root}")
+    try:
+        return sorted(
+            [
+                p.name
+                for p in model_root.iterdir()
+                if p.is_dir() and not p.name.startswith(".")
+            ]
+        )
+    except PermissionError as exc:
+        raise PermissionError(f"Permission denied while reading model root: {model_root}") from exc
+
+
+def list_models_by_type(model_root: Path, model_type: str) -> List[str]:
+    if model_type not in MODEL_TYPES:
+        return []
+    base_dir = model_root / model_type
     if not base_dir.exists():
         return []
     if not base_dir.is_dir():
@@ -99,36 +128,88 @@ def list_available_models(base_dir: Path) -> List[str]:
         raise PermissionError(f"Permission denied while reading model directory: {base_dir}") from exc
 
 
-def get_default_model(base_dir: Path) -> Optional[str]:
-    models = list_available_models(base_dir)
-    if not models:
+def list_all_models(model_root: Path) -> List[Dict[str, str]]:
+    models: List[Dict[str, str]] = []
+    for model_type in list_model_types(model_root):
+        for name in list_models_by_type(model_root, model_type):
+            models.append({
+                "id": f"{model_type}/{name}",
+                "type": model_type,
+                "name": name,
+            })
+    return models
+
+
+def get_default_model_id(model_root: Path) -> Optional[str]:
+    phobert_models = list_models_by_type(model_root, "phobert")
+    if phobert_models:
+        if "v2" in phobert_models:
+            return "phobert/v2"
+        return f"phobert/{phobert_models[0]}"
+    all_models = list_all_models(model_root)
+    if not all_models:
         return None
-    if "v2" in models:
-        return "v2"
-    return models[0]
+    return all_models[0]["id"]
 
 
-def resolve_model_path(base_dir: Path, model_name: Optional[str]) -> Path:
-    models = list_available_models(base_dir)
-    if not models:
-        raise ValueError(f"No models found under {base_dir}")
+def validate_model_artifacts(model_type: str, model_dir: Path) -> None:
+    requirements = MODEL_TYPES.get(model_type)
+    if not requirements:
+        raise ValueError(f"Unsupported model type: {model_type}")
 
-    if not model_name:
-        model_name = get_default_model(base_dir)
+    missing = [name for name in requirements["required"] if not (model_dir / name).exists()]
+    required_any = requirements["required_any"]
+    if required_any and not any((model_dir / name).exists() for name in required_any):
+        missing.append(" or ".join(required_any))
 
-    if model_name is None:
+    if missing:
+        files = sorted([p.name for p in model_dir.iterdir() if p.is_file()])
+        raise FileNotFoundError(
+            f"Checkpoint folder missing: {', '.join(missing)}. Files found: {files}"
+        )
+
+
+def parse_model_id(model_id: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+    if not model_id:
+        return None, None
+    if any(x in model_id for x in ("..", "\\")):
+        raise ValueError(f"Invalid model name: {model_id}")
+    if "/" not in model_id:
+        return "phobert", model_id
+    model_type, name = model_id.split("/", 1)
+    if not model_type or not name or any(x in name for x in ("..", "/", "\\")):
+        raise ValueError(f"Invalid model name: {model_id}")
+    return model_type, name
+
+
+def resolve_model_path(model_root: Path, model_id: Optional[str]) -> Tuple[str, str, Path]:
+    if not model_id:
+        model_id = get_default_model_id(model_root)
+
+    if model_id is None:
         raise ValueError("No default model available")
 
-    if any(x in model_name for x in ("..", "/", "\\")):
-        raise ValueError(f"Invalid model name: {model_name}")
+    model_type, name = parse_model_id(model_id)
+    if not model_type or not name:
+        raise ValueError(f"Invalid model name: {model_id}")
+    if model_type not in MODEL_TYPES:
+        raise ValueError(f"Unsupported model type: {model_type}")
+    if any(x in name for x in ("..", "/", "\\")):
+        raise ValueError(f"Invalid model name: {model_id}")
 
-    if model_name not in models:
-        raise ValueError(f"Model '{model_name}' not found. Available: {models}")
+    base_dir = model_root / model_type
+    models = list_models_by_type(model_root, model_type)
+    if not models:
+        raise ValueError(f"No models found under {base_dir}")
+    if name not in models:
+        raise ValueError(f"Model '{model_id}' not found. Available: {models}")
 
-    model_path = base_dir / model_name
+    model_path = base_dir / name
     if not model_path.is_dir():
-        raise ValueError(f"Model '{model_name}' is not a directory under {base_dir}")
-    return model_path
+        raise ValueError(f"Model '{model_id}' is not a directory under {base_dir}")
+
+    validate_model_artifacts(model_type, model_path)
+    return model_type, name, model_path
 
 
 def hash_url(url: str) -> str:
@@ -143,6 +224,10 @@ def to_relative(path: Optional[str]) -> Optional[str]:
         return str(rel)
     except Exception:
         return str(path)
+
+
+def resolve_model_root() -> Path:
+    return MODEL_OPTIONS_DIR
 
 
 def load_page_results(out_dir: Path) -> List[Dict[str, Any]]:
@@ -292,28 +377,34 @@ def analyze(request: AnalyzeRequest) -> Dict[str, Any]:
         out_dir = BASE_DIR / "data" / "processed" / f"job_{job_id}"
         out_dir.mkdir(parents=True, exist_ok=True)
 
+        model_root = resolve_model_root()
         try:
             if options.model_path:
                 requested_model_path = Path(options.model_path).expanduser().resolve()
-                base_dir_resolved = DEFAULT_MODEL_BASE_DIR.resolve()
+                model_root_resolved = model_root.resolve()
                 try:
-                    requested_model_path.relative_to(base_dir_resolved)
+                    requested_model_path.relative_to(model_root_resolved)
                 except ValueError as exc:
                     raise ValueError(
-                        f"Model path must be under {base_dir_resolved}: {requested_model_path}"
+                        f"Model path must be under {model_root_resolved}: {requested_model_path}"
                     ) from exc
+                relative_parts = requested_model_path.relative_to(model_root_resolved).parts
+                if len(relative_parts) < 2:
+                    raise ValueError(f"Model path must point to a model directory under {model_root_resolved}")
+                model_type = relative_parts[0]
                 model_name = requested_model_path.name
-                model_path = resolve_model_path(DEFAULT_MODEL_BASE_DIR, model_name)
+                _, _, model_path = resolve_model_path(model_root, f"{model_type}/{model_name}")
+                model_id = f"{model_type}/{model_name}"
             else:
-                model_path = resolve_model_path(DEFAULT_MODEL_BASE_DIR, options.model_name)
-                model_name = model_path.name
+                model_type, model_name, model_path = resolve_model_path(model_root, options.model_name)
+                model_id = f"{model_type}/{model_name}"
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except (PermissionError, OSError) as exc:
             raise HTTPException(status_code=500, detail=f"Unable to access model directory: {exc}") from exc
 
         logger.info("Job %s: start analyze for %s urls", job_id, len(urls))
-        logger.info("Job %s: using model '%s' from %s", job_id, model_name, model_path)
+        logger.info("Job %s: using model '%s' (%s) from %s", job_id, model_id, model_type, model_path)
         logger.info("Job %s: crawling", job_id)
         crawl_results = crawl_urls(urls, out_dir=str(DATA_DIR), enable_video=options.enable_video)
         for r in crawl_results:
@@ -346,6 +437,7 @@ def analyze(request: AnalyzeRequest) -> Dict[str, Any]:
             logger.info("Job %s: running inference on %s crawled urls", job_id, len(ok_hashes))
             infer_crawled(
                 model_path=str(model_path),
+                model_type=model_type,
                 data_dir=str(infer_data_dir),
                 out_dir=str(out_dir),
                 batch_size=options.batch_size,
@@ -436,7 +528,7 @@ def analyze(request: AnalyzeRequest) -> Dict[str, Any]:
         logger.info("Job %s: completed", job_id)
         return {
             "job_id": job_id,
-            "model_name": model_name,
+            "model_name": model_id,
             "thresholds": {
                 "seg_threshold": options.seg_threshold,
                 "page_threshold": options.page_threshold,
@@ -453,10 +545,11 @@ def analyze(request: AnalyzeRequest) -> Dict[str, Any]:
 @app.get("/api/models")
 def get_models() -> Dict[str, Any]:
     try:
-        models = list_available_models(DEFAULT_MODEL_BASE_DIR)
+        model_root = resolve_model_root()
+        models = list_all_models(model_root)
         return {
-            "models": models,
-            "default": get_default_model(DEFAULT_MODEL_BASE_DIR),
+            "models": [m["id"] for m in models],
+            "default": get_default_model_id(model_root),
         }
     except (PermissionError, OSError, NotADirectoryError) as exc:
         raise HTTPException(status_code=500, detail=f"Failed to list models: {exc}") from exc

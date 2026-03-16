@@ -168,7 +168,7 @@ export function HomePage({
               )}
               {!modelsLoading && !modelsError && availableModels.length === 0 && (
                 <p className="mt-2 text-sm text-amber-700">
-                  Không tìm thấy model trong thư mục `/models_2/phobert/`. Vui lòng kiểm tra backend.
+                  Không tìm thấy model trong thư mục `models/options/`. Vui lòng kiểm tra backend.
                 </p>
               )}
             </div>
@@ -176,7 +176,7 @@ export function HomePage({
             <div className="flex items-start gap-3 mb-6 p-4 bg-blue-50 rounded-lg">
               <AlertCircle className="w-5 h-5 text-blue-600 mt-0.5 flex-shrink-0" />
               <p className="text-sm text-gray-700">
-                Hệ thống sẽ tự động cào dữ liệu từ các URL và chạy mô hình PhoBERT
+                Hệ thống sẽ tự động cào dữ liệu từ các URL và chạy mô hình đã chọn
                 để phát hiện nội dung độc hại. Quá trình này có thể mất vài giây.
               </p>
             </div>

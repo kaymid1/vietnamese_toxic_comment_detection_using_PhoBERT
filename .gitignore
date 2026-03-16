@@ -1,4 +1,5 @@
 models_2/
+models/options/
 model.safetensors
 __pycache__/
 *.pyc

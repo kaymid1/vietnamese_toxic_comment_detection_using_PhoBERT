@@ -9,8 +9,8 @@ Domain-aware thresholding: seg_threshold is adjusted per URL category
 
 Example:
   python infer_crawled_local.py \
-    --model_name v2 \
-    --model_base_dir /models_2/phobert \
+    --model_name phobert/v2 \
+    --model_base_dir models/options \
     --data_dir data/raw/crawled_urls \
     --out_dir data/processed \
     --batch_size 8 \
@@ -32,6 +32,8 @@ import json
 import argparse
 import os
 from typing import List, Dict, Any, Tuple, Optional
+
+import joblib
 from pathlib import Path
 
 import torch
@@ -43,11 +45,20 @@ from transformers import AutoTokenizer, AutoModelForSequenceClassification, Auto
 from domain_classifier import DomainClassifier
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-BASE_MODEL_DIR = Path(os.getenv("VIETTOXIC_MODEL_BASE_DIR", "/models_2/phobert")).expanduser()
-if not BASE_MODEL_DIR.exists():
-    repo_local_model_dir = SCRIPT_DIR / "models_2" / "phobert"
-    if repo_local_model_dir.exists():
-        BASE_MODEL_DIR = repo_local_model_dir
+MODEL_OPTIONS_DIR = Path(
+    os.getenv("VIETTOXIC_MODEL_OPTIONS_DIR", str(SCRIPT_DIR / "models" / "options"))
+).expanduser()
+
+MODEL_TYPES = {
+    "phobert": {
+        "required": ("config.json",),
+        "required_any": ("model.safetensors", "pytorch_model.bin"),
+    },
+    "tfidf_lr": {
+        "required": ("vectorizer.pkl", "model_lr.pkl"),
+        "required_any": (),
+    },
+}
 
 
 # ---------------------------------------------------------------------------
@@ -100,7 +111,27 @@ def iter_url_folders(root_dir: Path) -> List[Path]:
 # Model selection
 # ---------------------------------------------------------------------------
 
-def list_available_models(base_dir: Path) -> List[str]:
+def list_model_types(model_root: Path) -> List[str]:
+    if not model_root.exists():
+        return []
+    if not model_root.is_dir():
+        raise NotADirectoryError(f"Model root path must be a directory: {model_root}")
+    try:
+        return sorted(
+            [
+                p.name
+                for p in model_root.iterdir()
+                if p.is_dir() and not p.name.startswith(".")
+            ]
+        )
+    except PermissionError as exc:
+        raise PermissionError(f"Permission denied while reading model root: {model_root}") from exc
+
+
+def list_models_by_type(model_root: Path, model_type: str) -> List[str]:
+    if model_type not in MODEL_TYPES:
+        return []
+    base_dir = model_root / model_type
     if not base_dir.exists():
         return []
     if not base_dir.is_dir():
@@ -117,36 +148,88 @@ def list_available_models(base_dir: Path) -> List[str]:
         raise PermissionError(f"Permission denied while reading model directory: {base_dir}") from exc
 
 
-def get_default_model(base_dir: Path) -> Optional[str]:
-    models = list_available_models(base_dir)
-    if not models:
+def list_all_models(model_root: Path) -> List[Dict[str, str]]:
+    models: List[Dict[str, str]] = []
+    for model_type in list_model_types(model_root):
+        for name in list_models_by_type(model_root, model_type):
+            models.append({
+                "id": f"{model_type}/{name}",
+                "type": model_type,
+                "name": name,
+            })
+    return models
+
+
+def get_default_model_id(model_root: Path) -> Optional[str]:
+    phobert_models = list_models_by_type(model_root, "phobert")
+    if phobert_models:
+        if "v2" in phobert_models:
+            return "phobert/v2"
+        return f"phobert/{phobert_models[0]}"
+    all_models = list_all_models(model_root)
+    if not all_models:
         return None
-    if "v2" in models:
-        return "v2"
-    return models[0]
+    return all_models[0]["id"]
 
 
-def resolve_model_path(base_dir: Path, model_name: Optional[str]) -> Path:
-    models = list_available_models(base_dir)
-    if not models:
-        raise ValueError(f"No models found under {base_dir}")
+def validate_model_artifacts(model_type: str, model_dir: Path) -> None:
+    requirements = MODEL_TYPES.get(model_type)
+    if not requirements:
+        raise ValueError(f"Unsupported model type: {model_type}")
 
-    if not model_name:
-        model_name = get_default_model(base_dir)
+    missing = [name for name in requirements["required"] if not (model_dir / name).exists()]
+    required_any = requirements["required_any"]
+    if required_any and not any((model_dir / name).exists() for name in required_any):
+        missing.append(" or ".join(required_any))
 
-    if model_name is None:
+    if missing:
+        files = sorted([p.name for p in model_dir.iterdir() if p.is_file()])
+        raise FileNotFoundError(
+            f"Checkpoint folder missing: {', '.join(missing)}. Files found: {files}"
+        )
+
+
+def parse_model_id(model_id: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+    if not model_id:
+        return None, None
+    if any(x in model_id for x in ("..", "\\")):
+        raise ValueError(f"Invalid model name: {model_id}")
+    if "/" not in model_id:
+        return "phobert", model_id
+    model_type, name = model_id.split("/", 1)
+    if not model_type or not name or any(x in name for x in ("..", "/", "\\")):
+        raise ValueError(f"Invalid model name: {model_id}")
+    return model_type, name
+
+
+def resolve_model_path(model_root: Path, model_id: Optional[str]) -> Tuple[str, str, Path]:
+    if not model_id:
+        model_id = get_default_model_id(model_root)
+
+    if model_id is None:
         raise ValueError("No default model available")
 
-    if any(x in model_name for x in ("..", "/", "\\")):
-        raise ValueError(f"Invalid model name: {model_name}")
+    model_type, name = parse_model_id(model_id)
+    if not model_type or not name:
+        raise ValueError(f"Invalid model name: {model_id}")
+    if model_type not in MODEL_TYPES:
+        raise ValueError(f"Unsupported model type: {model_type}")
+    if any(x in name for x in ("..", "/", "\\")):
+        raise ValueError(f"Invalid model name: {model_id}")
 
-    if model_name not in models:
-        raise ValueError(f"Model '{model_name}' not found. Available: {models}")
+    base_dir = model_root / model_type
+    models = list_models_by_type(model_root, model_type)
+    if not models:
+        raise ValueError(f"No models found under {base_dir}")
+    if name not in models:
+        raise ValueError(f"Model '{model_id}' not found. Available: {models}")
 
-    model_path = base_dir / model_name
+    model_path = base_dir / name
     if not model_path.is_dir():
-        raise ValueError(f"Model '{model_name}' is not a directory under {base_dir}")
-    return model_path
+        raise ValueError(f"Model '{model_id}' is not a directory under {base_dir}")
+
+    validate_model_artifacts(model_type, model_path)
+    return model_type, name, model_path
 
 
 # ---------------------------------------------------------------------------
@@ -196,6 +279,7 @@ def infer_crawled(
     debug_force_prob: Optional[float] = None,
     model_name: Optional[str] = None,
     model_base_dir: Optional[str] = None,
+    model_type: Optional[str] = None,
     # Per-category threshold overrides (None = use DomainClassifier defaults)
     threshold_news:    Optional[float] = None,
     threshold_social:  Optional[float] = None,
@@ -207,29 +291,24 @@ def infer_crawled(
     if model_path:
         resolved_model_path = Path(model_path).expanduser().resolve()
         selected_model_name = resolved_model_path.name
+        inferred_type = model_type
+        if model_type is None:
+            parts = resolved_model_path.parts
+            if "options" in parts:
+                idx = parts.index("options")
+                if idx + 1 < len(parts):
+                    inferred_type = parts[idx + 1]
+        model_type = inferred_type or "phobert"
     else:
-        base_dir = Path(model_base_dir).expanduser() if model_base_dir else BASE_MODEL_DIR
-        resolved_model_path = resolve_model_path(base_dir, model_name).resolve()
-        selected_model_name = resolved_model_path.name
+        base_dir = Path(model_base_dir).expanduser() if model_base_dir else MODEL_OPTIONS_DIR
+        model_type, selected_model_name, resolved_model_path = resolve_model_path(base_dir, model_name)
 
     if not resolved_model_path.exists():
         raise FileNotFoundError(f"Model path not found: {resolved_model_path}")
     if not resolved_model_path.is_dir():
         raise NotADirectoryError(f"Model path must be a directory: {resolved_model_path}")
 
-    config_path      = resolved_model_path / "config.json"
-    safetensors_path = resolved_model_path / "model.safetensors"
-    pt_path          = resolved_model_path / "pytorch_model.bin"
-    if not config_path.exists() or not (safetensors_path.exists() or pt_path.exists()):
-        files = sorted([p.name for p in resolved_model_path.iterdir() if p.is_file()])
-        missing = []
-        if not config_path.exists():
-            missing.append("config.json")
-        if not (safetensors_path.exists() or pt_path.exists()):
-            missing.append("model.safetensors or pytorch_model.bin")
-        raise FileNotFoundError(
-            f"Checkpoint folder missing: {', '.join(missing)}. Files found: {files}"
-        )
+    validate_model_artifacts(model_type, resolved_model_path)
 
     data_dir = Path(data_dir)
     out_dir  = Path(out_dir)
@@ -253,7 +332,7 @@ def infer_crawled(
         for cat, thr in domain_clf.thresholds.items():
             marker = " ← CLI default (--seg_threshold)" if cat == "unknown" and threshold_unknown is None else ""
             print(f"         {cat:<10} → {thr}{marker}")
-        print(f"[INFO] Selected model: {selected_model_name}")
+        print(f"[INFO] Selected model: {model_type}/{selected_model_name}")
         print(f"[INFO] Model path: {resolved_model_path}")
 
     # ── Device ───────────────────────────────────────────────────────────
@@ -261,26 +340,37 @@ def infer_crawled(
     if not quiet:
         print(f"[INFO] Device: {device}")
 
-    # ── Load tokenizer & model (skip in debug force-prob mode) ───────────
+    # ── Load model assets (skip in debug force-prob mode) ────────────────
     tokenizer = None
     model = None
+    vectorizer = None
     if debug_force_prob is None:
-        if not quiet:
-            print("[INFO] Loading tokenizer:", tokenizer_name)
-        tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
-
-        if not quiet:
-            print("[INFO] Loading model from:", str(resolved_model_path))
-        config = AutoConfig.from_pretrained(str(resolved_model_path), local_files_only=True)
-        model  = AutoModelForSequenceClassification.from_pretrained(
-            str(resolved_model_path), config=config, local_files_only=True
-        )
-        model.to(device)
-        if fp16 and device.type == "cuda":
-            model.half()
+        if model_type == "phobert":
             if not quiet:
-                print("[INFO] Using FP16 on CUDA")
-        model.eval()
+                print("[INFO] Loading tokenizer:", tokenizer_name)
+            tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+
+            if not quiet:
+                print("[INFO] Loading model from:", str(resolved_model_path))
+            config = AutoConfig.from_pretrained(str(resolved_model_path), local_files_only=True)
+            model = AutoModelForSequenceClassification.from_pretrained(
+                str(resolved_model_path), config=config, local_files_only=True
+            )
+            model.to(device)
+            if fp16 and device.type == "cuda":
+                model.half()
+                if not quiet:
+                    print("[INFO] Using FP16 on CUDA")
+            model.eval()
+        elif model_type == "tfidf_lr":
+            if not quiet:
+                print("[INFO] Loading TF-IDF vectorizer & LR model from:", str(resolved_model_path))
+            vectorizer = joblib.load(resolved_model_path / "vectorizer.pkl")
+            model = joblib.load(resolved_model_path / "model_lr.pkl")
+            if not hasattr(model, "predict_proba"):
+                raise ValueError("TF-IDF+LR model must support predict_proba")
+        else:
+            raise ValueError(f"Unsupported model type: {model_type}")
     else:
         if debug_force_prob < 0.0 or debug_force_prob > 1.0:
             raise ValueError("debug_force_prob must be in [0.0, 1.0]")
@@ -345,7 +435,11 @@ def infer_crawled(
         for i in range(0, len(segments), batch_size):
             batch_texts = segments[i: i + batch_size]
             if debug_force_prob is None:
-                probs = predict_probs(batch_texts, tokenizer, model, device=device, max_length=max_length)
+                if model_type == "phobert":
+                    probs = predict_probs(batch_texts, tokenizer, model, device=device, max_length=max_length)
+                else:
+                    X = vectorizer.transform(batch_texts)
+                    probs = model.predict_proba(X)[:, 1].tolist()
             else:
                 probs = [float(debug_force_prob)] * len(batch_texts)
             for text, prob in zip(batch_texts, probs):
@@ -452,19 +546,26 @@ def main():
         "--model_name",
         type=str,
         default=None,
-        help="Model directory name under --model_base_dir (e.g. v2, v1, lstm)",
+        help="Model id under --model_base_dir (e.g. phobert/v2, tfidf_lr/baseline)",
     )
     ap.add_argument(
         "--model_base_dir",
         type=str,
-        default=str(BASE_MODEL_DIR),
-        help="Base dir that contains model subdirectories",
+        default=str(MODEL_OPTIONS_DIR),
+        help="Model root that contains type subdirectories (e.g. models/options)",
     )
     ap.add_argument(
         "--model_path",
         type=str,
         default=None,
         help="Explicit model directory path. If provided, overrides --model_name",
+    )
+    ap.add_argument(
+        "--model_type",
+        type=str,
+        default=None,
+        choices=["phobert", "tfidf_lr"],
+        help="Explicit model type when using --model_path",
     )
     ap.add_argument("--tokenizer_name",  type=str, default="vinai/phobert-base")
     ap.add_argument("--data_dir",        type=str, default="data/raw/crawled_urls")
@@ -495,6 +596,7 @@ def main():
         model_path      = args.model_path,
         model_name      = args.model_name,
         model_base_dir  = args.model_base_dir,
+        model_type      = args.model_type,
         data_dir        = args.data_dir,
         out_dir         = args.out_dir,
         batch_size      = args.batch_size,

@@ -58,7 +58,7 @@ curl -X POST http://localhost:8000/api/analyze \
       "https://tuoitre.vn/cach-nao-de-cham-dut-viec-chui-boi-xuc-pham-tren-mang-20211027223924572.htm"
     ],
     "options": {
-      "model_name": "v2",
+      "model_name": "phobert/v2",
       "batch_size": 8,
       "max_length": 256,
       "page_threshold": 0.25,
@@ -70,7 +70,8 @@ curl -X POST http://localhost:8000/api/analyze \
 ### Notes
 - CORS: backend currently allows all origins (`*`) for ease of local/ngrok testing.
 - Model list endpoint: `GET /api/models`.
-- Default model selection: ưu tiên `v2` nếu tồn tại trong `/models_2/phobert/`, nếu không chọn model đầu tiên theo sort.
+- Default model selection: ưu tiên `phobert/v2` nếu tồn tại trong `models/options/phobert/`, nếu không chọn model đầu tiên theo sort.
+- Model id theo dạng `type/name` (vd: `phobert/v1`, `tfidf_lr/baseline`).
 - Backward compatibility: vẫn có thể gửi `options.model_path` nếu muốn override trực tiếp.
 
 ### List available models
@@ -102,7 +103,7 @@ curl -X POST https://living-rare-ram.ngrok-free.app/api/analyze \
   -d '{
     "urls": ["https://example.com"],
     "options": {
-      "model_name": "v2",
+      "model_name": "phobert/v2",
       "batch_size": 8,
       "max_length": 256,
       "page_threshold": 0.25,
