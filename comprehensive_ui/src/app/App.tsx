@@ -10,15 +10,21 @@ interface ApiSegment {
   score: number;
   text_preview: string;
   text?: string;
+  domain_category?: string | null;
+  seg_threshold_used?: number | null;
 }
 
 interface ApiResult {
   url: string;
+  url_hash?: string | null;
   status: "ok" | "error";
   error?: string | null;
   crawl_output_dir?: string | null;
   segments_path?: string | null;
   videos?: Record<string, unknown>[];
+  domain_category?: string | null;
+  seg_threshold_used?: number | null;
+  page_toxic?: number | null;
   toxicity?: {
     overall?: number | null;
     by_segment?: ApiSegment[];
@@ -32,7 +38,13 @@ interface AnalyzeResponse {
     seg_threshold?: number;
     page_threshold?: number;
   };
+  thresholds_by_domain?: Record<string, number>;
   results: ApiResult[];
+}
+
+interface CompareResponse {
+  job_id: string;
+  models: Record<string, AnalyzeResponse>;
 }
 
 interface ModelsResponse {
@@ -71,9 +83,13 @@ const parseJsonResponse = async <T,>(response: Response): Promise<T> => {
 export default function App() {
   const [currentPage, setCurrentPage] = useState("home");
   const [analysisResults, setAnalysisResults] = useState<ApiResult[]>([]);
+  const [compareResults, setCompareResults] = useState<Record<string, AnalyzeResponse> | null>(null);
+  const [compareMode, setCompareMode] = useState(false);
   const [jobId, setJobId] = useState<string | null>(null);
+  const [analysisModelId, setAnalysisModelId] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [thresholds, setThresholds] = useState<AnalyzeResponse["thresholds"] | null>(null);
+  const [thresholdsByDomain, setThresholdsByDomain] = useState<Record<string, number> | null>(null);
   const [availableModels, setAvailableModels] = useState<string[]>([]);
   const [selectedModel, setSelectedModel] = useState<string | null>(null);
   const [modelsLoading, setModelsLoading] = useState(true);
@@ -100,7 +116,12 @@ export default function App() {
         if (!isMounted) return;
 
         setAvailableModels(sortedModels);
-        setSelectedModel((prev) => (prev && sortedModels.includes(prev) ? prev : resolvedDefault));
+        const stored = window.localStorage.getItem("viettoxic:model");
+        const storedModel = stored && sortedModels.includes(stored) ? stored : null;
+        setSelectedModel((prev) => {
+          const candidate = prev && sortedModels.includes(prev) ? prev : storedModel || resolvedDefault;
+          return candidate;
+        });
       } catch (error) {
         if (!isMounted) return;
         const message = error instanceof Error ? error.message : "Không thể tải danh sách model";
@@ -149,8 +170,45 @@ export default function App() {
       });
       const data = await parseJsonResponse<AnalyzeResponse>(response);
       setJobId(data.job_id);
+      setAnalysisModelId(data.model_name || modelName || null);
       setThresholds(data.thresholds || null);
+      setThresholdsByDomain(data.thresholds_by_domain || null);
       setAnalysisResults(data.results || []);
+      setCompareResults(null);
+      setCurrentPage("results");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error";
+      setErrorMessage(message);
+    }
+  };
+
+  const handleCompare = async (urls: string[], modelNames: string[]) => {
+    try {
+      setErrorMessage(null);
+      const response = await fetch(buildApiUrl("/api/analyze_compare"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          urls,
+          options: {
+            batch_size: 8,
+            max_length: 256,
+            page_threshold: 0.25,
+            seg_threshold: 0.4,
+            enable_video: true,
+            model_names: modelNames,
+          },
+        }),
+      });
+      const data = await parseJsonResponse<CompareResponse>(response);
+      setJobId(data.job_id);
+      setCompareResults(data.models || {});
+      const firstModel = modelNames[0] || null;
+      setAnalysisModelId(firstModel);
+      const firstPayload = data.models?.[firstModel];
+      setThresholds(firstPayload?.thresholds || null);
+      setThresholdsByDomain(firstPayload?.thresholds_by_domain || null);
+      setAnalysisResults(firstPayload?.results || []);
       setCurrentPage("results");
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown error";
@@ -161,8 +219,11 @@ export default function App() {
   const handleScanAgain = () => {
     setCurrentPage("home");
     setAnalysisResults([]);
+    setCompareResults(null);
     setJobId(null);
+    setAnalysisModelId(null);
     setThresholds(null);
+    setThresholdsByDomain(null);
   };
 
   const handleTryNow = () => {
@@ -176,27 +237,43 @@ export default function App() {
       {currentPage === "home" && (
         <HomePage
           onAnalyze={handleAnalyze}
+          onCompare={handleCompare}
+          compareMode={compareMode}
+          onToggleCompare={setCompareMode}
           availableModels={availableModels}
           selectedModel={selectedModel}
-          onSelectModel={setSelectedModel}
+          onSelectModel={(modelName) => {
+            window.localStorage.setItem("viettoxic:model", modelName);
+            setSelectedModel(modelName);
+          }}
           modelsLoading={modelsLoading}
           modelsError={modelsError}
           errorMessage={errorMessage}
           onClearError={() => setErrorMessage(null)}
         />
       )}
-      
+
       {currentPage === "results" && (
         <ResultsPage
           results={analysisResults}
+          compareResults={compareResults}
           jobId={jobId}
           thresholds={thresholds}
+          thresholdsByDomain={thresholdsByDomain}
+          modelId={analysisModelId}
+          onSelectModel={(modelId) => {
+            setAnalysisModelId(modelId);
+            const payload = compareResults?.[modelId];
+            setThresholds(payload?.thresholds || null);
+            setThresholdsByDomain(payload?.thresholds_by_domain || null);
+            setAnalysisResults(payload?.results || []);
+          }}
           onScanAgain={handleScanAgain}
         />
       )}
-      
+
       {currentPage === "model" && <ModelPage onTryNow={handleTryNow} />}
-      
+
       {currentPage === "contact" && <ContactPage />}
     </div>
   );

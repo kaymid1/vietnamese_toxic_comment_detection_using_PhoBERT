@@ -169,9 +169,88 @@ def ensure_vncorenlp_assets():
 # Text processing (same idea as yours)
 # =========================
 
+def _env_int(name: str, default: Optional[int]) -> Optional[int]:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        val = int(raw)
+        return val if val > 0 else None
+    except Exception:
+        return default
+
+
+VIDEO_LONG_SECONDS = _env_int("VIDEO_LONG_SECONDS", 180)
+VIDEO_TRANSCRIPT_LIMIT_SECONDS = _env_int("VIDEO_TRANSCRIPT_LIMIT_SECONDS", VIDEO_LONG_SECONDS)
+ASR_TRIM_SECONDS = _env_int("ASR_TRIM_SECONDS", VIDEO_LONG_SECONDS)
+
+
+def _estimate_transcript_duration(segments: List[dict]) -> Optional[float]:
+    if not segments:
+        return None
+    max_end = 0.0
+    for seg in segments:
+        try:
+            start = float(seg.get("start", 0.0))
+            duration = float(seg.get("duration", 0.0))
+            max_end = max(max_end, start + duration)
+        except Exception:
+            continue
+    return max_end or None
+
+
+def _should_trim_transcript(segments: List[dict], duration: Optional[float]) -> bool:
+    if not VIDEO_LONG_SECONDS:
+        return False
+    if duration and duration > VIDEO_LONG_SECONDS:
+        return True
+    estimated = _estimate_transcript_duration(segments)
+    return bool(estimated and estimated > VIDEO_LONG_SECONDS)
+
+
+def _trim_transcript_segments(segments: List[dict], max_seconds: Optional[int]) -> List[dict]:
+    if not segments or not max_seconds:
+        return segments
+    trimmed = []
+    for seg in segments:
+        try:
+            start = float(seg.get("start", 0.0))
+            duration = float(seg.get("duration", 0.0))
+        except Exception:
+            start = 0.0
+            duration = 0.0
+        if start < max_seconds:
+            seg_copy = dict(seg)
+            if start + duration > max_seconds:
+                seg_copy["duration"] = max(0.0, max_seconds - start)
+            trimmed.append(seg_copy)
+    return trimmed
+
+
 def preprocess_text(text: str) -> str:
     text = unicodedata.normalize("NFC", text)
     return " ".join(text.strip().split())
+
+
+def _is_legacy_ssl_renegotiation_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return (
+        "unsafe_legacy_renegotiation_disabled" in msg
+        or "legacy renegotiation disabled" in msg
+        or "legacy renegotiation" in msg
+    )
+
+
+def _build_ssl_legacy_warning(exc: Exception) -> dict:
+    return {
+        "code": "ssl_legacy_renegotiation_blocked",
+        "message": (
+            "TLS legacy renegotiation is disabled by the client. "
+            "The server requires insecure legacy renegotiation, so crawling was refused."
+        ),
+        "detail": str(exc),
+    }
+
 
 class Segmenter:
     def __init__(self, jar_path: str):
@@ -563,7 +642,11 @@ def _build_video_record(
         if is_generated is not None:
             has_auto_generated = bool(is_generated)
         if transcript:
-            transcript_source = "youtube_transcript_api"
+            if _should_trim_transcript(transcript, duration):
+                transcript = _trim_transcript_segments(transcript, VIDEO_TRANSCRIPT_LIMIT_SECONDS)
+                transcript_source = "youtube_transcript_api_trimmed"
+            else:
+                transcript_source = "youtube_transcript_api"
 
     if ytdlp and ytdlp.get("info"):
         info = ytdlp["info"]
@@ -581,7 +664,11 @@ def _build_video_record(
     if ytdlp and ytdlp.get("transcript_segments"):
         transcript = ytdlp.get("transcript_segments") or transcript
         if transcript:
-            transcript_source = "yt_dlp_caption"
+            if _should_trim_transcript(transcript, duration):
+                transcript = _trim_transcript_segments(transcript, VIDEO_TRANSCRIPT_LIMIT_SECONDS)
+                transcript_source = "yt_dlp_caption_trimmed"
+            else:
+                transcript_source = "yt_dlp_caption"
 
     return {
         "video_id": video_id,
@@ -598,6 +685,7 @@ def _build_video_record(
         "has_auto_generated": has_auto_generated,
         "metadata": metadata if metadata else {},
         "transcript_source": transcript_source,
+        "transcript_trimmed": bool(transcript) and transcript_source.endswith("_trimmed"),
         "artifacts_kept": bool(artifacts_kept),
     }
 
@@ -709,6 +797,9 @@ def _run_asr_on_video_url(
             "avg_logprob": round(float(seg.avg_logprob), 4),
         })
 
+    if ASR_TRIM_SECONDS:
+        segments = _trim_transcript_segments(segments, ASR_TRIM_SECONDS)
+
     result.update({
         "segments": segments,
         "full_segments": full_segments,
@@ -772,6 +863,7 @@ def crawl_and_save(
     os.makedirs(save_folder, exist_ok=True)
 
     start_total = time.time()
+    warnings: List[dict] = []
 
     # Step 1: Fast - Trafilatura
     print(f"[FAST] Trafilatura -> {url}")
@@ -789,7 +881,10 @@ def crawl_and_save(
             r = requests.get(url, headers=headers, timeout=30, allow_redirects=True)
             print(f"[DEBUG] requests fallback status={r.status_code} final_url={r.url}")
             downloaded = r.text if r.ok else None
-        except Exception:
+        except Exception as e:
+            ssl_warning = _build_ssl_legacy_warning(e) if _is_legacy_ssl_renegotiation_error(e) else None
+            if ssl_warning:
+                warnings.append(ssl_warning)
             downloaded = None
     html_for_video = downloaded
     text = trafilatura.extract(downloaded, include_comments=True, include_tables=False)
@@ -836,6 +931,8 @@ def crawl_and_save(
             "method": method,
             "duration_sec": duration,
         }
+        if warnings:
+            meta["warnings"] = warnings
         with open(os.path.join(save_folder, "meta.json"), "w", encoding="utf-8") as f:
             json.dump(meta, f, ensure_ascii=False, indent=2)
         return {
@@ -846,6 +943,7 @@ def crawl_and_save(
             "output_dir": save_folder,
             "segments_path": None,
             "num_segments": 0,
+            "warnings": warnings,
         }
 
     # success -> segment + save
@@ -1027,6 +1125,8 @@ def crawl_and_save(
         "text_length": len(text),
         "status": "success",
     }
+    if warnings:
+        meta["warnings"] = warnings
     with open(os.path.join(save_folder, "meta.json"), "w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)
 
@@ -1040,6 +1140,7 @@ def crawl_and_save(
         "num_segments": len(cleaned_segments),
         "method": method,
         "duration_sec": duration,
+        "warnings": warnings,
     }
 
 def run_crawl(

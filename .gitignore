@@ -10,3 +10,9 @@ comprehensive_ui/node_modules/
 comprehensive_ui/package-lock.json
 data/processed/
 data/raw/crawled_urls/
+.env
+.env.local
+.env.*
+**/.env
+**/.env.local
+**/.env.*

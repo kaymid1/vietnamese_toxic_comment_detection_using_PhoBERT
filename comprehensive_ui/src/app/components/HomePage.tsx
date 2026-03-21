@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Button } from "@/app/components/ui/button";
 import { Textarea } from "@/app/components/ui/textarea";
 import { AlertCircle, Brain, FileSearch, TrendingUp } from "lucide-react";
@@ -6,6 +6,9 @@ import { Progress } from "@/app/components/ui/progress";
 
 interface HomePageProps {
   onAnalyze: (urls: string[], modelName?: string | null) => Promise<void>;
+  onCompare: (urls: string[], modelNames: string[]) => Promise<void>;
+  compareMode: boolean;
+  onToggleCompare: (value: boolean) => void;
   availableModels: string[];
   selectedModel: string | null;
   onSelectModel: (modelName: string) => void;
@@ -17,6 +20,9 @@ interface HomePageProps {
 
 export function HomePage({
   onAnalyze,
+  onCompare,
+  compareMode,
+  onToggleCompare,
   availableModels,
   selectedModel,
   onSelectModel,
@@ -28,6 +34,22 @@ export function HomePage({
   const [urlInput, setUrlInput] = useState("");
   const [isProcessing, setIsProcessing] = useState(false);
   const [progress, setProgress] = useState(0);
+  const [selectedModels, setSelectedModels] = useState<string[]>([]);
+  const [compareInitialized, setCompareInitialized] = useState(false);
+
+  useEffect(() => {
+    if (compareMode) {
+      if (!compareInitialized) {
+        setSelectedModels(selectedModel ? [selectedModel] : []);
+        setCompareInitialized(true);
+      }
+    } else {
+      setCompareInitialized(false);
+      if (selectedModel) {
+        setSelectedModels([selectedModel]);
+      }
+    }
+  }, [compareMode, compareInitialized, selectedModel]);
 
   const handleAnalyze = async () => {
     if (!urlInput.trim()) return;
@@ -38,7 +60,14 @@ export function HomePage({
       .map((url) => url.trim())
       .filter((url) => url.length > 0);
 
-    if (urls.length === 0 || !selectedModel) return;
+    if (urls.length === 0) return;
+
+    const modelsForCompare = selectedModels.filter((model) => availableModels.includes(model));
+    if (compareMode) {
+      if (modelsForCompare.length < 2) return;
+    } else if (!selectedModel) {
+      return;
+    }
 
     onClearError?.();
     setIsProcessing(true);
@@ -49,7 +78,11 @@ export function HomePage({
     }, 500);
 
     try {
-      await onAnalyze(urls, selectedModel);
+      if (compareMode) {
+        await onCompare(urls, modelsForCompare);
+      } else {
+        await onAnalyze(urls, selectedModel);
+      }
       setProgress(100);
       setTimeout(() => setIsProcessing(false), 300);
     } finally {
@@ -145,22 +178,67 @@ export function HomePage({
 
             <div className="mb-4">
               <label className="block text-sm font-medium text-gray-700 mb-2">Model</label>
-              <select
-                className="w-full h-11 rounded-md border border-gray-300 px-3 text-sm bg-white disabled:bg-gray-100 disabled:text-gray-500"
-                value={selectedModel ?? ""}
-                onChange={(e) => onSelectModel(e.target.value)}
-                disabled={isProcessing || modelsLoading || availableModels.length === 0}
-              >
-                {modelsLoading && <option value="">Đang tải danh sách model...</option>}
-                {!modelsLoading && availableModels.length === 0 && (
-                  <option value="">Không có model khả dụng</option>
-                )}
-                {availableModels.map((model) => (
-                  <option key={model} value={model}>
-                    {model}
-                  </option>
-                ))}
-              </select>
+              <div className="flex items-center gap-3 mb-3">
+                <input
+                  id="compare-mode"
+                  type="checkbox"
+                  checked={compareMode}
+                  onChange={(e) => onToggleCompare(e.target.checked)}
+                  disabled={isProcessing}
+                />
+                <label htmlFor="compare-mode" className="text-sm text-gray-700">
+                  So sánh nhiều model (chạy song song)
+                </label>
+              </div>
+
+              {!compareMode && (
+                <select
+                  className="w-full h-11 rounded-md border border-gray-300 px-3 text-sm bg-white disabled:bg-gray-100 disabled:text-gray-500"
+                  value={selectedModel ?? ""}
+                  onChange={(e) => onSelectModel(e.target.value)}
+                  disabled={isProcessing || modelsLoading || availableModels.length === 0}
+                >
+                  {modelsLoading && <option value="">Đang tải danh sách model...</option>}
+                  {!modelsLoading && availableModels.length === 0 && (
+                    <option value="">Không có model khả dụng</option>
+                  )}
+                  {availableModels.map((model) => (
+                    <option key={model} value={model}>
+                      {model}
+                    </option>
+                  ))}
+                </select>
+              )}
+
+              {compareMode && (
+                <div className="grid gap-2 rounded-md border border-gray-200 p-3">
+                  {availableModels.map((model) => {
+                    const checked = selectedModels.includes(model);
+                    return (
+                      <label key={model} className="flex items-center gap-2 text-sm text-gray-700">
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={(e) => {
+                            setSelectedModels((prev) => {
+                              if (e.target.checked) {
+                                return Array.from(new Set([...prev, model]));
+                              }
+                              return prev.filter((m) => m !== model);
+                            });
+                          }}
+                          disabled={isProcessing}
+                        />
+                        {model}
+                      </label>
+                    );
+                  })}
+                  {selectedModels.length > 0 && selectedModels.length < 2 && (
+                    <p className="text-xs text-amber-700">Chọn ít nhất 2 model để so sánh.</p>
+                  )}
+                </div>
+              )}
+
               {modelsError && (
                 <p className="mt-2 text-sm text-red-700">
                   Không thể tải danh sách model: {modelsError}
@@ -203,16 +281,26 @@ export function HomePage({
 
             <Button
               onClick={handleAnalyze}
-              disabled={isProcessing || !urlInput.trim() || modelsLoading || !selectedModel}
+              disabled={
+                isProcessing ||
+                !urlInput.trim() ||
+                modelsLoading ||
+                (!compareMode && !selectedModel) ||
+                (compareMode && selectedModels.length < 2)
+              }
               className="w-full h-12 text-base"
               style={{
                 backgroundColor:
-                  isProcessing || !urlInput.trim() || modelsLoading || !selectedModel
+                  isProcessing ||
+                  !urlInput.trim() ||
+                  modelsLoading ||
+                  (!compareMode && !selectedModel) ||
+                  (compareMode && selectedModels.length < 2)
                     ? "#94a3b8"
                     : "var(--viet-primary)",
               }}
             >
-              {isProcessing ? "Đang xử lý..." : "Quét Nội Dung"}
+              {isProcessing ? "Đang xử lý..." : compareMode ? "So Sánh Model" : "Quét Nội Dung"}
             </Button>
 
             <p className="text-sm text-gray-500 text-center mt-4">
