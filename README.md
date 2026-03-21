@@ -59,6 +59,13 @@ flowchart TD
 - Preview and apply domain threshold updates from stored feedback
 - Optional Gemini-based explanation for results when `GEMINI_API_KEY` is configured
 
+**Feedback scope & performance**
+
+- Page-level feedback (`/api/feedback`) is used to suggest and apply **threshold overrides**.
+- Threshold overrides are stored **per model_id + domain category**, and the apply step uses EMA (default 0.8), so feedback from a weaker model only affects that model.
+- Segment-level feedback (`/api/feedback/segment`) is stored in SQLite (`feedback_segment`) for offline review/retraining and **does not** affect inference-time scoring.
+- No database lookup happens during inference, so segment feedback has **no runtime performance impact**.
+
 ## Project Structure
 
 ```text

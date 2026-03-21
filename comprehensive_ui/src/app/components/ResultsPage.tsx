@@ -837,8 +837,8 @@ export function ResultsPage({
                                 </span>
                               )}
                             </div>
-                            <div className="mt-2 flex flex-wrap gap-2">
-                              {segmentIsToxic && (
+                                <div className="mt-2 flex flex-wrap gap-2">
+                              {segmentIsToxic ? (
                                 <Button
                                   type="button"
                                   variant="outline"
@@ -860,6 +860,31 @@ export function ResultsPage({
                                 >
                                   Mark an toàn (segment)
                                 </Button>
+                              ) : (
+                                <Button
+                                  type="button"
+                                  variant="outline"
+                                  className="h-8 px-3 text-xs"
+                                  onClick={() => {
+                                    const payload: SegmentFeedbackItem = {
+                                      url: result.url,
+                                      url_hash: result.url_hash ?? result.url,
+                                      model_id: jobModelId,
+                                      domain_category: result.domain_category ?? "unknown",
+                                      segment_id: segment.segment_id,
+                                      text: segment.text || segment.text_preview,
+                                      score: segment.score,
+                                      seg_threshold_used: effectiveSegThreshold,
+                                      label: "toxic",
+                                    };
+                                    void handleSegmentFeedback([payload]);
+                                  }}
+                                >
+                                  Mark độc hại (segment)
+                                </Button>
+                              )}
+                              {!jobModelId && (
+                                <span className="text-xs text-amber-700">Thiếu model_id để lưu feedback.</span>
                               )}
                             </div>
                           </div>

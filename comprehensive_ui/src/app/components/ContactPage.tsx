@@ -32,10 +32,10 @@ export function ContactPage() {
                   Gửi câu hỏi hoặc báo lỗi qua email
                 </p>
                 <a 
-                  href="mailto:support@viettoxic.ai" 
+                  href="mailto:mittech.official@gmail.com" 
                   className="text-blue-600 hover:underline"
                 >
-                  support@viettoxic.ai
+                  mittech.official@gmail.com
                 </a>
               </div>
             </div>
@@ -56,12 +56,12 @@ export function ContactPage() {
                   Xem source code và đóng góp
                 </p>
                 <a 
-                  href="https://github.com/viettoxic/detector" 
+                  href="https://github.com/kaymid1/vietnamese_toxic_comment_detection_using_PhoBERT" 
                   className="text-blue-600 hover:underline"
                   target="_blank"
                   rel="noopener noreferrer"
                 >
-                  github.com/viettoxic
+                  github.com/vietnamese_toxic_comment_detection_using_PhoBERT
                 </a>
               </div>
             </div>

@@ -160,7 +160,7 @@ class SegmentFeedbackRequest(BaseModel):
 
 class ThresholdPreviewRequest(BaseModel):
     model_id: str
-    min_samples: int = Field(default=5, ge=1)
+    min_samples: int = Field(default=10, ge=1)
 
 
 class ThresholdApplyRequest(BaseModel):
@@ -412,7 +412,12 @@ def call_gemini(prompt: str) -> str:
     if not api_key:
         raise HTTPException(status_code=400, detail="Missing GEMINI_API_KEY")
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+    model = os.getenv("GEMINI_MODEL", "gemini-1.5-flash-latest")
+    api_version = os.getenv("GEMINI_API_VERSION", "v1beta")
+    url = (
+        f"https://generativelanguage.googleapis.com/{api_version}/models/{model}:generateContent"
+        f"?key={api_key}"
+    )
     payload = {
         "contents": [
             {
