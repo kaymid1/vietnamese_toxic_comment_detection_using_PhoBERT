@@ -1,0 +1,16 @@
+{
+  "profanity_wordlist_path": "data/lexicons/profanity.txt",
+  "sarcasm_cue_patterns": [
+    "(\"|')?cười(\"|')?",
+    "(\"|')?ngon(\"|')?",
+    "(\"|')?tuyệt vời(\"|')?",
+    "chắc chưa",
+    "vãi",
+    "đùa",
+    "hả",
+    "thật không",
+    "\".*\"",
+    "\“.*\”"
+  ],
+  "output_path": "data/processed/hard_case_candidates.json"
+}

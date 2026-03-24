@@ -4,6 +4,7 @@ import { Card } from "@/app/components/ui/card";
 import { Label } from "@/app/components/ui/label";
 import { Progress } from "@/app/components/ui/progress";
 import { RadioGroup, RadioGroupItem } from "@/app/components/ui/radio-group";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/app/components/ui/select";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/app/components/ui/tooltip";
 import { AlertTriangle, CheckCircle, Download, ExternalLink, Info, RotateCcw } from "lucide-react";
 import { PieChart, Pie, Cell, ResponsiveContainer, Legend, Tooltip as RechartTooltip } from "recharts";
@@ -22,6 +23,7 @@ interface SegmentFeedbackItem {
   url_hash: string;
   model_id: string;
   domain_category: string;
+  domain_override?: string | null;
   segment_id: string;
   text: string;
   score?: number | null;
@@ -123,7 +125,10 @@ const badgeStyles: Record<string, { label: string; text: string; bg: string }> =
   social: { label: "SOCIAL", text: "#0f766e", bg: "#ccfbf1" },
   forum: { label: "FORUM", text: "#7c3aed", bg: "#ede9fe" },
   unknown: { label: "UNKNOWN", text: "#6b7280", bg: "#f3f4f6" },
+  education: { label: "EDU", text: "#b45309", bg: "#fef3c7" },
 };
+
+const domainTagOptions = ["news", "social", "forum", "unknown", "education"] as const;
 
 export function ResultsPage({
   results,
@@ -136,6 +141,8 @@ export function ResultsPage({
   onScanAgain,
 }: ResultsPageProps) {
   const [pageLabels, setPageLabels] = useState<Record<string, PageLabel>>({});
+  const [pageDomainTags, setPageDomainTags] = useState<Record<string, string>>({});
+  const [segmentDomainTags, setSegmentDomainTags] = useState<Record<string, string>>({});
   const [feedbackStatus, setFeedbackStatus] = useState<string | null>(null);
   const [preview, setPreview] = useState<ThresholdPreview | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
@@ -163,6 +170,14 @@ export function ResultsPage({
     setPageLabels((prev) => ({ ...prev, [url]: value }));
   };
 
+  const handlePageDomainTagChange = (url: string, value: string) => {
+    setPageDomainTags((prev) => ({ ...prev, [url]: value }));
+  };
+
+  const handleSegmentDomainTagChange = (segmentId: string, value: string) => {
+    setSegmentDomainTags((prev) => ({ ...prev, [segmentId]: value }));
+  };
+
   const handleSubmitFeedback = async () => {
     if (!jobId || !jobModelId) {
       setFeedbackStatus("Thiếu job_id hoặc model_id để gửi đánh giá.");
@@ -173,10 +188,13 @@ export function ResultsPage({
       .map((result) => {
         const label = pageLabels[result.url];
         if (!label || label === "unsure") return null;
+        const defaultTag = result.domain_category ?? "unknown";
+        const selectedTag = pageDomainTags[result.url] ?? defaultTag;
         return {
           url: result.url,
           url_hash: result.url_hash ?? result.url,
-          domain_category: result.domain_category ?? "unknown",
+          domain_category: defaultTag,
+          domain_override: selectedTag !== defaultTag ? selectedTag : null,
           seg_threshold_used: result.seg_threshold_used ?? null,
           score_overall: result.toxicity?.overall ?? null,
           label,
@@ -224,7 +242,7 @@ export function ResultsPage({
       const response = await fetch(buildApiUrl("/api/thresholds/preview"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model_id: jobModelId, min_samples: 5 }),
+        body: JSON.stringify({ model_id: jobModelId, min_samples: 10 }),
       });
       const data = (await response.json()) as ThresholdPreview;
       if (!response.ok) {
@@ -254,6 +272,8 @@ export function ResultsPage({
           model_id: jobModelId,
           suggested_thresholds: preview.suggested_thresholds,
           ema_weight: 0.8,
+          min_samples_apply: 10,
+          max_delta: 0.03,
         }),
       });
       const data = await response.json();
@@ -294,6 +314,30 @@ export function ResultsPage({
       setFeedbackStatus(message);
     } finally {
       setCurrentLoading(false);
+    }
+  };
+
+  const handleResetThreshold = async (category: string) => {
+    if (!jobModelId) {
+      setFeedbackStatus("Thiếu model_id để reset ngưỡng.");
+      return;
+    }
+    try {
+      setFeedbackStatus(null);
+      const response = await fetch(buildApiUrl("/api/thresholds/reset"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model_id: jobModelId, categories: [category] }),
+      });
+      const data = (await response.json()) as ThresholdCurrent;
+      if (!response.ok) {
+        throw new Error(JSON.stringify(data));
+      }
+      setCurrentThresholds(data);
+      setFeedbackStatus(`Đã reset ngưỡng ${category} về mặc định.`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Reset ngưỡng thất bại";
+      setFeedbackStatus(message);
     }
   };
 
@@ -372,6 +416,8 @@ export function ResultsPage({
 
   useEffect(() => {
     setPageLabels({});
+    setPageDomainTags({});
+    setSegmentDomainTags({});
     setPreview(null);
     setFeedbackStatus(null);
   }, [jobModelId]);
@@ -499,6 +545,7 @@ export function ResultsPage({
                 {["news", "social", "forum", "unknown"].map((category) => {
                   const value = currentThresholds.thresholds_by_domain?.[category];
                   const override = currentThresholds.overrides?.[category];
+                  const hasOverride = override !== undefined && override !== null;
                   return (
                     <div key={category} className="rounded-lg border border-gray-200 p-3">
                       <div className="text-xs uppercase text-gray-500">{category}</div>
@@ -507,6 +554,17 @@ export function ResultsPage({
                       </div>
                       <div className="text-xs text-gray-500 mt-1">
                         Override: {override !== undefined ? formatThreshold(override) : "--"}
+                      </div>
+                      <div className="mt-2">
+                        <Button
+                          type="button"
+                          variant="outline"
+                          className="h-7 px-2 text-xs"
+                          onClick={() => handleResetThreshold(category)}
+                          disabled={!hasOverride}
+                        >
+                          Reset
+                        </Button>
                       </div>
                     </div>
                   );
@@ -522,6 +580,7 @@ export function ResultsPage({
           const segments = result.toxicity?.by_segment ?? [];
           const overallScore = result.toxicity?.overall;
           const overallPercent = typeof overallScore === "number" ? Math.round(overallScore * 100) : null;
+          const pageDomainTag = pageDomainTags[result.url] ?? result.domain_category ?? "unknown";
           const effectiveSegThreshold =
             typeof result.seg_threshold_used === "number"
               ? result.seg_threshold_used
@@ -560,7 +619,7 @@ export function ResultsPage({
                     {result.status === "ok" && (
                       <div className="mt-2 text-xs text-gray-500 space-y-1">
                         {(() => {
-                          const category = result.domain_category || "unknown";
+                          const category = pageDomainTag;
                           const badge = badgeStyles[category] ?? badgeStyles.unknown;
                           return (
                             <p className="flex items-center gap-2">
@@ -621,8 +680,26 @@ export function ResultsPage({
                           );
                         })()}
                       </RadioGroup>
+                      <div className="flex flex-wrap items-center gap-3 text-sm">
+                        <span className="text-gray-600">Tag domain:</span>
+                        <Select
+                          value={pageDomainTags[result.url] ?? result.domain_category ?? "unknown"}
+                          onValueChange={(value) => handlePageDomainTagChange(result.url, value)}
+                        >
+                          <SelectTrigger className="h-8 w-[160px]">
+                            <SelectValue placeholder="Chọn tag" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {domainTagOptions.map((option) => (
+                              <SelectItem key={option} value={option}>
+                                {option}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
                       <p className="text-xs text-gray-500">
-                        Dữ liệu đánh giá sẽ được dùng để đề xuất ngưỡng theo category ở các lần quét sau.
+                        Tag ngoài 4 category mặc định chỉ lưu feedback, chưa dùng để tính ngưỡng.
                       </p>
                     </div>
                   </div>
@@ -837,18 +914,39 @@ export function ResultsPage({
                                 </span>
                               )}
                             </div>
-                                <div className="mt-2 flex flex-wrap gap-2">
+                            <div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-gray-600">
+                              <span>Tag domain:</span>
+                              <Select
+                                value={segmentDomainTags[segment.segment_id] ?? pageDomainTags[result.url] ?? result.domain_category ?? "unknown"}
+                                onValueChange={(value) => handleSegmentDomainTagChange(segment.segment_id, value)}
+                              >
+                                <SelectTrigger className="h-7 w-[140px] text-xs">
+                                  <SelectValue placeholder="Chọn tag" />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  {domainTagOptions.map((option) => (
+                                    <SelectItem key={option} value={option}>
+                                      {option}
+                                    </SelectItem>
+                                  ))}
+                                </SelectContent>
+                              </Select>
+                            </div>
+                            <div className="mt-2 flex flex-wrap gap-2">
                               {segmentIsToxic ? (
                                 <Button
                                   type="button"
                                   variant="outline"
                                   className="h-8 px-3 text-xs"
                                   onClick={() => {
+                                    const defaultTag = result.domain_category ?? "unknown";
+                                    const selectedTag = segmentDomainTags[segment.segment_id] ?? defaultTag;
                                     const payload: SegmentFeedbackItem = {
                                       url: result.url,
                                       url_hash: result.url_hash ?? result.url,
                                       model_id: jobModelId,
-                                      domain_category: result.domain_category ?? "unknown",
+                                      domain_category: defaultTag,
+                                      domain_override: selectedTag !== defaultTag ? selectedTag : null,
                                       segment_id: segment.segment_id,
                                       text: segment.text || segment.text_preview,
                                       score: segment.score,
@@ -866,11 +964,14 @@ export function ResultsPage({
                                   variant="outline"
                                   className="h-8 px-3 text-xs"
                                   onClick={() => {
+                                    const defaultTag = result.domain_category ?? "unknown";
+                                    const selectedTag = segmentDomainTags[segment.segment_id] ?? defaultTag;
                                     const payload: SegmentFeedbackItem = {
                                       url: result.url,
                                       url_hash: result.url_hash ?? result.url,
                                       model_id: jobModelId,
-                                      domain_category: result.domain_category ?? "unknown",
+                                      domain_category: defaultTag,
+                                      domain_override: selectedTag !== defaultTag ? selectedTag : null,
                                       segment_id: segment.segment_id,
                                       text: segment.text || segment.text_preview,
                                       score: segment.score,
@@ -958,7 +1059,7 @@ export function ResultsPage({
                               {askAiStatus && <span className="text-sm text-red-600">{askAiStatus}</span>}
                             </div>
                             {askAiResponse && (
-                              <div className="mt-3 text-sm text-gray-700 whitespace-pre-wrap">
+                              <div className="mt-3 text-sm text-gray-700 whitespace-pre-wrap max-h-64 overflow-auto pr-1">
                                 {askAiResponse}
                               </div>
                             )}

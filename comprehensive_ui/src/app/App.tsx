@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Navigation } from "@/app/components/Navigation";
 import { HomePage } from "@/app/components/HomePage";
 import { ResultsPage } from "@/app/components/ResultsPage";
+import { DatasetPage } from "@/app/components/DatasetPage";
 import { ModelPage } from "@/app/components/ModelPage";
 import { ContactPage } from "@/app/components/ContactPage";
 
@@ -33,6 +34,7 @@ interface ApiResult {
 
 interface AnalyzeResponse {
   job_id: string;
+  source_job_id?: string;
   model_name?: string;
   thresholds?: {
     seg_threshold?: number;
@@ -226,6 +228,45 @@ export default function App() {
     setThresholdsByDomain(null);
   };
 
+  const handleRerun = async (sourceJobId: string, modelName?: string | null) => {
+    try {
+      setErrorMessage(null);
+      const options: Record<string, unknown> = {
+        batch_size: 8,
+        max_length: 256,
+        page_threshold: 0.25,
+        seg_threshold: 0.4,
+        enable_video: true,
+      };
+
+      const payload: Record<string, unknown> = {
+        job_id: sourceJobId,
+        options,
+        prefer_merged: true,
+      };
+      if (modelName) {
+        payload.model_name = modelName;
+      }
+
+      const response = await fetch(buildApiUrl("/api/analyze/rerun"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = await parseJsonResponse<AnalyzeResponse>(response);
+      setJobId(data.job_id);
+      setAnalysisModelId(data.model_name || modelName || null);
+      setThresholds(data.thresholds || null);
+      setThresholdsByDomain(data.thresholds_by_domain || null);
+      setAnalysisResults(data.results || []);
+      setCompareResults(null);
+      setCurrentPage("results");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error";
+      setErrorMessage(message);
+    }
+  };
+
   const handleTryNow = () => {
     setCurrentPage("home");
   };
@@ -238,6 +279,7 @@ export default function App() {
         <HomePage
           onAnalyze={handleAnalyze}
           onCompare={handleCompare}
+          onRerun={handleRerun}
           compareMode={compareMode}
           onToggleCompare={setCompareMode}
           availableModels={availableModels}
@@ -271,6 +313,8 @@ export default function App() {
           onScanAgain={handleScanAgain}
         />
       )}
+
+      {currentPage === "dataset" && <DatasetPage />}
 
       {currentPage === "model" && <ModelPage onTryNow={handleTryNow} />}
 

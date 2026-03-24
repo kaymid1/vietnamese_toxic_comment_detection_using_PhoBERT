@@ -5,7 +5,7 @@
 This file is the "base knowledge" guide so Claude can work in the right direction inside this repository.
 It prioritizes **what the code currently does** over general descriptions in the README.
 
-This snapshot was compiled from the repo on **2026-03-16**.
+This snapshot was compiled from the repo on **2026-03-22**.
 If the code changes later, always re-check the source before making edits.
 
 ---
@@ -68,14 +68,14 @@ When editing code, prioritize these files:
 - `comprehensive_ui/src/app/App.tsx`
   - frontend root app
 - `comprehensive_ui/src/app/components/HomePage.tsx`
-  - URL input and model selection
+  - URL input, model selection, compare-mode entry point
 - `comprehensive_ui/src/app/components/ResultsPage.tsx`
-  - inference result display
+  - inference result display, feedback, threshold tuning UI
+- `comprehensive_ui/src/app/components/DatasetPage.tsx`
+  - dataset preview / export and feedback-data inspection
 
 These files / folders are **not the main source**:
 
-- `backup_infer_crawled_local.py`
-  - backup copy, not the main inference file
 - `comprehensive_ui/dist/`
   - build artifact, do not edit directly
 - `comprehensive_ui/src/app/components/ModelPage.tsx`
@@ -96,12 +96,14 @@ These files / folders are **not the main source**:
 - `datasets`
 - `scikit-learn`
 - `mlflow`
+- `sqlite3` for feedback / threshold storage
 - `trafilatura`
 - `selenium` + `undetected-chromedriver`
 - `vncorenlp`
 - `yt-dlp`
 - `youtube-transcript-api`
 - `faster-whisper` + `ffmpeg` for native video ASR
+- Gemini / Google Generative Language REST API via `urllib`
 
 ### Frontend
 
@@ -129,15 +131,21 @@ These files / folders are **not the main source**:
   - mock crawl inputs for inference sanity checks
 - `data/processed/job_<uuid>/`
   - output for each `/api/analyze` API request
+- `data/processed/feedback/feedback.db`
+  - SQLite store for page feedback, segment feedback, and threshold overrides
+- `data/processed/combined_dataset.jsonl`
+  - generated export from `/api/dataset/export` when requested
 
 ### Models / results
 
 - `models/options/phobert/`
-  - local checkpoints used by the backend / inference script
+  - local PhoBERT checkpoints used by the backend / inference script
+- `models/options/tfidf_lr/baseline/`
+  - local TF-IDF + LR serving artifacts for compare mode / alternate inference
 - `results/baseline/`
-  - baseline metrics + serialized LR/vectorizer
+  - baseline metrics + serialized LR/vectorizer when the training script is run
 - `results/phobert/`
-  - expected output from the training script, but there are no committed metrics here in the current repo snapshot
+  - expected output from the training script, but there is no committed `results/` folder in the current repo snapshot
 - `experiments/phobert_optimization_log.md`
   - important tuning log
 - `experiments/crawling_log.md`
@@ -249,12 +257,13 @@ Artifacts:
 - `results/baseline/vectorizer.pkl`
 - `results/baseline/model_lr.pkl`
 
-Metrics currently committed in the repo:
+Important note:
 
-- validation macro F1: `0.6927`
-- validation F1_toxic: `0.4618`
-- test macro F1: `0.7043`
-- test F1_toxic: `0.4844`
+- the current repo snapshot does **not** contain a committed `results/` directory
+- if you need reference numbers without rerunning training, use `experiments/phobert_optimization_log.md`
+- baseline reference in that log:
+  - test macro F1: `0.7043`
+  - test F1_toxic: `0.4844`
 
 ### PhoBERT training script
 
@@ -306,15 +315,16 @@ The backend and inference script resolve checkpoints in this order:
 - if model `v2` exists, prefer `v2`
 - otherwise choose the first entry from `sorted()`
 
-Repo snapshot on 2026-03-16:
+Repo snapshot on 2026-03-22:
 
-- `models/options/phobert/backup`
-- `models/options/phobert/backup_no2`
-- `models/options/phobert/new`
+- `models/options/phobert/phobert`
+- `models/options/phobert/phobert_lora_latest`
 - `models/options/phobert/v1`
+- `models/options/tfidf_lr/baseline`
 
-There is **no `v2` in the repo snapshot**, so the local default may not match the README.
-However, the user machine may still have `/models/options/phobert/v2` outside the repo via env var.
+There is **no `v2` in the repo snapshot**.
+Because the code falls back to the first `sorted()` entry, the current local default in-repo is effectively `phobert/phobert`.
+However, the user machine may still expose additional model directories through `VIETTOXIC_MODEL_OPTIONS_DIR`.
 
 A valid checkpoint directory must contain at least:
 
@@ -328,6 +338,12 @@ And often also:
 - `tokenizer_config.json`
 - `added_tokens.json`
 - `threshold.json` in some model folders
+- `temperature_scaling.json` in calibrated model folders such as `phobert_lora_latest`
+
+Important caveat:
+
+- `backend/app.py` currently gets serving thresholds from `CATEGORY_THRESHOLDS` + feedback-driven overrides in `feedback.db`
+- it does **not** automatically read per-model `threshold.json` for domain thresholds
 
 ---
 
@@ -528,6 +544,28 @@ Main file: `backend/app.py`
   - list available model directories
 - `POST /api/analyze`
   - crawl + infer + return results to the UI
+- `POST /api/analyze_compare`
+  - run the same crawl against 2+ selected models and return per-model result bundles
+- `POST /api/feedback`
+  - store page-level human labels
+- `POST /api/feedback/segment`
+  - store segment-level human labels
+- `POST /api/feedback/segment/delete`
+  - delete selected segment-feedback rows by id
+- `POST /api/thresholds/preview`
+  - compute suggested per-domain thresholds from page feedback
+- `POST /api/thresholds/apply`
+  - persist EMA-smoothed threshold overrides
+- `POST /api/thresholds/current`
+  - read current effective thresholds + saved overrides for a model
+- `GET /api/dataset/preview`
+  - paginate combined dataset + collected feedback rows
+- `POST /api/dataset/export`
+  - write filtered rows to `data/processed/combined_dataset.jsonl`
+- `POST /api/ask-ai`
+  - send result context to Gemini and return a short explanation
+- `GET /api/gemini/models`
+  - list available Gemini models for the configured API key
 
 ### Current CORS
 
@@ -547,7 +585,7 @@ Allows:
     "max_length": 256,
     "page_threshold": 0.25,
     "seg_threshold": 0.4,
-    "model_name": "v1",
+    "model_name": "phobert/v1",
     "model_path": null,
     "enable_video": false
   }
@@ -562,28 +600,42 @@ Allows:
 4. resolve model from `model_name` or `model_path`
 5. call `crawl_urls()`
 6. if `enable_video=True` and `video_data.jsonl` exists, merge text segments + transcripts into `merged_crawl/`
-7. call `infer_crawled()`
-8. read page-level + segment-level artifacts
-9. map everything back by URL for the response
+7. resolve `thresholds_by_domain` from `CATEGORY_THRESHOLDS` + saved overrides in `feedback.db`
+8. call `infer_crawled()`
+9. read page-level + segment-level artifacts
+10. map everything back by URL for the response
+
+The backend also deletes old `data/processed/job_*` folders using `JOB_RETENTION_HOURS` (default 24h).
 
 ### Response schema overview
 
 ```json
 {
   "job_id": "uuidhex",
-  "model_name": "v1",
+  "model_name": "phobert/v1",
   "thresholds": {
     "seg_threshold": 0.4,
     "page_threshold": 0.25
   },
+  "thresholds_by_domain": {
+    "news": 0.72,
+    "social": 0.5,
+    "forum": 0.6,
+    "unknown": 0.62
+  },
   "results": [
     {
       "url": "https://example.com",
+      "url_hash": "<hash>",
       "status": "ok",
       "error": null,
+      "warnings": [],
       "crawl_output_dir": "data/raw/crawled_urls/<hash>",
       "segments_path": "data/raw/crawled_urls/<hash>/segments.jsonl",
       "videos": [],
+      "domain_category": "news",
+      "seg_threshold_used": 0.72,
+      "page_toxic": 0,
       "toxicity": {
         "overall": 0.31,
         "by_segment": [
@@ -591,7 +643,9 @@ Allows:
             "segment_id": "<hash>:0",
             "score": 0.82,
             "text_preview": "...",
-            "text": "..."
+            "text": "...",
+            "domain_category": "news",
+            "seg_threshold_used": 0.72
           }
         ]
       }
@@ -605,6 +659,7 @@ Important notes:
 - `overall` prefers `avg_toxic_prob`, and only falls back to `toxic_ratio`
 - the backend returns `videos` loaded from `video_data.jsonl`
 - `job_id` is an important debugging handle
+- page / segment feedback is stored in `data/processed/feedback/feedback.db`
 
 ---
 
@@ -619,6 +674,8 @@ The real backend-connected frontend logic is in:
 - `src/app/App.tsx`
 - `src/app/components/HomePage.tsx`
 - `src/app/components/ResultsPage.tsx`
+- `src/app/components/DatasetPage.tsx`
+- `src/app/components/Navigation.tsx`
 
 ### API base
 
@@ -630,8 +687,10 @@ The real backend-connected frontend logic is in:
 
 - fetches `GET /api/models` on mount
 - accepts one or more URLs
-- allows model selection
-- sends `POST /api/analyze`
+- allows single-model selection
+- supports compare mode and sends `POST /api/analyze_compare` when 2+ models are selected
+- stores the last selected single model in `localStorage` under `viettoxic:model`
+- sends `POST /api/analyze` in normal mode
 - currently hardcodes:
   - `batch_size: 8`
   - `max_length: 256`
@@ -642,15 +701,17 @@ The real backend-connected frontend logic is in:
 ### ResultsPage
 
 - displays `overall` score as a percent
-- counts toxic segments using `thresholds.seg_threshold`
+- counts toxic segments using `result.seg_threshold_used` when present
 - shows the top 3 highest-score segments
-- the UI "toxic/safe" color state is currently inferred from `overall > 50%`, not from `page_threshold`
+- uses `page_toxic` if present; otherwise falls back to `overall >= page_threshold`
+- can submit page feedback, segment feedback, preview/apply current thresholds, and call `/api/ask-ai`
+- when compare results are present, `App.tsx` lets the user switch the displayed model payload without rerunning the crawl
 
-### Important frontend caveat
+### DatasetPage
 
-`ResultsPage` uses the global `thresholds.seg_threshold` from the API response,
-but the actual inference logic may use per-domain `seg_threshold_used`.
-If semantic correctness matters, the UI should receive and use the effective threshold per URL or per segment.
+- uses `GET /api/dataset/preview` to inspect `data/victsd/*.jsonl` plus collected feedback rows
+- uses `POST /api/dataset/export` to write `data/processed/combined_dataset.jsonl`
+- can delete selected segment-feedback rows through `POST /api/feedback/segment/delete`
 
 ### Static / mock pages
 
@@ -744,7 +805,7 @@ Important note:
    - If training a new model for the API, resolve this path mismatch explicitly.
 
 3. In this repo snapshot there is no `v2` under `models/options/phobert`.
-   - The actual default model may differ from the README.
+   - The in-repo default is currently `phobert/phobert`, not `phobert/v1`.
 
 4. `enable_video=True` from the frontend can trigger transcript + ASR paths as well.
    - If the API feels slow, think about crawler/video work, not only model inference.
@@ -752,8 +813,8 @@ Important note:
 5. `comprehensive_ui/dist/` is build output.
    - Edit `src/`, not `dist/`.
 
-6. `backup_infer_crawled_local.py` is only a backup.
-   - Do not accidentally patch that file when the task is about main inference.
+6. Threshold artifacts inside model folders (`threshold.json`, `temperature_scaling.json`) are not the same thing as the backend's domain-threshold overrides.
+   - Serving currently uses `CATEGORY_THRESHOLDS` + SQLite overrides from feedback.
 
 7. There is no formal automated test suite in the repo.
    - Verification usually means running scripts, calling the API, and testing the UI manually.

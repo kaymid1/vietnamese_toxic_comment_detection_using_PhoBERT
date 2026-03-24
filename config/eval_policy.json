@@ -1,0 +1,11 @@
+{
+  "split": {
+    "train": 0.8,
+    "val": 0.1,
+    "test": 0.1
+  },
+  "test_set_fixed": true,
+  "fixed_since": "2026-03-23",
+  "hard_case_subsets_evaluated": false,
+  "note": "Tập test được cố định ngay từ đầu để đảm bảo so sánh công bằng giữa các thí nghiệm."
+}

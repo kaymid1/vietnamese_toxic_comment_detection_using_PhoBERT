@@ -9,6 +9,7 @@ export function Navigation({ currentPage, onNavigate }: NavigationProps) {
   const navItems = [
     { name: "Home", id: "home" },
     { name: "Results", id: "results" },
+    { name: "Dataset", id: "dataset" },
     { name: "Model & Performance", id: "model" },
     { name: "Contact", id: "contact" },
   ];

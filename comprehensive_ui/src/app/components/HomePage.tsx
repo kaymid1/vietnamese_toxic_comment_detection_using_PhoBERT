@@ -7,6 +7,7 @@ import { Progress } from "@/app/components/ui/progress";
 interface HomePageProps {
   onAnalyze: (urls: string[], modelName?: string | null) => Promise<void>;
   onCompare: (urls: string[], modelNames: string[]) => Promise<void>;
+  onRerun: (jobId: string, modelName?: string | null) => Promise<void>;
   compareMode: boolean;
   onToggleCompare: (value: boolean) => void;
   availableModels: string[];
@@ -21,6 +22,7 @@ interface HomePageProps {
 export function HomePage({
   onAnalyze,
   onCompare,
+  onRerun,
   compareMode,
   onToggleCompare,
   availableModels,
@@ -36,6 +38,10 @@ export function HomePage({
   const [progress, setProgress] = useState(0);
   const [selectedModels, setSelectedModels] = useState<string[]>([]);
   const [compareInitialized, setCompareInitialized] = useState(false);
+  const [rerunJobId, setRerunJobId] = useState("");
+  const [rerunModelId, setRerunModelId] = useState<string | null>(null);
+  const [rerunStatus, setRerunStatus] = useState<string | null>(null);
+  const [rerunLoading, setRerunLoading] = useState(false);
 
   useEffect(() => {
     if (compareMode) {
@@ -89,6 +95,36 @@ export function HomePage({
       clearInterval(interval);
     }
   };
+
+  const handleRerun = async () => {
+    if (!rerunJobId.trim()) {
+      setRerunStatus("Vui lòng nhập job_id cần re-run.");
+      return;
+    }
+    if (compareMode && selectedModels.length > 0 && !rerunModelId) {
+      setRerunStatus("Chọn model để re-run từ job compare.");
+      return;
+    }
+    try {
+      setRerunStatus(null);
+      setRerunLoading(true);
+      await onRerun(rerunJobId.trim(), rerunModelId ?? null);
+      setRerunStatus("Đã re-run thành công.");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Re-run thất bại";
+      setRerunStatus(message);
+    } finally {
+      setRerunLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!compareMode) {
+      setRerunModelId(null);
+    } else if (selectedModels.length > 0 && !rerunModelId) {
+      setRerunModelId(selectedModels[0]);
+    }
+  }, [compareMode, selectedModels, rerunModelId]);
 
   return (
     <div style={{ backgroundColor: "var(--viet-bg)" }} className="min-h-screen">
@@ -168,13 +204,62 @@ export function HomePage({
               Mỗi URL trên một dòng hoặc phân cách bằng dấu phẩy.
             </p>
 
-            <Textarea
-              placeholder="https://example.com/article1&#10;https://example.com/article2"
-              className="min-h-[160px] mb-4 text-base border-gray-300 focus:border-[var(--viet-primary)] focus:ring-[var(--viet-primary)]"
-              value={urlInput}
-              onChange={(e) => setUrlInput(e.target.value)}
-              disabled={isProcessing}
-            />
+            <div className="grid gap-6 lg:grid-cols-[2fr_1fr]">
+              <div>
+                <Textarea
+                  placeholder="https://example.com/article1&#10;https://example.com/article2"
+                  className="min-h-[160px] mb-4 text-base border-gray-300 focus:border-[var(--viet-primary)] focus:ring-[var(--viet-primary)]"
+                  value={urlInput}
+                  onChange={(e) => setUrlInput(e.target.value)}
+                  disabled={isProcessing}
+                />
+              </div>
+              <div className="rounded-xl border border-gray-200 bg-gray-50 p-4">
+                <h3 className="text-sm font-semibold text-gray-700 mb-2">Re-run theo Job ID</h3>
+                <p className="text-xs text-gray-600 mb-3">
+                  Dùng lại dữ liệu crawl đã có (bao gồm segments.jsonl đã chỉnh sửa).
+                </p>
+                <div className="space-y-2 mb-3">
+                  <label className="block text-xs font-medium text-gray-600" htmlFor="rerun-job-id">
+                    Job ID
+                  </label>
+                  <input
+                    id="rerun-job-id"
+                    className="w-full h-9 rounded-md border border-gray-300 px-3 text-sm bg-white"
+                    value={rerunJobId}
+                    onChange={(event) => setRerunJobId(event.target.value)}
+                    placeholder="Nhập job_id"
+                  />
+                </div>
+                {compareMode && selectedModels.length > 0 && (
+                  <div className="space-y-2 mb-3">
+                    <label className="block text-xs font-medium text-gray-600">Model</label>
+                    <select
+                      className="w-full h-9 rounded-md border border-gray-300 px-3 text-sm bg-white"
+                      value={rerunModelId ?? ""}
+                      onChange={(event) => setRerunModelId(event.target.value)}
+                      disabled={selectedModels.length === 0}
+                    >
+                      <option value="">Chọn model</option>
+                      {selectedModels.map((model) => (
+                        <option key={model} value={model}>
+                          {model}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+                <Button
+                  onClick={handleRerun}
+                  disabled={rerunLoading}
+                  className="h-9 w-full text-sm"
+                  style={{ backgroundColor: "var(--viet-primary)" }}
+                >
+                  {rerunLoading ? "Đang re-run..." : "Re-run"}
+                </Button>
+                {rerunStatus && <p className="mt-2 text-xs text-gray-600">{rerunStatus}</p>}
+              </div>
+            </div>
 
             <div className="mb-4">
               <label className="block text-sm font-medium text-gray-700 mb-2">Model</label>
