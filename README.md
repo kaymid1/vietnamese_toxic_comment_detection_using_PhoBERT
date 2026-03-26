@@ -35,8 +35,8 @@ flowchart TD
     FE --> API[FastAPI backend]
     API --> CRAWL[Crawl URL content]
     CRAWL --> SEG[Extract and segment text]
-    SEG --> DOMAIN[Classify domain: news/social/forum/unknown]
-    DOMAIN --> INF[Run local model inference]
+    SEG --> DOMAIN[Hybrid thresholding: HTML tags + formality]
+    DOMAIN --> INF[Run local model inference + AI learned prior]
     INF --> PAGE[Aggregate page-level toxicity]
     INF --> SEGRES[Return segment-level scores]
     PAGE --> APIRES[Build API response]
@@ -53,18 +53,19 @@ flowchart TD
 - Return:
   - page-level toxicity score
   - segment-level toxicity scores
-  - domain category and threshold used
+  - hybrid threshold diagnostics (HTML tags + formality)
 - Compare multiple local models on the same URLs
 - Collect user feedback on page-level and segment-level predictions
-- Preview and apply domain threshold updates from stored feedback
+- Reuse learned segment feedback at inference-time via hash matching (`segment_hash` / `context_segment_hash`)
+- Apply stronger toxic penalty (`toxic_lock`) when toxic feedback is sufficiently consistent
 - Optional Gemini-based explanation for results when `GEMINI_API_KEY` is configured
 
-**Feedback scope & performance**
+**Feedback scope & runtime behavior**
 
-- Page-level feedback (`/api/feedback`) is used to suggest and apply **threshold overrides**.
-- Threshold overrides are stored **per model_id + domain category**, and the apply step uses EMA (default 0.8), so feedback from a weaker model only affects that model.
-- Segment-level feedback (`/api/feedback/segment`) is stored in SQLite (`feedback_segment`) for offline review/retraining and **does not** affect inference-time scoring.
-- No database lookup happens during inference, so segment feedback has **no runtime performance impact**.
+- Page-level feedback (`/api/feedback`) is stored for dataset/analysis workflows.
+- Segment-level feedback (`/api/feedback/segment`) is stored in SQLite (`feedback_segment`) and is used during inference as an AI learned prior.
+- Duplicate segment feedback is deduplicated by semantic key `(context_segment_hash || segment_hash, html_tag_effective)` so rescanning/relabeling the same segment does not inflate support.
+- For each key, only the latest label is treated as active when computing learned statistics.
 
 ## Project Structure
 
@@ -134,12 +135,6 @@ Current API is defined in `backend/app.py`.
   - submit page-level feedback
 - `POST /api/feedback/segment`
   - submit segment-level feedback
-- `POST /api/thresholds/preview`
-  - preview suggested thresholds from stored feedback
-- `POST /api/thresholds/apply`
-  - apply updated thresholds
-- `POST /api/thresholds/current`
-  - read current effective thresholds and overrides
 
 ## Example Request
 
@@ -181,13 +176,90 @@ The repository also includes research scripts for:
 
 See `scripts/01_export_raw.py` through `scripts/05_train_phobert.py`.
 
+## Hybrid Thresholding + AI Learned Penalty
+
+The current inference pipeline computes a per-page threshold from:
+
+1. **HTML metadata** (`schema.org`, `og:type`, header tags)
+2. **Text formality score** (always runs)
+
+Then each segment score can be adjusted by learned feedback (if available) before final labeling.
+
+### AI learned dedup + penalty rules
+
+For learned feedback lookup, each segment uses:
+
+- `segment_hash` = hash(normalized segment text + effective html tag)
+- `context_segment_hash` = hash(prev + current + next segment + effective html tag)
+
+The system checks learned stats by hash and tag, with these protections:
+
+- Deduplicate feedback by semantic unit `(context_segment_hash || segment_hash, html_tag_effective)`.
+- If a user re-scans and re-labels the same segment, support is **not** artificially incremented.
+- Only the **latest** label per semantic unit is counted.
+
+A learned prior is applied only when:
+
+- `support >= 3`
+- `agreement >= 0.85`
+
+If learned label is **toxic**, mode becomes `toxic_lock` and a heavy penalty is applied:
+
+- `toxic_prob_adjusted >= toxic_floor` (default `0.9`)
+- additional boost from toxic prior (`toxic_boost`)
+
+If learned label is **clean**, a softer prior adjustment is used.
+
+### Concrete example
+
+Assume model outputs:
+
+- `toxic_prob = 0.46`
+- `seg_threshold_used = 0.62`
+
+Case A (insufficient support):
+
+- learned stats: toxic=2, clean=0 → support=2
+- mode: `insufficient_support`
+- `toxic_prob_adjusted = 0.46` (unchanged)
+- final label: `0` (clean)
+
+Case B (toxic confirmed, high agreement):
+
+- learned stats: toxic=4, clean=0 → support=4, agreement=1.0
+- mode: `toxic_lock`
+- `toxic_prob_adjusted` is pushed to at least `0.90`
+- final label: `1` (toxic), even though raw model score was 0.46
+
+### Output diagnostics
+
+Page-level outputs (`page_level_results.json` / `.csv`) include:
+
+- `effective_threshold`
+- `struct_confidence`
+- `struct_source` (`schema.org` | `opengraph` | `none`)
+- `formality_score`
+- `formality_delta`
+- `layer3_overrides`
+- `decision_source`
+- `html_tags`, `og_types`
+
+Segment-level outputs (`crawled_predictions.jsonl`) include:
+
+- `toxic_prob` (raw model)
+- `toxic_prob_adjusted` (after learned prior)
+- `toxic_label`
+- `ai_learned`, `ai_learned_label`, `ai_learned_mode`
+- `learned_support`, `learned_agreement`
+- `segment_hash`, `context_segment_hash`
+
 ## Current Status
 
 - Web UI is implemented
 - URL analysis works end-to-end
 - Local model comparison is implemented
 - Feedback loop is implemented
-- Domain-aware thresholding is implemented
+- Hybrid domain-aware thresholding is implemented
 - Local model artifacts are present in `models/options/`
 
 ## Known Limitations

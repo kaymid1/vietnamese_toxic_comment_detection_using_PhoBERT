@@ -947,6 +947,13 @@ def crawl_and_save(
         }
 
     # success -> segment + save
+    if html_for_video:
+        try:
+            with open(os.path.join(save_folder, "raw.html"), "w", encoding="utf-8") as f:
+                f.write(html_for_video)
+        except Exception:
+            pass
+
     segments = segmenter.segment_text(text)
     cleaned_segments = []
     for s in segments:

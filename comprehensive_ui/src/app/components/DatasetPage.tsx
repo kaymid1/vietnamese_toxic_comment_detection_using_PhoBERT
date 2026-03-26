@@ -71,7 +71,11 @@ const formatPercent = (value: number, total: number) => {
   return `${((value / total) * 100).toFixed(1)}%`;
 };
 
-export function DatasetPage() {
+interface DatasetPageProps {
+  onOpenSyntheticPage?: () => void;
+}
+
+export function DatasetPage({ onOpenSyntheticPage }: DatasetPageProps) {
   const [rows, setRows] = useState<DatasetRow[]>([]);
   const [stats, setStats] = useState<DatasetStats | null>(null);
   const [page, setPage] = useState(1);
@@ -291,6 +295,7 @@ export function DatasetPage() {
               <TabsTrigger value="compare">So sánh chi tiết</TabsTrigger>
               <TabsTrigger value="annotation">Annotation &amp; merge</TabsTrigger>
               <TabsTrigger value="limitation">Limitations</TabsTrigger>
+              <TabsTrigger value="definition">Toxicity definition</TabsTrigger>
             </TabsList>
 
             <TabsContent value="overview" className="mt-4 space-y-6">
@@ -429,16 +434,16 @@ export function DatasetPage() {
               </div>
 
               <div>
-                <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">Điểm khác biệt — cần thừa nhận khi bảo vệ</p>
+                <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">Điểm khác biệt — thừa nhận</p>
                 <div className="mt-3 rounded-lg border-l-4 border-l-yellow-500 bg-yellow-50 p-4 text-sm text-yellow-900">
-                  <strong>74.9% toxic samples đến từ ViHSD OFFENSIVE</strong> (2,260/3,019). Hội đồng có thể hỏi: model đang học toxic từ nguồn nào nhiều hơn? → Trả lời: ViCTSD cung cấp label schema và negative examples; ViHSD cung cấp positive examples để cân bằng class — cả hai cùng định hình decision boundary.
+                  <strong>74.9% toxic samples đến từ ViHSD OFFENSIVE</strong> (2,260/3,019). Model đang học toxic từ nguồn nào nhiều hơn? → ViCTSD cung cấp label schema và negative examples; ViHSD cung cấp positive examples để cân bằng class — cả hai cùng định hình decision boundary.
                 </div>
               </div>
             </TabsContent>
 
             <TabsContent value="annotation" className="mt-4 space-y-6">
               <div>
-                <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">Annotation consistency là gì?</p>
+                <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">Annotation consistency là gì? (mock)</p>
                 <div className="mt-3 rounded-lg border bg-muted/30 p-4 text-sm">
                   <p className="leading-7">
                     <strong>Annotation consistency</strong> = mức độ đồng thuận giữa các annotator khi label cùng một câu text. Đo bằng <strong>Cohen&apos;s Kappa (κ)</strong> hoặc <strong>Fleiss&apos; Kappa</strong>.
@@ -484,7 +489,7 @@ export function DatasetPage() {
               </div>
 
               <div>
-                <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">Câu hỏi hội đồng hay hỏi</p>
+                <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">Câu hỏi thường gặp</p>
                 <div className="mt-3 space-y-4 text-sm">
                   <div>
                     <div className="flex items-start gap-2 font-medium">
@@ -550,6 +555,22 @@ export function DatasetPage() {
                 </div>
                 <div className="mt-4 rounded-lg border-l-4 border-l-blue-600 bg-blue-50 p-4 text-sm text-blue-900">
                   <strong>Mẹo bảo vệ:</strong> Chủ động nêu L3 và L4 trước — đây là những limitation bạn đã nhận ra và đã có giải pháp (domain-aware thresholding). Hội đồng sẽ đánh giá cao việc bạn không né tránh mà đối mặt trực tiếp với limitation của mình.
+                </div>
+              </div>
+            </TabsContent>
+
+            <TabsContent value="definition" className="mt-4 space-y-6">
+              <div>
+                <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">Cách định nghĩa nhãn toxic trong nghiên cứu</p>
+                <div className="mt-3 text-sm text-muted-foreground space-y-3">
+                  <p>
+                    Trong nghiên cứu này, “toxic” được định nghĩa theo nhãn <strong>Toxicity</strong> gốc của ViCTSD. Label nhị phân được giữ nguyên:
+                    <strong> 0 = non-toxic/clean</strong>, <strong>1 = toxic</strong>.
+                  </p>
+                  <p>
+                    Không gộp thêm các mức độ khác hay tiêu chí <strong>Constructiveness</strong> để đảm bảo tính nhất quán với annotation guideline
+                    gốc của dataset và tránh thay đổi semantics nhãn trong quá trình tiền xử lý.
+                  </p>
                 </div>
               </div>
             </TabsContent>
@@ -621,6 +642,11 @@ export function DatasetPage() {
             <Button variant="outline" onClick={handleExport}>
               Export JSONL
             </Button>
+            {onOpenSyntheticPage && (
+              <Button className="bg-violet-600 hover:bg-violet-700 text-white font-semibold" onClick={onOpenSyntheticPage}>
+                Synthetic Generation
+              </Button>
+            )}
             <Button
               variant="destructive"
               onClick={handleDeleteFeedback}

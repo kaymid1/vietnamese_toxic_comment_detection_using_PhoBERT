@@ -4,6 +4,7 @@ import json
 import logging
 import math
 import os
+import re
 import shutil
 import sqlite3
 import time
@@ -12,7 +13,7 @@ import urllib.error
 import urllib.request
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -20,7 +21,7 @@ from pydantic import BaseModel, Field
 
 from domain_classifier import CATEGORY_THRESHOLDS
 from setup_and_crawl import crawl_urls
-from infer_crawled_local import infer_crawled
+from infer_crawled_local import infer_crawled, build_segment_hash, build_context_segment_hash
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = BASE_DIR / "data" / "raw" / "crawled_urls"
@@ -163,8 +164,8 @@ class AnalyzeRequest(BaseModel):
 class FeedbackPageItem(BaseModel):
     url: str
     url_hash: str
-    domain_category: str
-    domain_override: Optional[str] = None
+    html_tag: str
+    html_tag_override: Optional[str] = None
     seg_threshold_used: Optional[float] = None
     score_overall: Optional[float] = None
     label: str
@@ -180,13 +181,14 @@ class SegmentFeedbackItem(BaseModel):
     url: str
     url_hash: str
     model_id: str
-    domain_category: str
-    domain_override: Optional[str] = None
+    html_tag: str
+    html_tag_override: Optional[str] = None
     segment_id: str
     text: str
     score: Optional[float] = None
     seg_threshold_used: Optional[float] = None
     label: str
+    context_segment_hash: Optional[str] = None
 
 
 class SegmentFeedbackRequest(BaseModel):
@@ -194,26 +196,8 @@ class SegmentFeedbackRequest(BaseModel):
     items: List[SegmentFeedbackItem] = Field(min_items=1)
 
 
-class ThresholdPreviewRequest(BaseModel):
-    model_id: str
-    min_samples: int = Field(default=10, ge=1)
 
 
-class ThresholdApplyRequest(BaseModel):
-    model_id: str
-    suggested_thresholds: Dict[str, float]
-    ema_weight: float = Field(default=0.8, ge=0.0, le=1.0)
-    min_samples_apply: int = Field(default=10, ge=1)
-    max_delta: float = Field(default=0.03, ge=0.0, le=1.0)
-
-
-class ThresholdCurrentRequest(BaseModel):
-    model_id: str
-
-
-class ThresholdResetRequest(BaseModel):
-    model_id: str
-    categories: List[str] = Field(min_items=1)
 
 
 class DatasetExportRequest(BaseModel):
@@ -224,6 +208,41 @@ class DatasetExportRequest(BaseModel):
 
 class FeedbackDeleteRequest(BaseModel):
     ids: List[int] = Field(min_items=1)
+
+
+SyntheticDomain = Literal["education", "news", "politic"]
+SyntheticStyle = Literal["formal", "informal"]
+
+
+class SyntheticGenerateRequest(BaseModel):
+    domain: SyntheticDomain
+    style: SyntheticStyle
+    label: int = Field(ge=0, le=1)
+    count: int = Field(default=10, ge=1, le=200)
+    model: Optional[str] = None
+
+
+class SyntheticReviewItem(BaseModel):
+    id: int
+    is_accepted: bool
+    text: Optional[str] = None
+    label: Optional[int] = Field(default=None, ge=0, le=1)
+
+
+class SyntheticReviewRequest(BaseModel):
+    updates: List[SyntheticReviewItem] = Field(min_items=1)
+
+
+class SyntheticDeleteRequest(BaseModel):
+    ids: List[int] = Field(min_items=1)
+
+
+class SyntheticExportRequest(BaseModel):
+    batch_id: Optional[str] = None
+    domain: Optional[SyntheticDomain] = None
+    style: Optional[SyntheticStyle] = None
+    label: Optional[int] = Field(default=None, ge=0, le=1)
+    accepted_only: bool = True
 
 
 class AnalyzeCompareOptions(AnalyzeOptions):
@@ -244,7 +263,7 @@ class AnalyzeRerunRequest(BaseModel):
 
 class AskAIRequest(BaseModel):
     url: str
-    domain_category: Optional[str] = None
+    html_tag: Optional[str] = None
     overall: Optional[float] = None
     thresholds: Optional[Dict[str, float]] = None
     segments: List[Dict[str, Any]] = Field(default_factory=list)
@@ -439,7 +458,17 @@ def map_results_to_response(
                     "score": score if score is not None else 0.0,
                     "text_preview": text[:160],
                     "text": text,
-                    "domain_category": seg.get("domain_category"),
+                    "html_tags": seg.get("html_tags"),
+                    "og_types": seg.get("og_types"),
+                    "ai_learned": seg.get("ai_learned"),
+                    "ai_learned_label": seg.get("ai_learned_label"),
+                    "segment_hash": seg.get("segment_hash"),
+                    "context_segment_hash": seg.get("context_segment_hash"),
+                    "toxic_label": seg.get("toxic_label"),
+                    "toxic_prob_adjusted": normalize_score(seg.get("toxic_prob_adjusted")),
+                    "ai_learned_mode": seg.get("ai_learned_mode"),
+                    "learned_support": seg.get("learned_support"),
+                    "learned_agreement": normalize_score(seg.get("learned_agreement")),
                     "seg_threshold_used": normalize_score(seg.get("seg_threshold_used")),
                 }
             )
@@ -454,7 +483,8 @@ def map_results_to_response(
                 "crawl_output_dir": to_relative(crawl.get("output_dir")),
                 "segments_path": to_relative(segments_path),
                 "videos": load_video_results(url_hash),
-                "domain_category": page_info.get("domain_category") if page_info else None,
+                "html_tags": page_info.get("html_tags") if page_info else None,
+                "og_types": page_info.get("og_types") if page_info else None,
                 "seg_threshold_used": normalize_score(page_info.get("seg_threshold_used")) if page_info else None,
                 "page_toxic": normalize_int(page_info.get("page_toxic")) if page_info else None,
                 "toxicity": {
@@ -496,10 +526,16 @@ def get_gemini_model_candidates() -> List[str]:
 
 
 def is_gemini_rate_limited(status_code: int, detail: str) -> bool:
-    if status_code == 429:
+    if status_code in {429, 503}:
         return True
     lowered = detail.lower()
-    if "resource_exhausted" in lowered or "rate limit" in lowered or "quota" in lowered:
+    if (
+        "resource_exhausted" in lowered
+        or "rate limit" in lowered
+        or "quota" in lowered
+        or "status\": \"unavailable\"" in lowered
+        or "high demand" in lowered
+    ):
         return True
     return False
 
@@ -756,6 +792,324 @@ def normalize_int(value: Any) -> Optional[int]:
         return None
 
 
+SYNTHETIC_PROMPT_VERSION = "v1"
+PLACEHOLDER_PATTERN = re.compile(r"\[[^\]]+\]|<[^>]+>|\{[^}]+\}")
+SYNTHETIC_FALLBACK_MODEL = "gemini-1.5-flash-latest"
+SYNTHETIC_MAX_RETRIES = 3
+SYNTHETIC_LENGTH_BUCKET_ORDER = ["very_short", "short_medium", "medium_long", "long"]
+SYNTHETIC_LENGTH_BUCKET_RATIOS: Dict[str, float] = {
+    "very_short": 0.20,
+    "short_medium": 0.40,
+    "medium_long": 0.30,
+    "long": 0.10,
+}
+SYNTHETIC_LENGTH_DEFAULT_BOUNDS = (8, 18, 32)
+_SYNTHETIC_LENGTH_BOUNDS_CACHE: Optional[Tuple[int, int, int]] = None
+
+
+def normalize_synthetic_text(text: str) -> str:
+    return " ".join((text or "").strip().split())
+
+
+def synthetic_word_length(text: str) -> int:
+    normalized = normalize_synthetic_text(text)
+    if not normalized:
+        return 0
+    return len(normalized.split(" "))
+
+
+def quantile(sorted_values: List[int], q: float) -> float:
+    if not sorted_values:
+        return 0.0
+    if len(sorted_values) == 1:
+        return float(sorted_values[0])
+    if q <= 0:
+        return float(sorted_values[0])
+    if q >= 1:
+        return float(sorted_values[-1])
+
+    pos = (len(sorted_values) - 1) * q
+    lower_idx = int(math.floor(pos))
+    upper_idx = int(math.ceil(pos))
+    if lower_idx == upper_idx:
+        return float(sorted_values[lower_idx])
+    weight = pos - lower_idx
+    return (1.0 - weight) * sorted_values[lower_idx] + weight * sorted_values[upper_idx]
+
+
+def get_synthetic_length_bounds() -> Tuple[int, int, int]:
+    global _SYNTHETIC_LENGTH_BOUNDS_CACHE
+    if _SYNTHETIC_LENGTH_BOUNDS_CACHE is not None:
+        return _SYNTHETIC_LENGTH_BOUNDS_CACHE
+
+    lengths: List[int] = []
+    source_files = [
+        BASE_DIR / "data" / "processed" / "victsd_v1" / "train.jsonl",
+        BASE_DIR / "data" / "processed" / "victsd_v1" / "validation.jsonl",
+        BASE_DIR / "data" / "processed" / "victsd_v1" / "test.jsonl",
+    ]
+
+    for file_path in source_files:
+        if not file_path.exists():
+            continue
+        try:
+            with file_path.open("r", encoding="utf-8") as f:
+                for line in f:
+                    raw = line.strip()
+                    if not raw:
+                        continue
+                    try:
+                        row = json.loads(raw)
+                    except json.JSONDecodeError:
+                        continue
+                    text = str(row.get("text") or "")
+                    length = synthetic_word_length(text)
+                    if length > 0:
+                        lengths.append(length)
+        except Exception:
+            logger.warning("Failed reading ViCTSD length source: %s", file_path)
+
+    if not lengths:
+        _SYNTHETIC_LENGTH_BOUNDS_CACHE = SYNTHETIC_LENGTH_DEFAULT_BOUNDS
+        return _SYNTHETIC_LENGTH_BOUNDS_CACHE
+
+    lengths.sort()
+    q20 = int(round(quantile(lengths, 0.20)))
+    q60 = int(round(quantile(lengths, 0.60)))
+    q90 = int(round(quantile(lengths, 0.90)))
+
+    b1 = max(1, q20)
+    b2 = max(b1 + 1, q60)
+    b3 = max(b2 + 1, q90)
+    _SYNTHETIC_LENGTH_BOUNDS_CACHE = (b1, b2, b3)
+    return _SYNTHETIC_LENGTH_BOUNDS_CACHE
+
+
+def classify_synthetic_length_bucket(length_words: int, bounds: Tuple[int, int, int]) -> str:
+    b1, b2, b3 = bounds
+    if length_words <= b1:
+        return "very_short"
+    if length_words <= b2:
+        return "short_medium"
+    if length_words <= b3:
+        return "medium_long"
+    return "long"
+
+
+def build_length_bucket_targets(total_count: int) -> Dict[str, int]:
+    if total_count <= 0:
+        return {key: 0 for key in SYNTHETIC_LENGTH_BUCKET_ORDER}
+
+    targets: Dict[str, int] = {}
+    fractions: List[Tuple[float, str]] = []
+    assigned = 0
+    for key in SYNTHETIC_LENGTH_BUCKET_ORDER:
+        raw = total_count * SYNTHETIC_LENGTH_BUCKET_RATIOS[key]
+        base = int(math.floor(raw))
+        targets[key] = base
+        assigned += base
+        fractions.append((raw - base, key))
+
+    remainder = total_count - assigned
+    for _, key in sorted(fractions, key=lambda item: item[0], reverse=True):
+        if remainder <= 0:
+            break
+        targets[key] += 1
+        remainder -= 1
+
+    return targets
+
+
+def build_length_bucket_guidance(targets: Dict[str, int], bounds: Tuple[int, int, int]) -> str:
+    b1, b2, b3 = bounds
+    return (
+        "Phân bổ độ dài bắt buộc theo số từ gần giống ViCTSD:\n"
+        f"- very_short (<= {b1} từ): {targets.get('very_short', 0)} mẫu\n"
+        f"- short_medium ({b1 + 1}-{b2} từ): {targets.get('short_medium', 0)} mẫu\n"
+        f"- medium_long ({b2 + 1}-{b3} từ): {targets.get('medium_long', 0)} mẫu\n"
+        f"- long (> {b3} từ): {targets.get('long', 0)} mẫu"
+    )
+
+
+def build_structure_fingerprint(text: str) -> str:
+    normalized = normalize_synthetic_text(text).lower()
+    skeleton = re.sub(r"\d+", "<num>", normalized)
+    skeleton = re.sub(r"\b[a-zA-ZÀ-ỹ]{1,2}\b", "<w>", skeleton)
+    skeleton = re.sub(r"[a-zA-ZÀ-ỹ]+", "<tok>", skeleton)
+    skeleton = re.sub(r"\s+", " ", skeleton).strip()
+    return hashlib.sha256(skeleton.encode("utf-8")).hexdigest()
+
+
+def build_text_hash(text: str) -> str:
+    normalized = normalize_synthetic_text(text).lower()
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def build_synthetic_meta(
+    *,
+    sample_id: int,
+    batch_id: str,
+    domain: str,
+    style: str,
+    model_name: str,
+    created_at: str,
+) -> Dict[str, Any]:
+    return {
+        "source": "synthetic_llm",
+        "split": "synthetic",
+        "is_augmented": True,
+        "sample_id": sample_id,
+        "batch_id": batch_id,
+        "domain": domain,
+        "style": style,
+        "generator_model": model_name,
+        "prompt_version": SYNTHETIC_PROMPT_VERSION,
+        "created_at": created_at,
+    }
+
+
+def parse_json_array_from_llm(raw: str) -> List[Dict[str, Any]]:
+    cleaned = (raw or "").strip()
+    if not cleaned:
+        return []
+
+    fenced = re.search(r"```(?:json)?\s*([\s\S]*?)```", cleaned, flags=re.IGNORECASE)
+    if fenced:
+        cleaned = fenced.group(1).strip()
+
+    def extract_items(parsed: Any) -> List[Dict[str, Any]]:
+        if isinstance(parsed, list):
+            return [item for item in parsed if isinstance(item, dict)]
+        if isinstance(parsed, dict):
+            for key in ("items", "samples", "data", "rows", "results"):
+                value = parsed.get(key)
+                if isinstance(value, list):
+                    return [item for item in value if isinstance(item, dict)]
+        return []
+
+    try:
+        parsed_direct = json.loads(cleaned)
+        direct_items = extract_items(parsed_direct)
+        if direct_items:
+            return direct_items
+    except json.JSONDecodeError:
+        pass
+
+    start = cleaned.find("[")
+    end = cleaned.rfind("]")
+    if start == -1 or end == -1 or end <= start:
+        return []
+
+    payload = cleaned[start : end + 1]
+    try:
+        parsed = json.loads(payload)
+    except json.JSONDecodeError:
+        return []
+
+    return extract_items(parsed)
+
+
+def build_synthetic_prompt(
+    domain: str,
+    style: str,
+    label: int,
+    count: int,
+    length_guidance: Optional[str] = None,
+) -> str:
+    toxicity = "toxic" if label == 1 else "clean"
+    guidance = f"\n7) {length_guidance}" if length_guidance else ""
+    return (
+        "Bạn là hệ thống tạo dữ liệu tiếng Việt cho phân loại toxic. "
+        "Hãy tạo đúng số lượng mẫu theo yêu cầu và trả về JSON array hợp lệ, không có text ngoài JSON.\n"
+        f"Yêu cầu: domain={domain}, style={style}, label={label} ({toxicity}), số mẫu={count}.\n"
+        "Mỗi phần tử bắt buộc có schema: {\"text\": string, \"label\": 0|1, \"meta\": object}.\n"
+        "Ràng buộc bắt buộc:\n"
+        "1) Không lặp cấu trúc câu giữa các mẫu.\n"
+        "2) Không dùng placeholder dạng [tên], [trường], <name>, {city}.\n"
+        "3) Phải dùng tên/tổ chức cụ thể giả định (vd: Trường THPT Nguyễn Trãi, GS. Nguyễn Văn A).\n"
+        "4) Dữ liệu phải tự nhiên, đúng tiếng Việt.\n"
+        "5) meta phải chứa source=\"synthetic_llm\", domain, style.\n"
+        "6) label trong từng sample phải đúng bằng label yêu cầu."
+        f"{guidance}"
+    )
+
+
+def call_gemini_with_model(prompt: str, model_name: Optional[str] = None) -> str:
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=400, detail="Missing GEMINI_API_KEY")
+
+    api_version = os.getenv("GEMINI_API_VERSION", "v1beta")
+    try:
+        max_tokens = int(os.getenv("GEMINI_MAX_TOKENS", "1024"))
+    except ValueError:
+        max_tokens = 1024
+
+    requested = normalize_gemini_model_name(model_name)
+    candidates: List[str] = []
+    if requested:
+        candidates.append(requested)
+    for name in get_gemini_model_candidates():
+        if name not in candidates:
+            candidates.append(name)
+    if not candidates:
+        candidates = [SYNTHETIC_FALLBACK_MODEL]
+
+    payload = {
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.2, "maxOutputTokens": max_tokens},
+    }
+    data = json.dumps(payload).encode("utf-8")
+
+    last_error: Optional[str] = None
+    for idx, model in enumerate(candidates):
+        url = gemini_base_url(api_version, api_key, f"models/{model}:generateContent")
+        req = urllib.request.Request(
+            url,
+            data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                raw = resp.read().decode("utf-8")
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8") if exc.fp else str(exc)
+            last_error = detail
+            if (exc.code == 404 or is_gemini_rate_limited(exc.code, detail)) and idx < len(candidates) - 1:
+                logger.warning("Gemini failed on %s, trying fallback", model)
+                continue
+            raise HTTPException(status_code=502, detail=f"Gemini API error: {detail}") from exc
+        except urllib.error.URLError as exc:
+            last_error = str(exc)
+            if idx < len(candidates) - 1:
+                logger.warning("Gemini network error on %s, trying fallback", model)
+                continue
+            raise HTTPException(status_code=502, detail=f"Gemini API error: {exc}") from exc
+
+        try:
+            parsed = json.loads(raw)
+            model_candidates = parsed.get("candidates") or []
+            if not model_candidates:
+                raise ValueError("No candidates returned")
+            parts = model_candidates[0].get("content", {}).get("parts", [])
+            if not parts:
+                raise ValueError("No content parts returned")
+            text = "\n".join([p.get("text", "") for p in parts if p.get("text")])
+            if text.strip():
+                return text
+            raise ValueError("Empty text returned")
+        except Exception as exc:
+            last_error = str(exc)
+            if idx < len(candidates) - 1:
+                logger.warning("Gemini parse/content error on %s, trying fallback", model)
+                continue
+            raise HTTPException(status_code=502, detail=f"Gemini response parse error: {exc}") from exc
+
+    raise HTTPException(status_code=502, detail=f"Gemini API error: {last_error or 'Unknown error'}")
+
+
 def ensure_table_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
     columns = [row[1] for row in conn.execute(f"PRAGMA table_info({table})")]
     if column in columns:
@@ -774,23 +1128,12 @@ def init_feedback_db() -> None:
                 url TEXT NOT NULL,
                 url_hash TEXT NOT NULL,
                 model_id TEXT NOT NULL,
-                domain_category TEXT NOT NULL,
-                domain_override TEXT,
+                html_tag TEXT NOT NULL,
+                html_tag_override TEXT,
                 seg_threshold_used REAL,
                 score_overall REAL,
                 label TEXT NOT NULL,
                 created_at TEXT NOT NULL
-            )
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS threshold_overrides (
-                model_id TEXT NOT NULL,
-                domain_category TEXT NOT NULL,
-                threshold REAL NOT NULL,
-                updated_at TEXT NOT NULL,
-                PRIMARY KEY (model_id, domain_category)
             )
             """
         )
@@ -802,19 +1145,70 @@ def init_feedback_db() -> None:
                 url TEXT NOT NULL,
                 url_hash TEXT NOT NULL,
                 model_id TEXT NOT NULL,
-                domain_category TEXT NOT NULL,
-                domain_override TEXT,
+                html_tag TEXT NOT NULL,
+                html_tag_override TEXT,
                 segment_id TEXT NOT NULL,
                 text TEXT NOT NULL,
                 score REAL,
                 seg_threshold_used REAL,
                 label TEXT NOT NULL,
+                segment_hash TEXT,
                 created_at TEXT NOT NULL
             )
             """
         )
-        ensure_table_column(conn, "feedback_page", "domain_override", "TEXT")
-        ensure_table_column(conn, "feedback_segment", "domain_override", "TEXT")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS synthetic_generation_batch (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                batch_id TEXT NOT NULL UNIQUE,
+                domain TEXT NOT NULL,
+                style TEXT NOT NULL,
+                target_label INTEGER NOT NULL,
+                requested_count INTEGER NOT NULL,
+                generated_count INTEGER NOT NULL,
+                generator_model TEXT NOT NULL,
+                prompt_version TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS synthetic_dataset_row (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                batch_id TEXT NOT NULL,
+                text TEXT NOT NULL,
+                label INTEGER NOT NULL,
+                domain TEXT NOT NULL,
+                style TEXT NOT NULL,
+                is_accepted INTEGER NOT NULL DEFAULT 1,
+                structure_fingerprint TEXT,
+                text_hash TEXT,
+                validation_flags TEXT,
+                meta_json TEXT,
+                created_at TEXT NOT NULL,
+                reviewed_at TEXT
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_synth_row_batch ON synthetic_dataset_row(batch_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_synth_row_accept ON synthetic_dataset_row(is_accepted)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_synth_row_dims ON synthetic_dataset_row(domain, style, label)")
+        ensure_table_column(conn, "feedback_page", "html_tag", "TEXT")
+        ensure_table_column(conn, "feedback_page", "html_tag_override", "TEXT")
+        ensure_table_column(conn, "feedback_segment", "html_tag", "TEXT")
+        ensure_table_column(conn, "feedback_segment", "html_tag_override", "TEXT")
+        ensure_table_column(conn, "feedback_segment", "segment_hash", "TEXT")
+        ensure_table_column(conn, "feedback_segment", "context_segment_hash", "TEXT")
+        ensure_table_column(conn, "synthetic_generation_batch", "generator_model", "TEXT NOT NULL DEFAULT 'gemini-1.5-flash-latest'")
+        ensure_table_column(conn, "synthetic_generation_batch", "prompt_version", "TEXT NOT NULL DEFAULT 'v1'")
+        ensure_table_column(conn, "synthetic_dataset_row", "is_accepted", "INTEGER NOT NULL DEFAULT 1")
+        ensure_table_column(conn, "synthetic_dataset_row", "structure_fingerprint", "TEXT")
+        ensure_table_column(conn, "synthetic_dataset_row", "text_hash", "TEXT")
+        ensure_table_column(conn, "synthetic_dataset_row", "validation_flags", "TEXT")
+        ensure_table_column(conn, "synthetic_dataset_row", "meta_json", "TEXT")
+        ensure_table_column(conn, "synthetic_dataset_row", "reviewed_at", "TEXT")
 
 
 def insert_feedback_page(items: List[Dict[str, Any]]) -> int:
@@ -822,31 +1216,41 @@ def insert_feedback_page(items: List[Dict[str, Any]]) -> int:
         return 0
     init_feedback_db()
     now = datetime.utcnow().isoformat()
-    rows = [
-        (
-            item["job_id"],
-            item["url"],
-            item["url_hash"],
-            item["model_id"],
-            item["domain_category"],
-            item.get("domain_override"),
-            item.get("seg_threshold_used"),
-            item.get("score_overall"),
-            item["label"],
-            now,
-        )
-        for item in items
-    ]
     with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
-        conn.executemany(
-            """
-            INSERT INTO feedback_page (
-                job_id, url, url_hash, model_id, domain_category, domain_override,
-                seg_threshold_used, score_overall, label, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            rows,
-        )
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(feedback_page)")}
+        insert_columns = ["job_id", "url", "url_hash", "model_id"]
+        if "domain_category" in columns:
+            insert_columns.append("domain_category")
+        if "domain_override" in columns:
+            insert_columns.append("domain_override")
+        if "html_tag" in columns:
+            insert_columns.append("html_tag")
+        if "html_tag_override" in columns:
+            insert_columns.append("html_tag_override")
+        insert_columns += ["seg_threshold_used", "score_overall", "label", "created_at"]
+
+        rows = []
+        for item in items:
+            row = [item["job_id"], item["url"], item["url_hash"], item["model_id"]]
+            if "domain_category" in columns:
+                row.append(item["html_tag"])
+            if "domain_override" in columns:
+                row.append(item.get("html_tag_override"))
+            if "html_tag" in columns:
+                row.append(item["html_tag"])
+            if "html_tag_override" in columns:
+                row.append(item.get("html_tag_override"))
+            row += [
+                item.get("seg_threshold_used"),
+                item.get("score_overall"),
+                item["label"],
+                now,
+            ]
+            rows.append(tuple(row))
+
+        placeholders = ", ".join(["?"] * len(insert_columns))
+        sql = f"INSERT INTO feedback_page ({', '.join(insert_columns)}) VALUES ({placeholders})"
+        conn.executemany(sql, rows)
         conn.commit()
     return len(rows)
 
@@ -856,87 +1260,161 @@ def insert_feedback_segment(items: List[Dict[str, Any]]) -> int:
         return 0
     init_feedback_db()
     now = datetime.utcnow().isoformat()
-    rows = [
-        (
-            item["job_id"],
-            item["url"],
-            item["url_hash"],
-            item["model_id"],
-            item["domain_category"],
-            item.get("domain_override"),
-            item["segment_id"],
-            item["text"],
-            item.get("score"),
-            item.get("seg_threshold_used"),
-            item["label"],
-            now,
-        )
-        for item in items
-    ]
     with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
-        conn.executemany(
-            """
-            INSERT INTO feedback_segment (
-                job_id, url, url_hash, model_id, domain_category, domain_override, segment_id,
-                text, score, seg_threshold_used, label, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            rows,
-        )
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(feedback_segment)")}
+        insert_columns = ["job_id", "url", "url_hash", "model_id"]
+        if "domain_category" in columns:
+            insert_columns.append("domain_category")
+        if "domain_override" in columns:
+            insert_columns.append("domain_override")
+        if "html_tag" in columns:
+            insert_columns.append("html_tag")
+        if "html_tag_override" in columns:
+            insert_columns.append("html_tag_override")
+        insert_columns += ["segment_id", "text", "score", "seg_threshold_used", "label"]
+        if "segment_hash" in columns:
+            insert_columns.append("segment_hash")
+        if "context_segment_hash" in columns:
+            insert_columns.append("context_segment_hash")
+        insert_columns.append("created_at")
+
+        dedupe_candidates: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        passthrough_items: List[Dict[str, Any]] = []
+        for item in items:
+            effective_hash = (item.get("context_segment_hash") or item.get("segment_hash") or "").strip()
+            effective_tag = (item.get("html_tag_override") or item.get("html_tag") or "").strip().lower()
+            if effective_hash:
+                dedupe_candidates[(effective_hash, effective_tag)] = item
+            else:
+                passthrough_items.append(item)
+
+        deduped_items = list(dedupe_candidates.values()) + passthrough_items
+
+        rows = []
+        for item in deduped_items:
+            row = [item["job_id"], item["url"], item["url_hash"], item["model_id"]]
+            if "domain_category" in columns:
+                row.append(item["html_tag"])
+            if "domain_override" in columns:
+                row.append(item.get("html_tag_override"))
+            if "html_tag" in columns:
+                row.append(item["html_tag"])
+            if "html_tag_override" in columns:
+                row.append(item.get("html_tag_override"))
+            row += [
+                item["segment_id"],
+                item["text"],
+                item.get("score"),
+                item.get("seg_threshold_used"),
+                item["label"],
+            ]
+            if "segment_hash" in columns:
+                row.append(item.get("segment_hash"))
+            if "context_segment_hash" in columns:
+                row.append(item.get("context_segment_hash"))
+            row.append(now)
+            rows.append(tuple(row))
+
+        if "segment_hash" in columns:
+            for (effective_hash, effective_tag) in dedupe_candidates.keys():
+                if "context_segment_hash" in columns:
+                    conn.execute(
+                        """
+                        DELETE FROM feedback_segment
+                        WHERE COALESCE(context_segment_hash, segment_hash) = ?
+                          AND LOWER(COALESCE(html_tag_override, html_tag, '')) = ?
+                        """,
+                        (effective_hash, effective_tag),
+                    )
+                else:
+                    conn.execute(
+                        """
+                        DELETE FROM feedback_segment
+                        WHERE segment_hash = ?
+                          AND LOWER(COALESCE(html_tag_override, html_tag, '')) = ?
+                        """,
+                        (effective_hash, effective_tag),
+                    )
+
+        placeholders = ", ".join(["?"] * len(insert_columns))
+        sql = f"INSERT INTO feedback_segment ({', '.join(insert_columns)}) VALUES ({placeholders})"
+        conn.executemany(sql, rows)
         conn.commit()
     return len(rows)
 
 
 def load_threshold_overrides(model_id: str) -> Dict[str, float]:
-    init_feedback_db()
-    with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
-        rows = conn.execute(
-            """
-            SELECT domain_category, threshold
-            FROM threshold_overrides
-            WHERE model_id = ?
-            """,
-            (model_id,),
-        ).fetchall()
-    return {row[0]: float(row[1]) for row in rows}
+    return {}
 
 
 def delete_threshold_overrides(model_id: str, categories: List[str]) -> int:
-    if not categories:
-        return 0
-    init_feedback_db()
-    with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
-        placeholders = ", ".join(["?"] * len(categories))
-        cursor = conn.execute(
-            f"DELETE FROM threshold_overrides WHERE model_id = ? AND domain_category IN ({placeholders})",
-            (model_id, *categories),
-        )
-        conn.commit()
-        return cursor.rowcount or 0
+    return 0
 
 
 def save_threshold_overrides(model_id: str, values: Dict[str, float]) -> None:
-    if not values:
-        return
-    init_feedback_db()
-    now = datetime.utcnow().isoformat()
-    rows = [(model_id, cat, float(thr), now) for cat, thr in values.items()]
-    with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
-        conn.executemany(
-            """
-            INSERT INTO threshold_overrides (model_id, domain_category, threshold, updated_at)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(model_id, domain_category)
-            DO UPDATE SET threshold = excluded.threshold, updated_at = excluded.updated_at
-            """,
-            rows,
-        )
-        conn.commit()
+    return None
 
 
 def get_effective_thresholds(model_id: str) -> Dict[str, float]:
-    overrides = load_threshold_overrides(model_id)
-    return {**CATEGORY_THRESHOLDS, **overrides}
+    return {**CATEGORY_THRESHOLDS}
+
+
+def normalize_segment_text(text: str) -> str:
+    return " ".join((text or "").strip().split()).lower()
+
+
+def build_segment_hash(text: str, html_tag: str) -> str:
+    base = f"{normalize_segment_text(text)}|{(html_tag or '').strip().lower()}"
+    return hashlib.sha256(base.encode("utf-8")).hexdigest()
+
+
+def load_learned_segments(model_id: Optional[str] = None) -> Dict[Tuple[str, str], Dict[str, float]]:
+    init_feedback_db()
+    learned: Dict[Tuple[str, str], Dict[str, float]] = {}
+    with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+        query = """
+            SELECT id, segment_hash, context_segment_hash, html_tag_override, html_tag, label
+            FROM feedback_segment
+            ORDER BY id DESC
+        """
+        rows = conn.execute(query).fetchall()
+
+    # Deduplicate by semantic unit to prevent repeated re-scans from inflating support.
+    # Keep only the latest label per (effective_hash, effective_tag).
+    latest_by_unit: Dict[Tuple[str, str], str] = {}
+    for _id, segment_hash, context_segment_hash, html_tag_override, html_tag, label in rows:
+        normalized = safe_label(label)
+        if normalized not in {"toxic", "clean"}:
+            continue
+
+        tag = (html_tag_override or html_tag or "").strip().lower()
+        effective_hash = (context_segment_hash or segment_hash or "").strip()
+        if not effective_hash:
+            continue
+
+        unit_key = (effective_hash, tag)
+        if unit_key not in latest_by_unit:
+            latest_by_unit[unit_key] = normalized
+
+    for (effective_hash, tag), normalized in latest_by_unit.items():
+        keys: List[Tuple[str, str]] = [
+            (effective_hash, tag),
+            (effective_hash, ""),
+        ]
+
+        for key in keys:
+            stats = learned.setdefault(key, {"toxic_count": 0.0, "clean_count": 0.0, "support": 0.0, "agreement": 0.0})
+            if normalized == "toxic":
+                stats["toxic_count"] += 1.0
+            else:
+                stats["clean_count"] += 1.0
+
+    for stats in learned.values():
+        support = stats["toxic_count"] + stats["clean_count"]
+        stats["support"] = support
+        stats["agreement"] = (max(stats["toxic_count"], stats["clean_count"]) / support) if support else 0.0
+
+    return learned
 
 
 def safe_label(value: Optional[str]) -> Optional[str]:
@@ -963,112 +1441,8 @@ def compute_f1(precision: float, recall: float) -> float:
     return 2 * precision * recall / (precision + recall)
 
 
-def resolve_effective_category(domain_category: Optional[str], domain_override: Optional[str]) -> Optional[str]:
-    if domain_override and domain_override in CATEGORY_THRESHOLDS:
-        return domain_override
-    if domain_category and domain_category in CATEGORY_THRESHOLDS:
-        return domain_category
-    return None
 
 
-def collect_threshold_feedback(model_id: str) -> Dict[str, List[Tuple[float, int]]]:
-    init_feedback_db()
-    with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
-        rows = conn.execute(
-            """
-            SELECT domain_category, domain_override, score_overall, label
-            FROM feedback_page
-            WHERE model_id = ?
-            """,
-            (model_id,),
-        ).fetchall()
-
-    grouped: Dict[str, List[Tuple[float, int]]] = {}
-    for domain_category, domain_override, score_overall, label in rows:
-        normalized = safe_label(label)
-        if normalized not in {"toxic", "clean"} or score_overall is None:
-            continue
-        effective = resolve_effective_category(domain_category, domain_override)
-        if not effective:
-            continue
-        grouped.setdefault(effective, []).append(
-            (float(score_overall), 1 if normalized == "toxic" else 0)
-        )
-    return grouped
-
-
-def preview_thresholds(model_id: str, min_samples: int = 10) -> Dict[str, Any]:
-    grouped = collect_threshold_feedback(model_id)
-
-    suggestions: Dict[str, float] = {}
-    stats: Dict[str, Any] = {}
-
-    for category, pairs in grouped.items():
-        if len(pairs) < min_samples:
-            stats[category] = {
-                "count": len(pairs),
-                "status": "insufficient_samples",
-            }
-            continue
-
-        scores = [p[0] for p in pairs]
-        labels = [p[1] for p in pairs]
-        thresholds = sorted(set(scores))
-        best = {"f1": -1.0, "thr": None, "precision": 0.0, "recall": 0.0}
-
-        for thr in thresholds:
-            tp = fp = fn = 0
-            for score, label in pairs:
-                pred = 1 if score >= thr else 0
-                if pred == 1 and label == 1:
-                    tp += 1
-                elif pred == 1 and label == 0:
-                    fp += 1
-                elif pred == 0 and label == 1:
-                    fn += 1
-            precision = tp / (tp + fp) if (tp + fp) else 0.0
-            recall = tp / (tp + fn) if (tp + fn) else 0.0
-            f1 = compute_f1(precision, recall)
-            if f1 > best["f1"]:
-                best = {"f1": f1, "thr": thr, "precision": precision, "recall": recall}
-
-        if best["thr"] is not None:
-            suggestions[category] = float(best["thr"])
-            stats[category] = {
-                "count": len(pairs),
-                "f1": round(best["f1"], 4),
-                "precision": round(best["precision"], 4),
-                "recall": round(best["recall"], 4),
-            }
-
-    return {"suggested_thresholds": suggestions, "stats": stats}
-
-
-def apply_thresholds(
-    model_id: str,
-    suggested: Dict[str, float],
-    ema_weight: float = 0.8,
-    min_samples_apply: int = 10,
-    max_delta: float = 0.03,
-) -> Dict[str, float]:
-    effective = get_effective_thresholds(model_id)
-    grouped = collect_threshold_feedback(model_id)
-    updates: Dict[str, float] = {}
-    for category, suggested_value in suggested.items():
-        if category not in CATEGORY_THRESHOLDS:
-            continue
-        if len(grouped.get(category, [])) < min_samples_apply:
-            continue
-        current = effective.get(category, CATEGORY_THRESHOLDS[category])
-        ema_value = (ema_weight * current) + ((1 - ema_weight) * float(suggested_value))
-        if max_delta > 0:
-            lower = current - max_delta
-            upper = current + max_delta
-            ema_value = min(max(ema_value, lower), upper)
-        updates[category] = round(ema_value, 4)
-    if updates:
-        save_threshold_overrides(model_id, updates)
-    return get_effective_thresholds(model_id)
 
 
 def iter_dataset_files() -> List[Tuple[Path, str, bool]]:
@@ -1141,13 +1515,13 @@ def iter_feedback_rows() -> List[Dict[str, Any]]:
     with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
         results = conn.execute(
             """
-            SELECT id, text, label, model_id, domain_category, domain_override, score, seg_threshold_used, created_at
+            SELECT id, text, label, model_id, html_tag, html_tag_override, score, seg_threshold_used, created_at
             FROM feedback_segment
             ORDER BY id DESC
             """
         ).fetchall()
 
-    for feedback_id, text, label, model_id, domain_category, domain_override, score, seg_threshold_used, created_at in results:
+    for feedback_id, text, label, model_id, html_tag, html_tag_override, score, seg_threshold_used, created_at in results:
         label_int = safe_label_int(label)
         if label_int is None:
             continue
@@ -1157,8 +1531,8 @@ def iter_feedback_rows() -> List[Dict[str, Any]]:
             "is_augmented": False,
             "feedback_id": feedback_id,
             "model_id": model_id,
-            "domain_category": domain_category,
-            "domain_override": domain_override,
+            "html_tag": html_tag,
+            "html_tag_override": html_tag_override,
             "score": normalize_score(score),
             "seg_threshold_used": normalize_score(seg_threshold_used),
             "created_at": created_at,
@@ -1262,6 +1636,393 @@ def delete_feedback_rows(ids: List[int]) -> int:
         )
         conn.commit()
         return cursor.rowcount or 0
+
+
+def insert_synthetic_batch(
+    *,
+    batch_id: str,
+    domain: str,
+    style: str,
+    target_label: int,
+    requested_count: int,
+    generated_count: int,
+    generator_model: str,
+    rows: List[Dict[str, Any]],
+) -> int:
+    if not rows:
+        return 0
+
+    init_feedback_db()
+    now = datetime.utcnow().isoformat()
+    with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+        conn.execute(
+            """
+            INSERT INTO synthetic_generation_batch (
+                batch_id, domain, style, target_label, requested_count,
+                generated_count, generator_model, prompt_version, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                batch_id,
+                domain,
+                style,
+                target_label,
+                requested_count,
+                generated_count,
+                generator_model,
+                SYNTHETIC_PROMPT_VERSION,
+                now,
+            ),
+        )
+
+        payload_rows = []
+        for row in rows:
+            payload_rows.append(
+                (
+                    batch_id,
+                    row["text"],
+                    row["label"],
+                    domain,
+                    style,
+                    0,
+                    row.get("structure_fingerprint"),
+                    row.get("text_hash"),
+                    json.dumps(row.get("validation_flags") or {}, ensure_ascii=False),
+                    json.dumps(row.get("meta") or {}, ensure_ascii=False),
+                    now,
+                    None,
+                )
+            )
+
+        conn.executemany(
+            """
+            INSERT INTO synthetic_dataset_row (
+                batch_id, text, label, domain, style, is_accepted,
+                structure_fingerprint, text_hash, validation_flags, meta_json,
+                created_at, reviewed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            payload_rows,
+        )
+        conn.commit()
+
+    return len(rows)
+
+
+def load_synthetic_rows(
+    *,
+    batch_id: Optional[str] = None,
+    domain: Optional[str] = None,
+    style: Optional[str] = None,
+    label: Optional[int] = None,
+    accepted: Optional[bool] = None,
+    reviewed: Optional[bool] = None,
+) -> List[Dict[str, Any]]:
+    init_feedback_db()
+    clauses: List[str] = []
+    params: List[Any] = []
+
+    if batch_id:
+        clauses.append("batch_id = ?")
+        params.append(batch_id)
+    if domain:
+        clauses.append("domain = ?")
+        params.append(domain)
+    if style:
+        clauses.append("style = ?")
+        params.append(style)
+    if label is not None:
+        clauses.append("label = ?")
+        params.append(int(label))
+    if accepted is not None:
+        clauses.append("is_accepted = ?")
+        params.append(1 if accepted else 0)
+    if reviewed is True:
+        clauses.append("reviewed_at IS NOT NULL")
+    elif reviewed is False:
+        clauses.append("reviewed_at IS NULL")
+
+    where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    query = f"""
+        SELECT id, batch_id, text, label, domain, style, is_accepted,
+               validation_flags, meta_json, created_at, reviewed_at
+        FROM synthetic_dataset_row
+        {where_sql}
+        ORDER BY id DESC
+    """
+
+    with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+        results = conn.execute(query, tuple(params)).fetchall()
+
+    rows: List[Dict[str, Any]] = []
+    for (
+        sample_id,
+        row_batch_id,
+        text,
+        row_label,
+        row_domain,
+        row_style,
+        is_accepted,
+        validation_flags,
+        meta_json,
+        created_at,
+        reviewed_at,
+    ) in results:
+        meta: Dict[str, Any] = {}
+        if isinstance(meta_json, str) and meta_json.strip():
+            try:
+                parsed_meta = json.loads(meta_json)
+                if isinstance(parsed_meta, dict):
+                    meta = parsed_meta
+            except Exception:
+                meta = {}
+
+        if not meta:
+            meta = build_synthetic_meta(
+                sample_id=sample_id,
+                batch_id=row_batch_id,
+                domain=row_domain,
+                style=row_style,
+                model_name=SYNTHETIC_FALLBACK_MODEL,
+                created_at=created_at,
+            )
+
+        flags: Dict[str, Any] = {}
+        if isinstance(validation_flags, str) and validation_flags.strip():
+            try:
+                parsed_flags = json.loads(validation_flags)
+                if isinstance(parsed_flags, dict):
+                    flags = parsed_flags
+            except Exception:
+                flags = {}
+
+        rows.append(
+            {
+                "id": sample_id,
+                "batch_id": row_batch_id,
+                "text": text,
+                "label": row_label,
+                "domain": row_domain,
+                "style": row_style,
+                "is_accepted": bool(is_accepted),
+                "meta": meta,
+                "validation_flags": flags,
+                "created_at": created_at,
+                "reviewed_at": reviewed_at,
+            }
+        )
+
+    return rows
+
+
+def delete_synthetic_rows(ids: List[int]) -> int:
+    if not ids:
+        return 0
+    normalized = [int(v) for v in ids if isinstance(v, (int, float)) or (isinstance(v, str) and str(v).isdigit())]
+    if not normalized:
+        return 0
+    init_feedback_db()
+    with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+        placeholders = ", ".join(["?"] * len(normalized))
+        cursor = conn.execute(
+            f"DELETE FROM synthetic_dataset_row WHERE id IN ({placeholders})",
+            tuple(normalized),
+        )
+        conn.commit()
+        return cursor.rowcount or 0
+
+
+def update_synthetic_review(items: List[Dict[str, Any]]) -> int:
+    if not items:
+        return 0
+    init_feedback_db()
+    now = datetime.utcnow().isoformat()
+
+    normalized: List[Tuple[int, Optional[str], Optional[int], Optional[str], int]] = []
+    for item in items:
+        sample_id = normalize_int(item.get("id"))
+        if sample_id is None:
+            continue
+
+        reviewed_text = item.get("text")
+        cleaned_text = normalize_synthetic_text(str(reviewed_text)) if reviewed_text is not None else None
+        if cleaned_text == "":
+            cleaned_text = None
+
+        reviewed_label = normalize_int(item.get("label"))
+        if reviewed_label not in {0, 1}:
+            reviewed_label = None
+
+        text_hash = build_text_hash(cleaned_text) if cleaned_text is not None else None
+        normalized.append(
+            (
+                1 if bool(item.get("is_accepted")) else 0,
+                cleaned_text,
+                reviewed_label,
+                text_hash,
+                sample_id,
+            )
+        )
+
+    if not normalized:
+        return 0
+
+    changed = 0
+    with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+        for is_accepted, cleaned_text, reviewed_label, text_hash, sample_id in normalized:
+            existing = conn.execute(
+                "SELECT text, label, domain, style, meta_json FROM synthetic_dataset_row WHERE id = ?",
+                (sample_id,),
+            ).fetchone()
+            if not existing:
+                continue
+
+            old_text, old_label, domain, style, old_meta_json = existing
+            final_text = cleaned_text if cleaned_text is not None else old_text
+            final_label = reviewed_label if reviewed_label is not None else old_label
+
+            meta: Dict[str, Any] = {}
+            if isinstance(old_meta_json, str) and old_meta_json.strip():
+                try:
+                    parsed = json.loads(old_meta_json)
+                    if isinstance(parsed, dict):
+                        meta = parsed
+                except Exception:
+                    meta = {}
+
+            if cleaned_text is not None and cleaned_text != old_text:
+                meta["edited_by_reviewer"] = True
+                meta["edited_at"] = now
+
+            meta["domain"] = domain
+            meta["style"] = style
+
+            conn.execute(
+                """
+                UPDATE synthetic_dataset_row
+                SET is_accepted = ?,
+                    text = ?,
+                    label = ?,
+                    text_hash = ?,
+                    meta_json = ?,
+                    reviewed_at = ?
+                WHERE id = ?
+                """,
+                (
+                    is_accepted,
+                    final_text,
+                    final_label,
+                    text_hash if text_hash is not None else build_text_hash(final_text),
+                    json.dumps(meta, ensure_ascii=False),
+                    now,
+                    sample_id,
+                ),
+            )
+            changed += 1
+
+        conn.commit()
+    return changed
+
+
+def build_synthetic_stats(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    total = len(rows)
+    accepted = sum(1 for row in rows if row.get("is_accepted"))
+    rejected = total - accepted
+
+    by_domain: Dict[str, Dict[str, int]] = {}
+    by_style: Dict[str, Dict[str, int]] = {}
+    by_label: Dict[str, Dict[str, int]] = {}
+    by_combo: Dict[str, Dict[str, int]] = {}
+
+    for row in rows:
+        domain = str(row.get("domain") or "unknown")
+        style = str(row.get("style") or "unknown")
+        label = str(row.get("label") if row.get("label") in {0, 1} else "unknown")
+        bucket_status = "accepted" if row.get("is_accepted") else "rejected"
+
+        for group, key in [(by_domain, domain), (by_style, style), (by_label, label)]:
+            stats = group.setdefault(key, {"total": 0, "accepted": 0, "rejected": 0})
+            stats["total"] += 1
+            stats[bucket_status] += 1
+
+        combo_key = f"{domain}|{style}|{label}"
+        combo_stats = by_combo.setdefault(combo_key, {"total": 0, "accepted": 0, "rejected": 0})
+        combo_stats["total"] += 1
+        combo_stats[bucket_status] += 1
+
+    return {
+        "total_generated": total,
+        "accepted": accepted,
+        "rejected": rejected,
+        "acceptance_rate": round((accepted / total), 4) if total else 0.0,
+        "by_domain": by_domain,
+        "by_style": by_style,
+        "by_label": by_label,
+        "by_combo": by_combo,
+    }
+
+
+def validate_synthetic_candidate(
+    *,
+    candidate: Dict[str, Any],
+    expected_label: int,
+    domain: str,
+    style: str,
+    seen_hashes: set,
+    seen_fingerprints: set,
+    length_bounds: Optional[Tuple[int, int, int]] = None,
+) -> Optional[Dict[str, Any]]:
+    text = normalize_synthetic_text(str(candidate.get("text") or ""))
+
+    raw_label = candidate.get("label")
+    label = normalize_int(raw_label)
+    if label is None and isinstance(raw_label, str):
+        lowered = raw_label.strip().lower()
+        if lowered in {"0", "1"}:
+            label = int(lowered)
+        elif lowered in {"toxic", "clean", "unsure"}:
+            label = safe_label_int(lowered)
+
+    if not text or label is None:
+        return None
+    if label != expected_label:
+        return None
+    if PLACEHOLDER_PATTERN.search(text):
+        return None
+
+    text_hash = build_text_hash(text)
+    structure_fingerprint = build_structure_fingerprint(text)
+    if text_hash in seen_hashes or structure_fingerprint in seen_fingerprints:
+        return None
+
+    seen_hashes.add(text_hash)
+    seen_fingerprints.add(structure_fingerprint)
+
+    word_length = synthetic_word_length(text)
+    bucket = classify_synthetic_length_bucket(word_length, length_bounds or get_synthetic_length_bounds())
+
+    meta = candidate.get("meta") if isinstance(candidate.get("meta"), dict) else {}
+    meta_out = {
+        **meta,
+        "source": "synthetic_llm",
+        "split": "synthetic",
+        "is_augmented": True,
+        "domain": domain,
+        "style": style,
+        "word_length": word_length,
+        "length_bucket": bucket,
+    }
+
+    return {
+        "text": text,
+        "label": expected_label,
+        "meta": meta_out,
+        "structure_fingerprint": structure_fingerprint,
+        "text_hash": text_hash,
+        "word_length": word_length,
+        "length_bucket": bucket,
+        "validation_flags": {},
+    }
 
 
 def cleanup_old_jobs(ttl_hours: float = 24.0) -> int:
@@ -1392,6 +2153,8 @@ def analyze(request: AnalyzeRequest) -> Dict[str, Any]:
                 threshold_unknown=thresholds_by_domain.get("unknown"),
                 only_url_hashes=ok_hashes,
                 quiet=True,
+                learned_feedback=load_learned_segments(),
+                html_dir=str(DATA_DIR),
             )
         else:
             logger.warning("Job %s: no successful crawls to run inference", job_id)
@@ -1461,8 +2224,8 @@ def submit_feedback(request: FeedbackRequest) -> Dict[str, Any]:
                 "url": item.url,
                 "url_hash": item.url_hash,
                 "model_id": request.model_id,
-                "domain_category": item.domain_category,
-                "domain_override": item.domain_override,
+                "html_tag": item.html_tag,
+                "html_tag_override": item.html_tag_override,
                 "seg_threshold_used": item.seg_threshold_used,
                 "score_overall": item.score_overall,
                 "label": normalized,
@@ -1570,6 +2333,8 @@ def analyze_compare(request: AnalyzeCompareRequest) -> Dict[str, Any]:
                     threshold_unknown=thresholds_by_domain.get("unknown"),
                     only_url_hashes=ok_hashes,
                     quiet=True,
+                    learned_feedback=load_learned_segments(),
+                    html_dir=str(DATA_DIR),
                 )
             else:
                 logger.warning("Compare job %s: no successful crawls to run inference", job_id)
@@ -1724,6 +2489,8 @@ def analyze_rerun(request: AnalyzeRerunRequest) -> Dict[str, Any]:
             threshold_unknown=thresholds_by_domain.get("unknown"),
             only_url_hashes=ok_hashes,
             quiet=True,
+            learned_feedback=load_learned_segments(model_id),
+            html_dir=str(DATA_DIR),
         )
 
         page_by_hash, page_by_url = load_page_results_map(out_dir)
@@ -1769,8 +2536,8 @@ def ask_ai(request: AskAIRequest) -> Dict[str, Any]:
         "Bạn là chuyên gia an toàn thông tin. Hãy giải thích ngắn gọn mức độ rủi ro nội dung.",
         f"URL: {request.url}",
     ]
-    if request.domain_category:
-        prompt_lines.append(f"Domain category: {request.domain_category}")
+    if request.html_tag:
+        prompt_lines.append(f"HTML tag: {request.html_tag}")
     if request.overall is not None:
         prompt_lines.append(f"Điểm độc hại tổng thể (0-1): {request.overall:.3f}")
     if request.thresholds:
@@ -1796,10 +2563,6 @@ def gemini_models() -> Dict[str, Any]:
     return list_gemini_models()
 
 
-@app.post("/api/thresholds/preview")
-def thresholds_preview(request: ThresholdPreviewRequest) -> Dict[str, Any]:
-    result = preview_thresholds(request.model_id, min_samples=request.min_samples)
-    return result
 
 
 @app.post("/api/feedback/segment")
@@ -1815,13 +2578,15 @@ def submit_segment_feedback(request: SegmentFeedbackRequest) -> Dict[str, Any]:
                 "url": item.url,
                 "url_hash": item.url_hash,
                 "model_id": item.model_id,
-                "domain_category": item.domain_category,
-                "domain_override": item.domain_override,
+                "html_tag": item.html_tag,
+                "html_tag_override": item.html_tag_override,
                 "segment_id": item.segment_id,
                 "text": item.text,
                 "score": item.score,
                 "seg_threshold_used": item.seg_threshold_used,
                 "label": normalized,
+                "segment_hash": build_segment_hash(item.text, item.html_tag_override or item.html_tag),
+                "context_segment_hash": item.context_segment_hash,
             }
         )
 
@@ -1838,16 +2603,6 @@ def delete_segment_feedback(request: FeedbackDeleteRequest) -> Dict[str, Any]:
     return {"deleted": deleted}
 
 
-@app.post("/api/thresholds/apply")
-def thresholds_apply(request: ThresholdApplyRequest) -> Dict[str, Any]:
-    updated = apply_thresholds(
-        request.model_id,
-        request.suggested_thresholds,
-        ema_weight=request.ema_weight,
-        min_samples_apply=request.min_samples_apply,
-        max_delta=request.max_delta,
-    )
-    return {"thresholds_by_domain": updated}
 
 
 @app.get("/api/dataset/preview")
@@ -1900,19 +2655,254 @@ def dataset_export(request: DatasetExportRequest) -> Dict[str, Any]:
     return {"path": str(out_path.relative_to(BASE_DIR)), "count": len(filtered), "stats": stats}
 
 
-@app.post("/api/thresholds/current")
-def thresholds_current(request: ThresholdCurrentRequest) -> Dict[str, Any]:
-    current = get_effective_thresholds(request.model_id)
-    overrides = load_threshold_overrides(request.model_id)
-    return {"thresholds_by_domain": current, "overrides": overrides}
+@app.post("/api/dataset/synthetic/generate")
+def synthetic_generate(request: SyntheticGenerateRequest) -> Dict[str, Any]:
+    target_count = int(request.count)
+    expected_label = int(request.label)
+    domain = request.domain
+    style = request.style
+    model_name = normalize_gemini_model_name(request.model) or os.getenv("GEMINI_MODEL", SYNTHETIC_FALLBACK_MODEL)
+
+    existing_rows = load_synthetic_rows(domain=domain, style=style, label=expected_label)
+    seen_hashes = {build_text_hash(row.get("text") or "") for row in existing_rows}
+    seen_fingerprints = {build_structure_fingerprint(row.get("text") or "") for row in existing_rows}
+
+    accepted_rows: List[Dict[str, Any]] = []
+    total_rejected_placeholder = 0
+    total_rejected_duplicate = 0
+    total_candidates_seen = 0
+    total_rejected_invalid = 0
+
+    length_bounds = get_synthetic_length_bounds()
+    length_bucket_target = build_length_bucket_targets(target_count)
+    length_bucket_generated = {key: 0 for key in SYNTHETIC_LENGTH_BUCKET_ORDER}
+    length_bucket_rejected = {key: 0 for key in SYNTHETIC_LENGTH_BUCKET_ORDER}
+
+    for _ in range(SYNTHETIC_MAX_RETRIES):
+        remaining = target_count - len(accepted_rows)
+        if remaining <= 0:
+            break
+
+        remaining_targets = {
+            key: max(0, length_bucket_target.get(key, 0) - length_bucket_generated.get(key, 0))
+            for key in SYNTHETIC_LENGTH_BUCKET_ORDER
+        }
+        prompt = build_synthetic_prompt(
+            domain=domain,
+            style=style,
+            label=expected_label,
+            count=remaining,
+            length_guidance=build_length_bucket_guidance(remaining_targets, length_bounds),
+        )
+        llm_raw = call_gemini_with_model(prompt, model_name)
+        candidates = parse_json_array_from_llm(llm_raw)
+
+        for candidate in candidates:
+            total_candidates_seen += 1
+            text = normalize_synthetic_text(str(candidate.get("text") or ""))
+            if PLACEHOLDER_PATTERN.search(text):
+                total_rejected_placeholder += 1
+                continue
+
+            text_hash_before = build_text_hash(text)
+            fingerprint_before = build_structure_fingerprint(text)
+            if text_hash_before in seen_hashes or fingerprint_before in seen_fingerprints:
+                total_rejected_duplicate += 1
+                continue
+
+            validated = validate_synthetic_candidate(
+                candidate=candidate,
+                expected_label=expected_label,
+                domain=domain,
+                style=style,
+                seen_hashes=seen_hashes,
+                seen_fingerprints=seen_fingerprints,
+                length_bounds=length_bounds,
+            )
+            if not validated:
+                total_rejected_invalid += 1
+                continue
+
+            bucket = str(validated.get("length_bucket") or "")
+            if bucket not in length_bucket_generated:
+                bucket = classify_synthetic_length_bucket(int(validated.get("word_length") or 0), length_bounds)
+            if length_bucket_generated.get(bucket, 0) >= length_bucket_target.get(bucket, 0):
+                length_bucket_rejected[bucket] = length_bucket_rejected.get(bucket, 0) + 1
+                continue
+
+            length_bucket_generated[bucket] = length_bucket_generated.get(bucket, 0) + 1
+            accepted_rows.append(validated)
+            if len(accepted_rows) >= target_count:
+                break
+
+    if not accepted_rows:
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "message": "Synthetic generation failed: no valid samples returned",
+                "debug": {
+                    "model_name": model_name,
+                    "retries": SYNTHETIC_MAX_RETRIES,
+                    "candidates_seen": total_candidates_seen,
+                    "invalid_rejected": total_rejected_invalid,
+                    "placeholder_rejected": total_rejected_placeholder,
+                    "structure_or_duplicate_rejected": total_rejected_duplicate,
+                    "length_bucket_target": length_bucket_target,
+                    "length_bucket_generated": length_bucket_generated,
+                    "length_bucket_rejected": length_bucket_rejected,
+                },
+            },
+        )
+
+    batch_id = uuid.uuid4().hex
+    inserted = insert_synthetic_batch(
+        batch_id=batch_id,
+        domain=domain,
+        style=style,
+        target_label=expected_label,
+        requested_count=target_count,
+        generated_count=len(accepted_rows),
+        generator_model=model_name,
+        rows=accepted_rows,
+    )
+
+    saved_rows = load_synthetic_rows(batch_id=batch_id)
+    for row in saved_rows:
+        row["meta"] = {
+            **(row.get("meta") or {}),
+            "sample_id": row.get("id"),
+            "batch_id": batch_id,
+            "domain": domain,
+            "style": style,
+            "generator_model": model_name,
+            "prompt_version": SYNTHETIC_PROMPT_VERSION,
+        }
+
+    return {
+        "batch_id": batch_id,
+        "requested_count": target_count,
+        "generated_count": inserted,
+        "accepted_default": inserted,
+        "items": saved_rows,
+        "validation_summary": {
+            "candidates_seen": total_candidates_seen,
+            "invalid_rejected": total_rejected_invalid,
+            "placeholder_rejected": total_rejected_placeholder,
+            "structure_or_duplicate_rejected": total_rejected_duplicate,
+            "length_bucket_target": length_bucket_target,
+            "length_bucket_generated": length_bucket_generated,
+            "length_bucket_rejected": length_bucket_rejected,
+            "length_bounds_words": {
+                "very_short_max": length_bounds[0],
+                "short_medium_max": length_bounds[1],
+                "medium_long_max": length_bounds[2],
+            },
+        },
+    }
 
 
-@app.post("/api/thresholds/reset")
-def thresholds_reset(request: ThresholdResetRequest) -> Dict[str, Any]:
-    delete_threshold_overrides(request.model_id, request.categories)
-    current = get_effective_thresholds(request.model_id)
-    overrides = load_threshold_overrides(request.model_id)
-    return {"thresholds_by_domain": current, "overrides": overrides}
+@app.get("/api/dataset/synthetic/preview")
+def synthetic_preview(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=25, ge=1, le=200),
+    batch_id: Optional[str] = None,
+    domain: Optional[SyntheticDomain] = None,
+    style: Optional[SyntheticStyle] = None,
+    label: Optional[int] = Query(default=None, ge=0, le=1),
+    accepted: Optional[bool] = None,
+    reviewed: Optional[bool] = None,
+    include_stats: bool = False,
+) -> Dict[str, Any]:
+    rows = load_synthetic_rows(
+        batch_id=batch_id,
+        domain=domain,
+        style=style,
+        label=label,
+        accepted=accepted,
+        reviewed=reviewed,
+    )
+    total = len(rows)
+    total_pages = max(1, math.ceil(total / page_size))
+    start = (page - 1) * page_size
+    end = start + page_size
+    items = rows[start:end]
+
+    payload: Dict[str, Any] = {
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "total_pages": total_pages,
+        "items": items,
+    }
+    if include_stats:
+        payload["stats"] = build_synthetic_stats(rows)
+    return payload
+
+
+@app.post("/api/dataset/synthetic/review")
+def synthetic_review(request: SyntheticReviewRequest) -> Dict[str, Any]:
+    updates = [
+        {
+            "id": item.id,
+            "is_accepted": item.is_accepted,
+            "text": item.text,
+            "label": item.label,
+        }
+        for item in request.updates
+    ]
+    updated = update_synthetic_review(updates)
+    return {"updated": updated}
+
+
+@app.post("/api/dataset/synthetic/delete")
+def synthetic_delete(request: SyntheticDeleteRequest) -> Dict[str, Any]:
+    deleted = delete_synthetic_rows(request.ids)
+    return {"deleted": deleted}
+
+
+@app.get("/api/dataset/synthetic/stats")
+def synthetic_stats(
+    batch_id: Optional[str] = None,
+    domain: Optional[SyntheticDomain] = None,
+    style: Optional[SyntheticStyle] = None,
+    label: Optional[int] = Query(default=None, ge=0, le=1),
+    accepted: Optional[bool] = None,
+) -> Dict[str, Any]:
+    rows = load_synthetic_rows(
+        batch_id=batch_id,
+        domain=domain,
+        style=style,
+        label=label,
+        accepted=accepted,
+    )
+    return build_synthetic_stats(rows)
+
+
+@app.post("/api/dataset/synthetic/export")
+def synthetic_export(request: SyntheticExportRequest) -> Dict[str, Any]:
+    rows = load_synthetic_rows(
+        batch_id=request.batch_id,
+        domain=request.domain,
+        style=request.style,
+        label=request.label,
+        accepted=True if request.accepted_only else None,
+        reviewed=True,
+    )
+
+    export_rows = [{"text": row["text"], "label": row["label"], "meta": row.get("meta") or {}} for row in rows]
+
+    out_dir = BASE_DIR / "data" / "processed"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / "synthetic_dataset.jsonl"
+    with out_path.open("w", encoding="utf-8") as f:
+        for row in export_rows:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+    return {
+        "path": str(out_path.relative_to(BASE_DIR)),
+        "count": len(export_rows),
+        "stats": build_synthetic_stats(rows),
+    }
 
 
 @app.get("/api/preprocessing/steps")

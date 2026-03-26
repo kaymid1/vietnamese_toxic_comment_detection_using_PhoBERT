@@ -3,6 +3,7 @@ import { Navigation } from "@/app/components/Navigation";
 import { HomePage } from "@/app/components/HomePage";
 import { ResultsPage } from "@/app/components/ResultsPage";
 import { DatasetPage } from "@/app/components/DatasetPage";
+import { SyntheticGenerationPage } from "@/app/components/SyntheticGenerationPage";
 import { ModelPage } from "@/app/components/ModelPage";
 import { ContactPage } from "@/app/components/ContactPage";
 
@@ -11,7 +12,12 @@ interface ApiSegment {
   score: number;
   text_preview: string;
   text?: string;
-  domain_category?: string | null;
+  html_tags?: string[] | null;
+  og_types?: string[] | null;
+  ai_learned?: boolean | null;
+  ai_learned_label?: string | null;
+  segment_hash?: string | null;
+  toxic_label?: number | null;
   seg_threshold_used?: number | null;
 }
 
@@ -23,7 +29,8 @@ interface ApiResult {
   crawl_output_dir?: string | null;
   segments_path?: string | null;
   videos?: Record<string, unknown>[];
-  domain_category?: string | null;
+  html_tags?: string[] | null;
+  og_types?: string[] | null;
   seg_threshold_used?: number | null;
   page_toxic?: number | null;
   toxicity?: {
@@ -40,7 +47,6 @@ interface AnalyzeResponse {
     seg_threshold?: number;
     page_threshold?: number;
   };
-  thresholds_by_domain?: Record<string, number>;
   results: ApiResult[];
 }
 
@@ -91,7 +97,6 @@ export default function App() {
   const [analysisModelId, setAnalysisModelId] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [thresholds, setThresholds] = useState<AnalyzeResponse["thresholds"] | null>(null);
-  const [thresholdsByDomain, setThresholdsByDomain] = useState<Record<string, number> | null>(null);
   const [availableModels, setAvailableModels] = useState<string[]>([]);
   const [selectedModel, setSelectedModel] = useState<string | null>(null);
   const [modelsLoading, setModelsLoading] = useState(true);
@@ -174,7 +179,6 @@ export default function App() {
       setJobId(data.job_id);
       setAnalysisModelId(data.model_name || modelName || null);
       setThresholds(data.thresholds || null);
-      setThresholdsByDomain(data.thresholds_by_domain || null);
       setAnalysisResults(data.results || []);
       setCompareResults(null);
       setCurrentPage("results");
@@ -209,7 +213,6 @@ export default function App() {
       setAnalysisModelId(firstModel);
       const firstPayload = data.models?.[firstModel];
       setThresholds(firstPayload?.thresholds || null);
-      setThresholdsByDomain(firstPayload?.thresholds_by_domain || null);
       setAnalysisResults(firstPayload?.results || []);
       setCurrentPage("results");
     } catch (error) {
@@ -225,7 +228,6 @@ export default function App() {
     setJobId(null);
     setAnalysisModelId(null);
     setThresholds(null);
-    setThresholdsByDomain(null);
   };
 
   const handleRerun = async (sourceJobId: string, modelName?: string | null) => {
@@ -257,7 +259,6 @@ export default function App() {
       setJobId(data.job_id);
       setAnalysisModelId(data.model_name || modelName || null);
       setThresholds(data.thresholds || null);
-      setThresholdsByDomain(data.thresholds_by_domain || null);
       setAnalysisResults(data.results || []);
       setCompareResults(null);
       setCurrentPage("results");
@@ -301,20 +302,22 @@ export default function App() {
           compareResults={compareResults}
           jobId={jobId}
           thresholds={thresholds}
-          thresholdsByDomain={thresholdsByDomain}
           modelId={analysisModelId}
           onSelectModel={(modelId) => {
             setAnalysisModelId(modelId);
             const payload = compareResults?.[modelId];
             setThresholds(payload?.thresholds || null);
-            setThresholdsByDomain(payload?.thresholds_by_domain || null);
             setAnalysisResults(payload?.results || []);
           }}
           onScanAgain={handleScanAgain}
         />
       )}
 
-      {currentPage === "dataset" && <DatasetPage />}
+      {currentPage === "dataset" && <DatasetPage onOpenSyntheticPage={() => setCurrentPage("dataset_synthetic")} />}
+
+      {currentPage === "dataset_synthetic" && (
+        <SyntheticGenerationPage onBack={() => setCurrentPage("dataset")} />
+      )}
 
       {currentPage === "model" && <ModelPage onTryNow={handleTryNow} />}
 

@@ -30,6 +30,7 @@ Notes:
 
 import json
 import argparse
+import hashlib
 import os
 from typing import List, Dict, Any, Tuple, Optional
 
@@ -41,8 +42,8 @@ import pandas as pd
 from tqdm import tqdm
 from transformers import AutoTokenizer, AutoModelForSequenceClassification, AutoConfig
 
-# Domain-aware threshold classifier (same directory)
-from domain_classifier import DomainClassifier
+# Hybrid domain-aware threshold classifier (same directory)
+from domain_classifier import HybridDomainClassifier
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 MODEL_OPTIONS_DIR = Path(
@@ -105,6 +106,67 @@ def iter_url_folders(root_dir: Path) -> List[Path]:
     if not root_dir.exists():
         return []
     return [p for p in root_dir.iterdir() if p.is_dir()]
+
+
+def normalize_segment_text(text: str) -> str:
+    return " ".join((text or "").strip().split()).lower()
+
+
+def build_segment_hash(text: str, html_tag: str) -> str:
+    base = f"{normalize_segment_text(text)}|{(html_tag or '').strip().lower()}"
+    return hashlib.sha256(base.encode("utf-8")).hexdigest()
+
+
+def build_context_segment_hash(
+    prev_text: str,
+    text: str,
+    next_text: str,
+    html_tag: str,
+) -> str:
+    base = "|".join([
+        normalize_segment_text(prev_text),
+        normalize_segment_text(text),
+        normalize_segment_text(next_text),
+        (html_tag or "").strip().lower(),
+    ])
+    return hashlib.sha256(base.encode("utf-8")).hexdigest()
+
+
+def apply_learned_prior(
+    model_score: float,
+    learned_stats: Optional[Dict[str, float]],
+    alpha: float = 0.2,
+    min_support: int = 3,
+    min_agreement: float = 0.85,
+    toxic_boost: float = 0.35,
+    toxic_floor: float = 0.9,
+) -> Tuple[float, bool, Optional[str], str]:
+    if not learned_stats:
+        return model_score, False, None, "none"
+
+    toxic_count = int(learned_stats.get("toxic_count", 0))
+    clean_count = int(learned_stats.get("clean_count", 0))
+    support = toxic_count + clean_count
+    if support < min_support:
+        return model_score, False, None, "insufficient_support"
+
+    dominant = max(toxic_count, clean_count)
+    agreement = dominant / support if support else 0.0
+    if agreement < min_agreement:
+        return model_score, False, None, "conflict"
+
+    prior_toxic = toxic_count / support
+    learned_label = "toxic" if prior_toxic >= 0.5 else "clean"
+
+    if learned_label == "toxic":
+        # Toxic feedback is treated as strong evidence and receives a heavy penalty.
+        boosted = model_score + toxic_boost * prior_toxic
+        adjusted = max(model_score, max(toxic_floor, boosted))
+        adjusted = max(0.0, min(1.0, adjusted))
+        return adjusted, True, learned_label, "toxic_lock"
+
+    adjusted = max(0.0, min(1.0, model_score + alpha * (prior_toxic - 0.5)))
+    return adjusted, True, learned_label, "prior_applied"
 
 
 # ---------------------------------------------------------------------------
@@ -285,6 +347,10 @@ def infer_crawled(
     threshold_social:  Optional[float] = None,
     threshold_forum:   Optional[float] = None,
     threshold_unknown: Optional[float] = None,
+    formality_range: float = 0.15,
+    override_threshold: float = 0.30,
+    html_dir: Optional[str] = None,
+    learned_feedback: Optional[Dict[Tuple[str, str], Dict[str, float]]] = None,
 ) -> Dict[str, Any]:
 
     # ── Validate model path ──────────────────────────────────────────────
@@ -325,13 +391,24 @@ def infer_crawled(
     if "unknown" not in threshold_overrides:
         threshold_overrides["unknown"] = seg_threshold
 
-    domain_clf = DomainClassifier(threshold_overrides=threshold_overrides)
+    domain_clf = HybridDomainClassifier(
+        threshold_news=threshold_overrides.get("news", seg_threshold),
+        threshold_social=threshold_overrides.get("social", seg_threshold),
+        threshold_forum=threshold_overrides.get("forum", seg_threshold),
+        threshold_unknown=threshold_overrides.get("unknown", seg_threshold),
+        formality_range=formality_range,
+        override_threshold=override_threshold,
+    )
 
     if not quiet:
         print("[INFO] Domain-aware thresholds:")
         for cat, thr in domain_clf.thresholds.items():
             marker = " ← CLI default (--seg_threshold)" if cat == "unknown" and threshold_unknown is None else ""
             print(f"         {cat:<10} → {thr}{marker}")
+        print(f"[INFO] Formality range: {formality_range}")
+        print(f"[INFO] Override threshold: {override_threshold}")
+        if html_dir:
+            print(f"[INFO] HTML dir: {html_dir}")
         print(f"[INFO] Selected model: {model_type}/{selected_model_name}")
         print(f"[INFO] Model path: {resolved_model_path}")
 
@@ -405,6 +482,7 @@ def infer_crawled(
 
     # Category stats for end-of-run summary
     category_counts: Dict[str, int] = {}
+    learned_feedback = learned_feedback or {}
 
     # ── Per-page processing ──────────────────────────────────────────────
     for folder in tqdm(url_folders, desc="Processing pages"):
@@ -420,14 +498,38 @@ def infer_crawled(
             meta = {}
 
         url = meta.get("url", "unknown")
-
-        # ── Domain-aware threshold ────────────────────────────────────
-        domain_category, effective_threshold = domain_clf.classify(url)
-        category_counts[domain_category] = category_counts.get(domain_category, 0) + 1
+        url_hash = folder.name
 
         segments = load_segments_jsonl(segs_path)
         if not segments:
             continue
+
+        html_content = None
+        if html_dir:
+            html_path = Path(html_dir) / f"{url_hash}.html"
+            if html_path.exists():
+                try:
+                    html_content = html_path.read_text(encoding="utf-8", errors="ignore")
+                except Exception:
+                    html_content = None
+            else:
+                alt_path = Path(html_dir) / url_hash / "raw.html"
+                if alt_path.exists():
+                    try:
+                        html_content = alt_path.read_text(encoding="utf-8", errors="ignore")
+                    except Exception:
+                        html_content = None
+
+        # ── Domain-aware threshold (hybrid) ───────────────────────────
+        threshold_info = domain_clf.get_threshold(url, segments, html_content, quiet=quiet)
+        domain_category = threshold_info["domain_category"]
+        effective_threshold = threshold_info["effective_threshold"]
+        category_counts[domain_category] = category_counts.get(domain_category, 0) + 1
+
+        if threshold_info.get("layer3_overrides") and not quiet:
+            print(
+                f"[WARN] Layer3 override for {url_hash}: {threshold_info.get('decision_source')}"
+            )
 
         page_preds: List[Dict[str, Any]] = []
 
@@ -442,12 +544,43 @@ def infer_crawled(
                     probs = model.predict_proba(X)[:, 1].tolist()
             else:
                 probs = [float(debug_force_prob)] * len(batch_texts)
-            for text, prob in zip(batch_texts, probs):
-                label = 1 if prob > effective_threshold else 0   # ← domain-aware threshold
+            for local_idx, (text, prob) in enumerate(zip(batch_texts, probs)):
+                global_idx = i + local_idx
+                prev_text = segments[global_idx - 1] if global_idx > 0 else ""
+                next_text = segments[global_idx + 1] if global_idx + 1 < len(segments) else ""
+
+                model_score = float(prob)
+                html_tag = (threshold_info.get("html_tags") or ["unknown"])[0]
+                html_tag_key = (html_tag or "").strip().lower()
+
+                seg_hash = build_segment_hash(text, html_tag_key)
+                context_hash = build_context_segment_hash(prev_text, text, next_text, html_tag_key)
+
+                learned_stats = (
+                    learned_feedback.get((context_hash, html_tag_key))
+                    or learned_feedback.get((seg_hash, html_tag_key))
+                    or learned_feedback.get((context_hash, ""))
+                    or learned_feedback.get((seg_hash, ""))
+                )
+
+                adjusted_score, ai_learned, learned_label, learned_mode = apply_learned_prior(
+                    model_score=model_score,
+                    learned_stats=learned_stats,
+                )
+                label = 1 if adjusted_score > effective_threshold else 0
+
                 page_preds.append({
-                    "text":        text,
-                    "toxic_prob":  round(float(prob), 4),
+                    "text": text,
+                    "toxic_prob": round(model_score, 4),
+                    "toxic_prob_adjusted": round(adjusted_score, 4),
                     "toxic_label": label,
+                    "ai_learned": ai_learned,
+                    "ai_learned_label": learned_label,
+                    "ai_learned_mode": learned_mode,
+                    "segment_hash": seg_hash,
+                    "context_segment_hash": context_hash,
+                    "learned_support": int((learned_stats or {}).get("support", 0)),
+                    "learned_agreement": round(float((learned_stats or {}).get("agreement", 0.0)), 4),
                 })
 
         # ── Aggregate page-level ──────────────────────────────────────
@@ -459,12 +592,19 @@ def infer_crawled(
 
         top5 = sorted(page_preds, key=lambda x: x["toxic_prob"], reverse=True)[:5]
 
-        url_hash = folder.name
         page_results.append({
             "url_hash":             url_hash,
             "url":                  url,
-            "domain_category":      domain_category,          # ← NEW
-            "seg_threshold_used":   effective_threshold,      # ← NEW
+            "seg_threshold_used":   effective_threshold,
+            "effective_threshold":  effective_threshold,
+            "struct_confidence":    threshold_info.get("struct_confidence"),
+            "struct_source":        threshold_info.get("struct_source"),
+            "formality_score":      threshold_info.get("formality_score"),
+            "formality_delta":      threshold_info.get("formality_delta"),
+            "layer3_overrides":     threshold_info.get("layer3_overrides"),
+            "decision_source":      threshold_info.get("decision_source"),
+            "og_types":             threshold_info.get("og_types"),
+            "html_tags":            threshold_info.get("html_tags"),
             "method":               meta.get("method",  "unknown"),
             "status":               meta.get("status",  "unknown"),
             "total_segments":       total_segs,
@@ -479,8 +619,12 @@ def infer_crawled(
             predictions_all.append({
                 "url_hash":           url_hash,
                 "url":                url,
-                "domain_category":    domain_category,        # ← NEW
-                "seg_threshold_used": effective_threshold,    # ← NEW
+                "seg_threshold_used": effective_threshold,
+                "formality_score":    threshold_info.get("formality_score"),
+                "og_types":           threshold_info.get("og_types"),
+                "html_tags":          threshold_info.get("html_tags"),
+                "score":              p["toxic_prob"],
+                "label":              p["toxic_label"],
                 **p,
             })
 
@@ -503,7 +647,7 @@ def infer_crawled(
         print("=" * 65)
 
         if len(df_pages) > 0:
-            cols = ["url", "domain_category", "seg_threshold_used",
+            cols = ["url", "seg_threshold_used",
                     "total_segments", "toxic_ratio", "page_toxic", "avg_toxic_prob"]
             cols = [c for c in cols if c in df_pages.columns]
             print(df_pages[cols].to_string(index=False))
@@ -513,10 +657,6 @@ def infer_crawled(
             print(f"  - Avg toxic_ratio        : {df_pages['toxic_ratio'].mean():.4f}")
             print(f"  - % trang toxic          : {(df_pages['page_toxic'] == 1).mean() * 100:.2f}%")
             print(f"  - Avg segments/page      : {df_pages['total_segments'].mean():.1f}")
-            print("\n  Domain category breakdown:")
-            for cat, cnt in sorted(category_counts.items()):
-                thr = domain_clf.thresholds.get(cat, "?")
-                print(f"    {cat:<10} : {cnt:>4} pages  (threshold={thr})")
         else:
             print("[WARN] No pages produced results.")
 
@@ -581,6 +721,12 @@ def main():
     ap.add_argument("--threshold_social",  type=float, default=None, help="Override threshold for social domains")
     ap.add_argument("--threshold_forum",   type=float, default=None, help="Override threshold for forum domains")
     ap.add_argument("--threshold_unknown", type=float, default=None, help="Override threshold for unknown domains")
+    ap.add_argument("--formality_range", type=float, default=0.15,
+                    help="Max threshold adjustment from formality score")
+    ap.add_argument("--override_threshold", type=float, default=0.30,
+                    help="Formality delta to trigger Layer 3 override")
+    ap.add_argument("--html_dir", type=str, default=None,
+                    help="Optional directory containing <url_hash>.html files")
 
     # Device & perf
     ap.add_argument("--device",      type=str, default="auto", choices=["auto", "cuda", "mps", "cpu"])
@@ -613,6 +759,9 @@ def main():
         threshold_social  = args.threshold_social,
         threshold_forum   = args.threshold_forum,
         threshold_unknown = args.threshold_unknown,
+        formality_range   = args.formality_range,
+        override_threshold = args.override_threshold,
+        html_dir          = args.html_dir,
     )
 
 

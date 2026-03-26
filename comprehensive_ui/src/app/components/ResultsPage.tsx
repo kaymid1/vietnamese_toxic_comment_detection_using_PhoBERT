@@ -14,7 +14,17 @@ interface SegmentData {
   score: number;
   text_preview: string;
   text?: string;
-  domain_category?: string | null;
+  html_tags?: string[] | null;
+  og_types?: string[] | null;
+  ai_learned?: boolean | null;
+  ai_learned_label?: string | null;
+  segment_hash?: string | null;
+  context_segment_hash?: string | null;
+  toxic_label?: number | null;
+  toxic_prob_adjusted?: number | null;
+  ai_learned_mode?: string | null;
+  learned_support?: number | null;
+  learned_agreement?: number | null;
   seg_threshold_used?: number | null;
 }
 
@@ -22,13 +32,15 @@ interface SegmentFeedbackItem {
   url: string;
   url_hash: string;
   model_id: string;
-  domain_category: string;
-  domain_override?: string | null;
+  html_tag: string;
+  html_tag_override?: string | null;
   segment_id: string;
   text: string;
   score?: number | null;
   seg_threshold_used?: number | null;
   label: string;
+  segment_hash?: string | null;
+  context_segment_hash?: string | null;
 }
 
 interface ResultData {
@@ -37,7 +49,8 @@ interface ResultData {
   error?: string | null;
   crawl_output_dir?: string | null;
   segments_path?: string | null;
-  domain_category?: string | null;
+  html_tags?: string[] | null;
+  og_types?: string[] | null;
   seg_threshold_used?: number | null;
   page_toxic?: number | null;
   videos?: Array<{
@@ -63,15 +76,6 @@ interface ResultData {
 
 type PageLabel = "toxic" | "clean" | "unsure";
 
-interface ThresholdPreview {
-  suggested_thresholds: Record<string, number>;
-  stats: Record<string, { count: number; f1?: number; precision?: number; recall?: number; status?: string }>;
-}
-
-interface ThresholdCurrent {
-  thresholds_by_domain: Record<string, number>;
-  overrides?: Record<string, number>;
-}
 
 interface ResultsPageProps {
   results: ResultData[];
@@ -81,14 +85,12 @@ interface ResultsPageProps {
       seg_threshold?: number;
       page_threshold?: number;
     } | null;
-    thresholds_by_domain?: Record<string, number> | null;
   }> | null;
   jobId?: string | null;
   thresholds?: {
     seg_threshold?: number;
     page_threshold?: number;
   } | null;
-  thresholdsByDomain?: Record<string, number> | null;
   modelId?: string | null;
   onSelectModel?: (modelId: string) => void;
   onScanAgain: () => void;
@@ -121,34 +123,28 @@ const formatThreshold = (value?: number | null) => {
 };
 
 const badgeStyles: Record<string, { label: string; text: string; bg: string }> = {
-  news: { label: "NEWS", text: "#1d4ed8", bg: "#dbeafe" },
-  social: { label: "SOCIAL", text: "#0f766e", bg: "#ccfbf1" },
-  forum: { label: "FORUM", text: "#7c3aed", bg: "#ede9fe" },
+  schema: { label: "SCHEMA", text: "#0f766e", bg: "#ccfbf1" },
+  og: { label: "OG", text: "#1d4ed8", bg: "#dbeafe" },
+  header: { label: "HEADER", text: "#7c3aed", bg: "#ede9fe" },
   unknown: { label: "UNKNOWN", text: "#6b7280", bg: "#f3f4f6" },
-  education: { label: "EDU", text: "#b45309", bg: "#fef3c7" },
+  attention: { label: "ATTN", text: "#b45309", bg: "#fef3c7" },
 };
 
-const domainTagOptions = ["news", "social", "forum", "unknown", "education"] as const;
+const htmlTagOptions = ["unknown", "attention"] as const;
 
 export function ResultsPage({
   results,
   compareResults,
   jobId,
   thresholds,
-  thresholdsByDomain,
   modelId,
   onSelectModel,
   onScanAgain,
 }: ResultsPageProps) {
   const [pageLabels, setPageLabels] = useState<Record<string, PageLabel>>({});
-  const [pageDomainTags, setPageDomainTags] = useState<Record<string, string>>({});
-  const [segmentDomainTags, setSegmentDomainTags] = useState<Record<string, string>>({});
+  const [pageHtmlTags, setPageHtmlTags] = useState<Record<string, string>>({});
+  const [segmentHtmlTags, setSegmentHtmlTags] = useState<Record<string, string>>({});
   const [feedbackStatus, setFeedbackStatus] = useState<string | null>(null);
-  const [preview, setPreview] = useState<ThresholdPreview | null>(null);
-  const [previewLoading, setPreviewLoading] = useState(false);
-  const [applyLoading, setApplyLoading] = useState(false);
-  const [currentThresholds, setCurrentThresholds] = useState<ThresholdCurrent | null>(null);
-  const [currentLoading, setCurrentLoading] = useState(false);
   const [askAiStatus, setAskAiStatus] = useState<string | null>(null);
   const [askAiResponse, setAskAiResponse] = useState<string | null>(null);
   const [askAiQuestion, setAskAiQuestion] = useState<string>("");
@@ -156,7 +152,6 @@ export function ResultsPage({
   const [segmentFeedbackStatus, setSegmentFeedbackStatus] = useState<string | null>(null);
 
   const jobModelId = modelId ?? "";
-  const thresholdsByCategory = thresholdsByDomain ?? {};
   const compareModelIds = compareResults ? Object.keys(compareResults) : [];
 
   const labeledCount = useMemo(
@@ -170,12 +165,12 @@ export function ResultsPage({
     setPageLabels((prev) => ({ ...prev, [url]: value }));
   };
 
-  const handlePageDomainTagChange = (url: string, value: string) => {
-    setPageDomainTags((prev) => ({ ...prev, [url]: value }));
+  const handlePageHtmlTagChange = (url: string, value: string) => {
+    setPageHtmlTags((prev) => ({ ...prev, [url]: value }));
   };
 
-  const handleSegmentDomainTagChange = (segmentId: string, value: string) => {
-    setSegmentDomainTags((prev) => ({ ...prev, [segmentId]: value }));
+  const handleSegmentHtmlTagChange = (segmentId: string, value: string) => {
+    setSegmentHtmlTags((prev) => ({ ...prev, [segmentId]: value }));
   };
 
   const handleSubmitFeedback = async () => {
@@ -188,13 +183,13 @@ export function ResultsPage({
       .map((result) => {
         const label = pageLabels[result.url];
         if (!label || label === "unsure") return null;
-        const defaultTag = result.domain_category ?? "unknown";
-        const selectedTag = pageDomainTags[result.url] ?? defaultTag;
+        const defaultTag = (result.html_tags && result.html_tags[0]) || "unknown";
+        const selectedTag = pageHtmlTags[result.url] ?? defaultTag;
         return {
           url: result.url,
           url_hash: result.url_hash ?? result.url,
-          domain_category: defaultTag,
-          domain_override: selectedTag !== defaultTag ? selectedTag : null,
+          html_tag: defaultTag,
+          html_tag_override: selectedTag !== defaultTag ? selectedTag : null,
           seg_threshold_used: result.seg_threshold_used ?? null,
           score_overall: result.toxicity?.overall ?? null,
           label,
@@ -231,115 +226,6 @@ export function ResultsPage({
     }
   };
 
-  const handlePreviewThresholds = async () => {
-    if (!jobModelId) {
-      setFeedbackStatus("Thiếu model_id để preview ngưỡng.");
-      return;
-    }
-    try {
-      setPreviewLoading(true);
-      setFeedbackStatus(null);
-      const response = await fetch(buildApiUrl("/api/thresholds/preview"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model_id: jobModelId, min_samples: 10 }),
-      });
-      const data = (await response.json()) as ThresholdPreview;
-      if (!response.ok) {
-        throw new Error(JSON.stringify(data));
-      }
-      setPreview(data);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Preview ngưỡng thất bại";
-      setFeedbackStatus(message);
-    } finally {
-      setPreviewLoading(false);
-    }
-  };
-
-  const handleApplyThresholds = async () => {
-    if (!jobModelId || !preview?.suggested_thresholds) {
-      setFeedbackStatus("Chưa có ngưỡng đề xuất để áp dụng.");
-      return;
-    }
-    try {
-      setApplyLoading(true);
-      setFeedbackStatus(null);
-      const response = await fetch(buildApiUrl("/api/thresholds/apply"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model_id: jobModelId,
-          suggested_thresholds: preview.suggested_thresholds,
-          ema_weight: 0.8,
-          min_samples_apply: 10,
-          max_delta: 0.03,
-        }),
-      });
-      const data = await response.json();
-      if (!response.ok) {
-        throw new Error(JSON.stringify(data));
-      }
-      setFeedbackStatus("Đã áp dụng ngưỡng mới. Lần quét sau sẽ dùng ngưỡng này.");
-      setCurrentThresholds({ thresholds_by_domain: data.thresholds_by_domain ?? {} });
-      void handleLoadCurrentThresholds();
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Áp dụng ngưỡng thất bại";
-      setFeedbackStatus(message);
-    } finally {
-      setApplyLoading(false);
-    }
-  };
-
-  const handleLoadCurrentThresholds = async () => {
-    if (!jobModelId) {
-      setFeedbackStatus("Thiếu model_id để xem ngưỡng hiện hành.");
-      return;
-    }
-    try {
-      setCurrentLoading(true);
-      setFeedbackStatus(null);
-      const response = await fetch(buildApiUrl("/api/thresholds/current"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model_id: jobModelId }),
-      });
-      const data = (await response.json()) as ThresholdCurrent;
-      if (!response.ok) {
-        throw new Error(JSON.stringify(data));
-      }
-      setCurrentThresholds(data);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Tải ngưỡng hiện hành thất bại";
-      setFeedbackStatus(message);
-    } finally {
-      setCurrentLoading(false);
-    }
-  };
-
-  const handleResetThreshold = async (category: string) => {
-    if (!jobModelId) {
-      setFeedbackStatus("Thiếu model_id để reset ngưỡng.");
-      return;
-    }
-    try {
-      setFeedbackStatus(null);
-      const response = await fetch(buildApiUrl("/api/thresholds/reset"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model_id: jobModelId, categories: [category] }),
-      });
-      const data = (await response.json()) as ThresholdCurrent;
-      if (!response.ok) {
-        throw new Error(JSON.stringify(data));
-      }
-      setCurrentThresholds(data);
-      setFeedbackStatus(`Đã reset ngưỡng ${category} về mặc định.`);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Reset ngưỡng thất bại";
-      setFeedbackStatus(message);
-    }
-  };
 
   const handleAskAi = async () => {
     if (!askAiTarget) return;
@@ -361,7 +247,7 @@ export function ResultsPage({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           url: askAiTarget.url,
-          domain_category: askAiTarget.domain_category ?? undefined,
+          html_tag: askAiTarget.html_tags?.[0] ?? undefined,
           overall: askAiTarget.toxicity?.overall ?? undefined,
           thresholds: {
             page_threshold: thresholds?.page_threshold,
@@ -409,16 +295,9 @@ export function ResultsPage({
   };
 
   useEffect(() => {
-    if (jobModelId) {
-      void handleLoadCurrentThresholds();
-    }
-  }, [jobModelId]);
-
-  useEffect(() => {
     setPageLabels({});
-    setPageDomainTags({});
-    setSegmentDomainTags({});
-    setPreview(null);
+    setPageHtmlTags({});
+    setSegmentHtmlTags({});
     setFeedbackStatus(null);
   }, [jobModelId]);
 
@@ -466,11 +345,11 @@ export function ResultsPage({
         {/* Feedback Controls */}
         <Card className="bg-white p-6 mb-8 shadow-sm">
           <h2 className="text-xl mb-3" style={{ color: "var(--viet-primary)" }}>
-            Điều chỉnh ngưỡng theo feedback
+            Gán nhãn theo HTML tags
           </h2>
           <p className="text-sm text-gray-600 mb-3">
-            Quy trình: (1) Gán nhãn thủ công → (2) Gửi đánh giá → (3) Preview ngưỡng → (4) Apply ngưỡng.
-            Ngưỡng được lưu theo <strong>model</strong> và <strong>domain category</strong>.
+            Quy trình: (1) Gán nhãn thủ công → (2) Gửi đánh giá. Nhãn sẽ được lưu và dùng lại (AI_LEARNED)
+            cho các segment trùng tag ở lần quét sau.
           </p>
           <div className="flex flex-wrap gap-3">
             <Button
@@ -481,96 +360,9 @@ export function ResultsPage({
             >
               Gửi đánh giá ({labeledCount})
             </Button>
-            <Button
-              onClick={handlePreviewThresholds}
-              disabled={previewLoading}
-              variant="outline"
-              className="h-10 px-5"
-              style={{ borderColor: "var(--viet-primary)", color: "var(--viet-primary)" }}
-            >
-              {previewLoading ? "Đang tính..." : "Preview ngưỡng"}
-            </Button>
-            <Button
-              onClick={handleApplyThresholds}
-              disabled={!preview?.suggested_thresholds || applyLoading}
-              className="h-10 px-5"
-              style={{ backgroundColor: "var(--viet-primary)" }}
-            >
-              {applyLoading ? "Đang áp dụng..." : "Apply ngưỡng"}
-            </Button>
-            <Button
-              onClick={handleLoadCurrentThresholds}
-              disabled={currentLoading}
-              variant="outline"
-              className="h-10 px-5"
-              style={{ borderColor: "var(--viet-primary)", color: "var(--viet-primary)" }}
-            >
-              {currentLoading ? "Đang tải..." : "Xem ngưỡng hiện hành"}
-            </Button>
           </div>
           {feedbackStatus && (
             <p className="mt-3 text-sm text-gray-600">{feedbackStatus}</p>
-          )}
-          {preview && (
-            <div className="mt-4 grid gap-3 text-sm">
-              <div className="font-medium text-gray-700">Ngưỡng đề xuất theo category:</div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                {["news", "social", "forum", "unknown"].map((category) => {
-                  const value = preview.suggested_thresholds?.[category];
-                  const stats = preview.stats?.[category];
-                  return (
-                    <div key={category} className="rounded-lg border border-gray-200 p-3">
-                      <div className="text-xs uppercase text-gray-500">{category}</div>
-                      <div className="text-lg font-semibold text-gray-700">
-                        {value !== undefined ? formatThreshold(value) : "--"}
-                      </div>
-                      <div className="text-xs text-gray-500 mt-1">
-                        Hiện tại: {formatThreshold(thresholdsByCategory[category])}
-                      </div>
-                      {stats && (
-                        <div className="text-xs text-gray-500 mt-1">
-                          {stats.status ? `Chưa đủ mẫu (n=${stats.count})` : `n=${stats.count} · f1=${stats.f1}`}
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-          {currentThresholds && (
-            <div className="mt-4 grid gap-3 text-sm">
-              <div className="font-medium text-gray-700">Ngưỡng hiện hành (từ DB):</div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                {["news", "social", "forum", "unknown"].map((category) => {
-                  const value = currentThresholds.thresholds_by_domain?.[category];
-                  const override = currentThresholds.overrides?.[category];
-                  const hasOverride = override !== undefined && override !== null;
-                  return (
-                    <div key={category} className="rounded-lg border border-gray-200 p-3">
-                      <div className="text-xs uppercase text-gray-500">{category}</div>
-                      <div className="text-lg font-semibold text-gray-700">
-                        {value !== undefined ? formatThreshold(value) : "--"}
-                      </div>
-                      <div className="text-xs text-gray-500 mt-1">
-                        Override: {override !== undefined ? formatThreshold(override) : "--"}
-                      </div>
-                      <div className="mt-2">
-                        <Button
-                          type="button"
-                          variant="outline"
-                          className="h-7 px-2 text-xs"
-                          onClick={() => handleResetThreshold(category)}
-                          disabled={!hasOverride}
-                        >
-                          Reset
-                        </Button>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
           )}
         </Card>
 
@@ -580,7 +372,7 @@ export function ResultsPage({
           const segments = result.toxicity?.by_segment ?? [];
           const overallScore = result.toxicity?.overall;
           const overallPercent = typeof overallScore === "number" ? Math.round(overallScore * 100) : null;
-          const pageDomainTag = pageDomainTags[result.url] ?? result.domain_category ?? "unknown";
+          const pageHtmlTag = pageHtmlTags[result.url] ?? result.html_tags?.[0] ?? "unknown";
           const effectiveSegThreshold =
             typeof result.seg_threshold_used === "number"
               ? result.seg_threshold_used
@@ -601,7 +393,7 @@ export function ResultsPage({
             .slice(0, 3);
 
           return (
-            <Card key={index} className="bg-white p-8 mb-6 shadow-lg">
+            <Card key={result.url_hash ?? result.url ?? index} className="bg-white p-8 mb-6 shadow-lg">
               {/* URL Header */}
               <div className="mb-6 pb-6 border-b border-gray-200">
                 <div className="flex items-start justify-between gap-4">
@@ -619,18 +411,21 @@ export function ResultsPage({
                     {result.status === "ok" && (
                       <div className="mt-2 text-xs text-gray-500 space-y-1">
                         {(() => {
-                          const category = pageDomainTag;
-                          const badge = badgeStyles[category] ?? badgeStyles.unknown;
+                          const og = result.og_types ?? [];
+                          const tagLabel = pageHtmlTag;
                           return (
-                            <p className="flex items-center gap-2">
-                              <span
-                                className="px-2 py-0.5 rounded-full text-[11px] font-semibold tracking-wide"
-                                style={{ backgroundColor: badge.bg, color: badge.text }}
-                              >
-                                {badge.label}
-                              </span>
-                              <span className="text-gray-600">Category: {category}</span>
-                            </p>
+                            <div className="space-y-1">
+                              <p className="flex items-center gap-2">
+                                <span
+                                  className="px-2 py-0.5 rounded-full text-[11px] font-semibold tracking-wide"
+                                  style={{ backgroundColor: badgeStyles.unknown.bg, color: badgeStyles.unknown.text }}
+                                >
+                                  TAG
+                                </span>
+                                <span className="text-gray-600">HTML tag: {tagLabel}</span>
+                              </p>
+                              <p className="text-gray-500">OG: {og.length ? og.join(", ") : "--"}</p>
+                            </div>
                           );
                         })()}
                         <p>
@@ -681,25 +476,27 @@ export function ResultsPage({
                         })()}
                       </RadioGroup>
                       <div className="flex flex-wrap items-center gap-3 text-sm">
-                        <span className="text-gray-600">Tag domain:</span>
+                        <span className="text-gray-600">HTML tag:</span>
                         <Select
-                          value={pageDomainTags[result.url] ?? result.domain_category ?? "unknown"}
-                          onValueChange={(value) => handlePageDomainTagChange(result.url, value)}
+                          value={pageHtmlTags[result.url] ?? result.html_tags?.[0] ?? "unknown"}
+                          onValueChange={(value) => handlePageHtmlTagChange(result.url, value)}
                         >
-                          <SelectTrigger className="h-8 w-[160px]">
+                          <SelectTrigger className="h-8 w-[220px]">
                             <SelectValue placeholder="Chọn tag" />
                           </SelectTrigger>
                           <SelectContent>
-                            {domainTagOptions.map((option) => (
-                              <SelectItem key={option} value={option}>
-                                {option}
-                              </SelectItem>
-                            ))}
+                            {(result.html_tags && result.html_tags.length > 0 ? result.html_tags : htmlTagOptions).map(
+                              (option) => (
+                                <SelectItem key={option} value={option}>
+                                  {option}
+                                </SelectItem>
+                              ),
+                            )}
                           </SelectContent>
                         </Select>
                       </div>
                       <p className="text-xs text-gray-500">
-                        Tag ngoài 4 category mặc định chỉ lưu feedback, chưa dùng để tính ngưỡng.
+                        Tag dùng để lưu feedback và kích hoạt AI_LEARNED khi gặp lại segment cùng tag.
                       </p>
                     </div>
                   </div>
@@ -809,7 +606,10 @@ export function ResultsPage({
                 </h3>
                 <div className="space-y-3">
                   {topSegments.map((segment, idx) => {
-                    const segmentIsToxic = segment.score >= effectiveSegThreshold;
+                    const segmentIsToxic =
+                      segment.toxic_label !== undefined && segment.toxic_label !== null
+                        ? segment.toxic_label === 1
+                        : segment.score >= effectiveSegThreshold;
                     const percent = (segment.score * 100).toFixed(1);
                     const fullText = segment.text || segment.text_preview;
                     return (
@@ -873,7 +673,10 @@ export function ResultsPage({
                     )}
                     <div className="space-y-3">
                       {segments.map((segment, idx) => {
-                        const segmentIsToxic = segment.score >= effectiveSegThreshold;
+                        const segmentIsToxic =
+                          segment.toxic_label !== undefined && segment.toxic_label !== null
+                            ? segment.toxic_label === 1
+                            : segment.score >= effectiveSegThreshold;
                         const nearThreshold = Math.abs(segment.score - effectiveSegThreshold) <= 0.05;
                         return (
                           <div
@@ -904,9 +707,13 @@ export function ResultsPage({
                             </div>
                             <div className="flex flex-wrap items-center gap-2 text-xs text-gray-500">
                               <span>
-                                {segmentIsToxic
-                                  ? "Đoạn này được gắn nhãn độc hại do mô hình dự đoán"
-                                  : "Đoạn này được đánh giá là an toàn"}
+                                {segment.ai_learned
+                                  ? `AI_PRIOR (${segment.ai_learned_label}) · support=${segment.learned_support ?? 0} · agreement=${((segment.learned_agreement ?? 0) * 100).toFixed(0)}%`
+                                  : segment.ai_learned_mode === "conflict"
+                                    ? "NEEDS_REVIEW (memory conflict)"
+                                    : segmentIsToxic
+                                      ? "Đoạn này được gắn nhãn độc hại do mô hình dự đoán"
+                                      : "Đoạn này được đánh giá là an toàn"}
                               </span>
                               {nearThreshold && (
                                 <span className="px-2 py-0.5 rounded-full bg-amber-100 text-amber-700">
@@ -915,20 +722,22 @@ export function ResultsPage({
                               )}
                             </div>
                             <div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-gray-600">
-                              <span>Tag domain:</span>
+                              <span>HTML tag:</span>
                               <Select
-                                value={segmentDomainTags[segment.segment_id] ?? pageDomainTags[result.url] ?? result.domain_category ?? "unknown"}
-                                onValueChange={(value) => handleSegmentDomainTagChange(segment.segment_id, value)}
+                                value={segmentHtmlTags[segment.segment_id] ?? pageHtmlTags[result.url] ?? result.html_tags?.[0] ?? "unknown"}
+                                onValueChange={(value) => handleSegmentHtmlTagChange(segment.segment_id, value)}
                               >
-                                <SelectTrigger className="h-7 w-[140px] text-xs">
+                                <SelectTrigger className="h-7 w-[200px] text-xs">
                                   <SelectValue placeholder="Chọn tag" />
                                 </SelectTrigger>
                                 <SelectContent>
-                                  {domainTagOptions.map((option) => (
-                                    <SelectItem key={option} value={option}>
-                                      {option}
-                                    </SelectItem>
-                                  ))}
+                                  {(result.html_tags && result.html_tags.length > 0 ? result.html_tags : htmlTagOptions).map(
+                                    (option) => (
+                                      <SelectItem key={option} value={option}>
+                                        {option}
+                                      </SelectItem>
+                                    ),
+                                  )}
                                 </SelectContent>
                               </Select>
                             </div>
@@ -939,19 +748,21 @@ export function ResultsPage({
                                   variant="outline"
                                   className="h-8 px-3 text-xs"
                                   onClick={() => {
-                                    const defaultTag = result.domain_category ?? "unknown";
-                                    const selectedTag = segmentDomainTags[segment.segment_id] ?? defaultTag;
+                                    const defaultTag = result.html_tags?.[0] ?? "unknown";
+                                    const selectedTag = segmentHtmlTags[segment.segment_id] ?? defaultTag;
                                     const payload: SegmentFeedbackItem = {
                                       url: result.url,
                                       url_hash: result.url_hash ?? result.url,
                                       model_id: jobModelId,
-                                      domain_category: defaultTag,
-                                      domain_override: selectedTag !== defaultTag ? selectedTag : null,
+                                      html_tag: defaultTag,
+                                      html_tag_override: selectedTag !== defaultTag ? selectedTag : null,
                                       segment_id: segment.segment_id,
                                       text: segment.text || segment.text_preview,
                                       score: segment.score,
                                       seg_threshold_used: effectiveSegThreshold,
                                       label: "clean",
+                                      segment_hash: segment.segment_hash ?? null,
+                                      context_segment_hash: segment.context_segment_hash ?? null,
                                     };
                                     void handleSegmentFeedback([payload]);
                                   }}
@@ -964,19 +775,21 @@ export function ResultsPage({
                                   variant="outline"
                                   className="h-8 px-3 text-xs"
                                   onClick={() => {
-                                    const defaultTag = result.domain_category ?? "unknown";
-                                    const selectedTag = segmentDomainTags[segment.segment_id] ?? defaultTag;
+                                    const defaultTag = result.html_tags?.[0] ?? "unknown";
+                                    const selectedTag = segmentHtmlTags[segment.segment_id] ?? defaultTag;
                                     const payload: SegmentFeedbackItem = {
                                       url: result.url,
                                       url_hash: result.url_hash ?? result.url,
                                       model_id: jobModelId,
-                                      domain_category: defaultTag,
-                                      domain_override: selectedTag !== defaultTag ? selectedTag : null,
+                                      html_tag: defaultTag,
+                                      html_tag_override: selectedTag !== defaultTag ? selectedTag : null,
                                       segment_id: segment.segment_id,
                                       text: segment.text || segment.text_preview,
                                       score: segment.score,
                                       seg_threshold_used: effectiveSegThreshold,
                                       label: "toxic",
+                                      segment_hash: segment.segment_hash ?? null,
+                                      context_segment_hash: segment.context_segment_hash ?? null,
                                     };
                                     void handleSegmentFeedback([payload]);
                                   }}
