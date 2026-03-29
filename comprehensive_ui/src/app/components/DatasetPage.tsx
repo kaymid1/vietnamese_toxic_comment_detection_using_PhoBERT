@@ -434,6 +434,35 @@ export function DatasetPage({ onOpenSyntheticPage }: DatasetPageProps) {
               </div>
 
               <div>
+                <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">Empirical evidence từ inter-dataset scoring</p>
+                <div className="mt-3 grid grid-cols-1 lg:grid-cols-2 gap-4">
+                  <Card className="border p-4 shadow-none">
+                    <p className="text-sm font-semibold">Mean toxic_score (ViCTSD-trained model)</p>
+                    <div className="mt-3 space-y-2 text-sm">
+                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">Offensive (label=1)</span><span className="font-medium">0.8726</span></div>
+                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">Hate (label=2)</span><span className="font-medium">N/A (không có trong merged binary set)</span></div>
+                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">Clean (label=0)</span><span className="font-medium">0.1285</span></div>
+                    </div>
+                    <div className="mt-4 rounded-lg border-l-4 border-l-green-600 bg-green-50 p-3 text-sm text-green-900">
+                      Khoảng cách điểm rất rõ giữa Offensive và Clean (0.8726 vs 0.1285), cho thấy mapping OFFENSIVE → Toxic có tính nhất quán thực nghiệm. Theo rule mean &gt; 0.6, quyết định merge là hợp lý.
+                    </div>
+                  </Card>
+
+                  <Card className="border p-4 shadow-none">
+                    <p className="text-sm font-semibold">Distribution toxic_score</p>
+                    <img
+                      src="/src/assets/images/distribution_vihsd_toxic.png"
+                      alt="Distribution of toxic scores for clean, offensive, and hate groups"
+                      className="mt-3 w-full rounded-lg border"
+                    />
+                    <p className="mt-3 text-sm text-muted-foreground">
+                      Phân phối cho thấy cụm Offensive tập trung ở vùng điểm cao, còn Clean tập trung ở vùng thấp. Điều này củng cố thêm cơ sở empirical để merge ViHSD Offensive vào lớp Toxic.
+                    </p>
+                  </Card>
+                </div>
+              </div>
+
+              <div>
                 <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">Điểm khác biệt — thừa nhận</p>
                 <div className="mt-3 rounded-lg border-l-4 border-l-yellow-500 bg-yellow-50 p-4 text-sm text-yellow-900">
                   <strong>74.9% toxic samples đến từ ViHSD OFFENSIVE</strong> (2,260/3,019). Model đang học toxic từ nguồn nào nhiều hơn? → ViCTSD cung cấp label schema và negative examples; ViHSD cung cấp positive examples để cân bằng class — cả hai cùng định hình decision boundary.
