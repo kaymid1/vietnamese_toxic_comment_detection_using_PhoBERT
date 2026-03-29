@@ -1,0 +1,23 @@
+{
+  "dataset": "ura-hcmut/UIT-ViHSD",
+  "label_map": {
+    "0": "CLEAN",
+    "1": "OFFENSIVE",
+    "2": "HATE"
+  },
+  "splits": {
+    "train": {
+      "records": 24048,
+      "file": "train.jsonl"
+    },
+    "validation": {
+      "records": 2672,
+      "file": "validation.jsonl"
+    },
+    "test": {
+      "records": 6680,
+      "file": "test.jsonl"
+    }
+  },
+  "total_records": 33400
+}
