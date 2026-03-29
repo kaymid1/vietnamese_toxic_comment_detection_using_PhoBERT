@@ -1,22 +1,12 @@
 """
-PhoBERT LoRA Fine-tuning — Vietnamese Toxic Comment Detection
-Refactored from original full fine-tuning script to use PEFT / LoRA.
-
-Key changes vs original:
-  - peft library: LoraConfig + get_peft_model wrap the base model
-  - Only LoRA adapters + classifier head are trained (~1-3% of params)
-  - FREEZE_EPOCHS removed (LoRA already handles encoder freezing)
-  - merge_and_unload() saves a standard HF model — no peft dep at inference
-  - lora_adapter/ saved separately (small, reusable for future experiments)
-  - OUTPUT_BASE / RESULTS_BASE renamed to *_lora so both runs coexist
-  - LR bumped to 2e-4 (LoRA works better with higher LR than full fine-tuning)
-  - All evaluation / threshold / temperature-scaling logic unchanged
+PhoBERT Full Fine-tuning — Vietnamese Toxic Comment Detection
+Refactored to match the LoRA script data source + export layout.
 """
 
 # -----------------------
 # Install
 # -----------------------
-# !pip -q install -U transformers datasets scikit-learn torch accelerate peft
+# !pip -q install -U transformers datasets scikit-learn torch accelerate
 
 import os, json, random, time
 import numpy as np
@@ -32,7 +22,6 @@ from transformers import (
     DataCollatorWithPadding,
     set_seed,
 )
-from peft import LoraConfig, TaskType, get_peft_model
 from sklearn.metrics import (
     f1_score, confusion_matrix, classification_report,
     precision_recall_fscore_support, roc_auc_score,
@@ -62,13 +51,13 @@ os.environ["WANDB_DISABLED"] = "true"
 # Config — tune here
 # ================================================================
 DATA_DIR = "/content/drive/MyDrive/victsd"
-MODEL_NAME = "vinai/phobert-base-v2"
+MODEL_NAME = "vinai/phobert-base"
 MAX_LENGTH = 256
 
 BATCH_SIZE = 16
 GRAD_ACCUM = 2
 EPOCHS     = 10
-LR         = 2e-4       # higher than full fine-tuning (typical for LoRA)
+LR         = 2e-5
 WEIGHT_DECAY  = 0.05
 WARMUP_RATIO  = 0.08
 MAX_GRAD_NORM = 1.0
@@ -77,15 +66,15 @@ LABEL_SMOOTHING     = 0.0
 EARLY_STOP_PATIENCE = 4
 HEAD_DROPOUT        = 0.1
 
-USE_FOCAL   = True  # False giảm nhạy FP ở clean
+USE_FOCAL   = True
 FOCAL_GAMMA = 2.0
 
-TOXIC_WEIGHT_SCALE = 0.5  # <1.0 để giảm thiên lệch toxic
+TOXIC_WEIGHT_SCALE = 0.5
 
 SEED = 42
 
-OUTPUT_BASE  = "models/phobert_lora"   # keeps separate from original run
-RESULTS_BASE = "results/phobert_lora"
+OUTPUT_BASE  = "models/phobert"
+RESULTS_BASE = "results/phobert"
 
 PRIMARY_METRIC = "f1_toxic"
 
@@ -98,24 +87,11 @@ PRIMARY_THRESHOLD_OBJECTIVE = "f1_toxic"
 N_ERROR_SAMPLES = 30
 
 # Calibration
-EPS            = 1e-12
-N_BINS_ECE     = 10
+EPS              = 1e-12
+N_BINS_ECE       = 10
 USE_TEMP_SCALING = True
-TEMP_LR        = 0.01
-TEMP_MAX_ITERS = 300
-
-# ---- LoRA --------------------------------------------------------
-# PhoBERT is RoBERTa-based; attention proj names: query, key, value, dense.
-# query+value is the standard efficient choice (original LoRA paper).
-# For more capacity: raise LORA_R (32/64) or add "key","dense" to target_modules.
-LORA_R               = 32          # tăng từ 16 → 32
-LORA_ALPHA           = 64          # giữ alpha = 2*r
-LORA_DROPOUT         = 0.
-LORA_TARGET_MODULES  = ["query", "key", "value", "dense"]  # thêm key + dense
-LORA_BIAS            = "none"
-# classifier is outside the backbone — list in modules_to_save to keep it trainable
-LORA_MODULES_TO_SAVE = ["classifier"]
-# ------------------------------------------------------------------
+TEMP_LR          = 0.01
+TEMP_MAX_ITERS   = 300
 
 # ================================================================
 # Seed + GPU
@@ -169,8 +145,8 @@ tokenized_dataset = dataset.map(tokenize_batch, batched=True)
 cols_to_remove = [c for c in ["text", "meta"] if c in tokenized_dataset["train"].column_names]
 if cols_to_remove:
     tokenized_dataset = tokenized_dataset.remove_columns(cols_to_remove)
-if "label" in tokenized_dataset["train"].column_names:
-    tokenized_dataset = tokenized_dataset.rename_column("label", "labels")
+if "toxicity" in tokenized_dataset["train"].column_names:
+    tokenized_dataset = tokenized_dataset.rename_column("toxicity", "labels")
 tokenized_dataset.set_format("torch")
 data_collator = DataCollatorWithPadding(tokenizer=tokenizer, padding="longest")
 
@@ -178,44 +154,16 @@ data_collator = DataCollatorWithPadding(tokenizer=tokenizer, padding="longest")
 # Base model + dropout tweaks
 # ================================================================
 log("Loading base model ...")
-base_model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME, num_labels=2)
+model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME, num_labels=2)
 
 for attr, default in [
     ("classifier_dropout",         HEAD_DROPOUT),
     ("hidden_dropout_prob",        HEAD_DROPOUT),
     ("attention_probs_dropout_prob", HEAD_DROPOUT),
 ]:
-    if hasattr(base_model.config, attr):
-        current = getattr(base_model.config, attr)
-        setattr(base_model.config, attr, max(float(current or 0), float(default)))
-
-# ================================================================
-# Apply LoRA
-# ================================================================
-log("Applying LoRA adapter...")
-
-lora_cfg = LoraConfig(
-    task_type       = TaskType.SEQ_CLS,
-    r               = LORA_R,
-    lora_alpha      = LORA_ALPHA,
-    lora_dropout    = LORA_DROPOUT,
-    target_modules  = LORA_TARGET_MODULES,
-    bias            = LORA_BIAS,
-    modules_to_save = LORA_MODULES_TO_SAVE,
-    inference_mode  = False,
-)
-model = get_peft_model(base_model, lora_cfg)
-model.print_trainable_parameters()
-
-trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-total     = sum(p.numel() for p in model.parameters())
-log(f"LoRA trainable: {trainable:,} / {total:,}  ({100*trainable/total:.2f}%)")
-
-lora_config_dict = {
-    "r": LORA_R, "lora_alpha": LORA_ALPHA, "lora_dropout": LORA_DROPOUT,
-    "target_modules": LORA_TARGET_MODULES, "bias": LORA_BIAS,
-    "modules_to_save": LORA_MODULES_TO_SAVE, "learning_rate": LR,
-}
+    if hasattr(model.config, attr):
+        current = getattr(model.config, attr)
+        setattr(model.config, attr, max(float(current or 0), float(default)))
 
 # ================================================================
 # Class weights
@@ -267,7 +215,7 @@ class WeightedTrainer(Trainer):
         return (loss, outputs) if return_outputs else loss
 
 # ================================================================
-# Metrics helpers  (identical to original)
+# Metrics helpers
 # ================================================================
 def softmax_probs(logits):
     x = logits - np.max(logits, axis=1, keepdims=True)
@@ -450,35 +398,22 @@ trainer = WeightedTrainer(
     callbacks=[EarlyStoppingCallback(early_stopping_patience=EARLY_STOP_PATIENCE)],
 )
 
-log("Training with LoRA adapters...")
+log("Training full fine-tune...")
 trainer.train()
 log(f"Training finished. Best checkpoint: {trainer.state.best_model_checkpoint}")
 
 # ================================================================
-# Merge LoRA → save standalone model (no peft dep at inference)
+# Save best model
 # ================================================================
 best_model_path = f"{OUTPUT_BASE}/best"
-adapter_path    = f"{OUTPUT_BASE}/lora_adapter"
-os.makedirs(adapter_path, exist_ok=True)
-
-log("Merging LoRA adapters into base weights...")
-merged_model = model.merge_and_unload()       # fuses delta weights → plain HF model
-merged_model.save_pretrained(best_model_path)
+model.save_pretrained(best_model_path)
 tokenizer.save_pretrained(best_model_path)
-
-model.save_pretrained(adapter_path)           # adapter_config.json + small adapter weights
-log(f"Saved merged model  → {best_model_path}")
-log(f"Saved LoRA adapter  → {adapter_path}")
-
-with open(f"{RESULTS_BASE}/lora_config.json", "w", encoding="utf-8") as f:
-    json.dump(lora_config_dict, f, ensure_ascii=False, indent=2)
+log(f"Saved model → {best_model_path}")
 
 # ================================================================
-# Inference (use merged model)
+# Inference
 # ================================================================
 log("Running prediction on validation / test...")
-trainer.model = merged_model
-
 val_out     = trainer.predict(tokenized_dataset["validation"])
 val_logits, val_labels = val_out.predictions, val_out.label_ids
 
@@ -651,14 +586,13 @@ log(f"FINAL: macro_f1={final_test_rich['macro_f1']:.4f} f1_toxic={final_test_ric
 # ================================================================
 threshold_path = f"{best_model_path}/threshold.json"
 with open(threshold_path,"w",encoding="utf-8") as f:
-    json.dump({"version": "phobert_lora",
+    json.dump({"version": "phobert_full",
                "selection_metric": PRIMARY_THRESHOLD_OBJECTIVE,
                "deployment_mode": deploy_mode,
                "threshold": float(deploy_threshold),
                "temperature": deploy_temperature,
                "validation_best_raw": best_raw,
-               "validation_best_scaled": val_scaled_best,
-               "lora_config": lora_config_dict}, f, ensure_ascii=False, indent=2)
+               "validation_best_scaled": val_scaled_best}, f, ensure_ascii=False, indent=2)
 
 temperature_path = f"{best_model_path}/temperature_scaling.json"
 with open(temperature_path,"w",encoding="utf-8") as f:
@@ -671,8 +605,7 @@ with open(f"{RESULTS_BASE}/calibration_summary.json","w",encoding="utf-8") as f:
                "deploy_temperature": deploy_temperature,
                "temperature_result": temperature_result,
                "raw_best_by_objective": val_best_by_objective,
-               "scaled_best_by_objective": val_scaled_best_by_objective,
-               "lora_config": lora_config_dict}, f, ensure_ascii=False, indent=2)
+               "scaled_best_by_objective": val_scaled_best_by_objective}, f, ensure_ascii=False, indent=2)
 
 # ================================================================
 # Error analysis
@@ -717,7 +650,6 @@ results = {
         "primary_threshold_objective": PRIMARY_THRESHOLD_OBJECTIVE,
         "ece_bins": N_BINS_ECE, "use_temp_scaling": USE_TEMP_SCALING,
         "temp_lr": TEMP_LR, "temp_max_iters": TEMP_MAX_ITERS,
-        "lora": lora_config_dict,
     },
     "train_label_counts": {"clean": int(num_clean), "toxic": int(num_toxic)},
     "class_weights": [float(x) for x in class_weights.tolist()],
@@ -747,19 +679,16 @@ with open(f"{RESULTS_BASE}/report_thr0p5.txt","w",encoding="utf-8") as f:
 with open(f"{RESULTS_BASE}/report_final.txt","w",encoding="utf-8") as f:
     f.write(final_test_rich["classification_report"])
 
-log("Done. Saved merged model + LoRA adapter + metrics + calibration + error analysis.")
-
-
+log("Done. Saved model + metrics + calibration + error analysis.")
 
 # ================================================================
 # Metadata export (drop-in at end)
 # ================================================================
-import json
 from datetime import datetime
 
-MODEL_ID = "phobert/lora_v1"        # ví dụ: phobert/lora_v1
+MODEL_ID = "phobert/baseline"
 DATASET_VERSION = "victsd_vihsd"
-IS_BASELINE = False
+IS_BASELINE = True
 
 # --- training curve from trainer log_history ---
 curve = []
@@ -769,7 +698,6 @@ for row in trainer.state.log_history:
             "epoch": row.get("epoch"),
             "loss": row.get("loss"),
         }
-        # nếu có eval metrics thì thêm vào
         if "eval_macro_f1" in row:
             curve_row["f1"] = row.get("eval_macro_f1")
         if "eval_f1_toxic" in row:
@@ -797,20 +725,15 @@ run_config = {
         "use_focal": USE_FOCAL,
         "focal_gamma": FOCAL_GAMMA,
         "primary_metric": PRIMARY_METRIC,
-        "lora": lora_config_dict,
     },
 }
 
-# --- metrics.json ---
-# ưu tiên final_test_rich nếu có
 metrics_payload = {}
 if isinstance(results, dict) and "final_test_rich" in results:
     metrics_payload = results["final_test_rich"]
 elif isinstance(results, dict) and "test_argmax_basic" in results:
     metrics_payload = results["test_argmax_basic"]
 
-# fallback nếu bạn muốn map thẳng từ final_test_rich
-# expected keys: macro_f1, f1_toxic, precision_toxic, recall_toxic, accuracy
 metrics_out = {
     "macro_f1": metrics_payload.get("macro_f1"),
     "f1_toxic": metrics_payload.get("f1_toxic"),
@@ -819,7 +742,6 @@ metrics_out = {
     "accuracy": metrics_payload.get("accuracy"),
 }
 
-# write files into merged model folder
 with open(f"{best_model_path}/run_config.json", "w", encoding="utf-8") as f:
     json.dump(run_config, f, ensure_ascii=False, indent=2)
 
@@ -833,18 +755,20 @@ with open(f"{best_model_path}/training_curve.json", "w", encoding="utf-8") as f:
 # ZIP EXPORT
 # ================================================================
 import shutil
-from google.colab import files
 
 for name, path in [
-    ("best_model_lora",   best_model_path),
-    ("lora_adapter",      adapter_path),
-    ("results_lora",      RESULTS_BASE),
+    ("best_model_full",   best_model_path),
+    ("results_full",      RESULTS_BASE),
 ]:
     if os.path.exists(path):
         log(f"Zipping {path} → {name}.zip ...")
         shutil.make_archive(name, "zip", path)
 
 log("All zips created.")
-files.download("best_model_lora.zip")
-files.download("lora_adapter.zip")
-log("Download triggered.")
+try:
+    from google.colab import files
+    files.download("best_model_full.zip")
+    files.download("results_full.zip")
+    log("Download triggered.")
+except Exception:
+    log("Not running in Colab, skip files.download().")

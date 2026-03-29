@@ -32,6 +32,15 @@ def tokenize(text: str):
     tokens = TOKEN_RE.findall(text.lower())
     return tokens
 
+
+def get_toxicity(row: dict) -> int:
+    value = row.get("toxicity")
+    if value is None:
+        value = row.get("label")
+    if value is None:
+        value = row.get("Toxicity")
+    return int(value)
+
 def ngrams(tokens, n=2):
     if len(tokens) < n:
         return []
@@ -62,14 +71,26 @@ def main():
 
     os.makedirs(args.out_dir, exist_ok=True)
 
-    splits = {"train": "train.jsonl", "validation": "validation.jsonl", "test": "test.jsonl"}
+    base_splits = {"train": "train.jsonl", "validation": "validation.jsonl", "test": "test.jsonl"}
+    augmented_splits = {"train": "train_augmented.jsonl", "validation": "validation_augmented.jsonl", "test": "test_augmented.jsonl"}
+
+    has_base = all(os.path.exists(os.path.join(args.data_dir, name)) for name in base_splits.values())
+    has_augmented = all(os.path.exists(os.path.join(args.data_dir, name)) for name in augmented_splits.values())
+
+    if has_base:
+        splits = base_splits
+    elif has_augmented:
+        splits = augmented_splits
+    else:
+        raise FileNotFoundError(
+            f"Missing split files in {args.data_dir}. Need either train/validation/test.jsonl or *_augmented.jsonl"
+        )
+
     stats = {}
 
     # Global counters per split
     for split, filename in splits.items():
         path = os.path.join(args.data_dir, filename)
-        if not os.path.exists(path):
-            raise FileNotFoundError(f"Missing: {path}")
 
         label_counter = Counter()
         lengths = []
@@ -84,8 +105,8 @@ def main():
                 break
             n += 1
 
-            text = (row.get("text") or "").strip()
-            label = int(row.get("label"))
+            text = (row.get("text") or row.get("Comment") or row.get("comment") or "").strip()
+            label = get_toxicity(row)
 
             if not text:
                 empty_count += 1

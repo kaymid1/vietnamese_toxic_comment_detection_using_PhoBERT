@@ -145,8 +145,8 @@ tokenized_dataset = dataset.map(tokenize_batch, batched=True)
 cols_to_remove = [c for c in ["text", "meta"] if c in tokenized_dataset["train"].column_names]
 if cols_to_remove:
     tokenized_dataset = tokenized_dataset.remove_columns(cols_to_remove)
-if "label" in tokenized_dataset["train"].column_names:
-    tokenized_dataset = tokenized_dataset.rename_column("label", "labels")
+if "toxicity" in tokenized_dataset["train"].column_names:
+    tokenized_dataset = tokenized_dataset.rename_column("toxicity", "labels")
 tokenized_dataset.set_format("torch")
 data_collator = DataCollatorWithPadding(tokenizer=tokenizer, padding="longest")
 

@@ -44,13 +44,13 @@ dataset = load_dataset("json", data_files={
 })
 
 train_texts = [ex["text"] for ex in dataset["train"]]
-train_labels = [ex["label"] for ex in dataset["train"]]
+train_labels = [ex["toxicity"] for ex in dataset["train"]]
 
 val_texts = [ex["text"] for ex in dataset["validation"]]
-val_labels = [ex["label"] for ex in dataset["validation"]]
+val_labels = [ex["toxicity"] for ex in dataset["validation"]]
 
 test_texts = [ex["text"] for ex in dataset["test"]]
-test_labels = [ex["label"] for ex in dataset["test"]]
+test_labels = [ex["toxicity"] for ex in dataset["test"]]
 
 print(f"Train: {len(train_texts)} | Val: {len(val_texts)} | Test: {len(test_texts)}")
 

@@ -44,16 +44,16 @@ def process_file(split: str):
         for line_idx, line in enumerate(fin):
             item = json.loads(line)
             raw_text = item.get("Comment", "") or item.get("comment", "")  # phòng trường hợp key khác
-            label = int(item["Toxicity"])
-            
+            toxicity = int(item["Toxicity"])
+
             text = clean_text(raw_text)
-            
+
             if not text:  # bỏ comment rỗng sau clean
                 continue
-                
+
             record = {
                 "text": text,
-                "label": label,
+                "toxicity": toxicity,
                 "meta": {
                     "source": "ViCTSD",
                     "original_length": len(raw_text),
