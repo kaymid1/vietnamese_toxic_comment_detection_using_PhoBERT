@@ -1491,6 +1491,8 @@ def iter_dataset_rows() -> List[Dict[str, Any]]:
                         continue
                     text = obj.get("text")
                     label = normalize_int(obj.get("label"))
+                    if label is None:
+                        label = normalize_int(obj.get("toxicity"))
                     if text is None or label is None:
                         continue
                     meta = obj.get("meta") if isinstance(obj.get("meta"), dict) else {}
@@ -2614,7 +2616,8 @@ def dataset_preview(
     split: Optional[str] = None,
     include_stats: bool = False,
 ) -> Dict[str, Any]:
-    rows = iter_dataset_rows() + iter_feedback_rows()
+    include_feedback = (split or "").strip().lower() == "feedback" or (source or "").strip().lower() == "new_collected"
+    rows = iter_dataset_rows() + (iter_feedback_rows() if include_feedback else [])
     sources = [source] if source else None
     labels = [label] if label is not None else None
     splits = [split] if split else None

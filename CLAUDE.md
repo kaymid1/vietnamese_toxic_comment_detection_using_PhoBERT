@@ -35,7 +35,7 @@ It has 2 main parts:
 The core task is still:
 
 - input: Vietnamese text
-- output: binary `label`
+- output: binary `toxicity`
 - `0 = clean`
 - `1 = toxic`
 
@@ -124,7 +124,7 @@ These files / folders are **not the main source**:
 - `data/processed/victsd_v1/`
   - preprocessed dataset used by the baseline + PhoBERT scripts
 - `data/victsd/`
-  - another simplified dataset copy with schema `{"text","label"}`
+  - another simplified dataset copy with schema `{"text","toxicity"}`
 - `data/raw/crawled_urls/<url_hash>/`
   - crawl artifact for each URL
 - `data/raw/mock_crawled_urls/`
@@ -195,7 +195,7 @@ Schema:
 ```json
 {
   "text": "...",
-  "label": 0,
+  "toxicity": 0,
   "meta": {
     "source": "ViCTSD",
     "original_length": 42,

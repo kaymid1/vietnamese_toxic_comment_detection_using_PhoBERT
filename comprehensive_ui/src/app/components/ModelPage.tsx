@@ -540,6 +540,29 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
               </div>
             </div>
           </div>
+
+          <div className="mt-6 border rounded-lg p-4 bg-blue-50/40">
+            <h3 className="text-sm mb-3" style={{ color: "var(--viet-primary)" }}>
+              Lý do preprocessing hiện chỉ active 3 bước chính
+            </h3>
+            <ul className="list-disc pl-5 space-y-2 text-sm text-gray-700">
+              <li>
+                <strong>PhoBERT là mô hình case-sensitive</strong>, nên không lowercase để giữ tín hiệu chữ hoa/chữ thường.
+              </li>
+              <li>
+                <strong>Emoji và dấu câu</strong> (ví dụ !!!, ???, 😡, 😂) có thể là tín hiệu toxic/sarcasm, nên chưa loại bỏ.
+              </li>
+              <li>
+                Tránh <strong>over-cleaning</strong> để dữ liệu huấn luyện gần với dữ liệu thực tế khi deploy.
+              </li>
+              <li>
+                <strong>Teencode normalization</strong> vẫn để planned vì mapping dễ sai ngữ cảnh; chỉ nên bật sau khi có kết quả ablation rõ ràng.
+              </li>
+              <li>
+                Bản baseline ưu tiên các bước “an toàn cao”: trim + Unicode NFC + chuẩn hoá khoảng trắng.
+              </li>
+            </ul>
+          </div>
         </Card>
 
         {/* Performance Metrics */}

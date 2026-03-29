@@ -66,6 +66,44 @@ const buildApiUrl = (path: string) => {
 
 const labelText = (label: number) => (label === 1 ? "toxic" : "clean");
 
+const sourceLabel = (source: string) => {
+  const normalized = source.trim().toLowerCase();
+  const map: Record<string, string> = {
+    all: "Tất cả nguồn",
+    victsd_augmented: "ViCTSD",
+    "uit-vihsd_augmented": "UIT-ViHSD",
+    new_collected: "New collected",
+    unknown: "Không xác định",
+  };
+  return map[normalized] || source.replaceAll("_", " ");
+};
+
+const SOURCE_ORDER: string[] = ["victsd_augmented", "uit-vihsd_augmented", "new_collected"];
+
+const isVisibleSourceOption = (source: string) => {
+  const normalized = source.trim().toLowerCase();
+  return (
+    normalized !== "all" &&
+    normalized !== "victsd" &&
+    normalized !== "vihsd" &&
+    normalized !== "vihsd_augmented"
+  );
+};
+
+const sortSourcesByPreferredOrder = (sources: string[]) => {
+  const order = new Map(SOURCE_ORDER.map((value, index) => [value, index]));
+  return [...sources].sort((a, b) => {
+    const aNorm = a.trim().toLowerCase();
+    const bNorm = b.trim().toLowerCase();
+    const aIdx = order.get(aNorm);
+    const bIdx = order.get(bNorm);
+    if (aIdx !== undefined && bIdx !== undefined) return aIdx - bIdx;
+    if (aIdx !== undefined) return -1;
+    if (bIdx !== undefined) return 1;
+    return aNorm.localeCompare(bNorm);
+  });
+};
+
 const formatPercent = (value: number, total: number) => {
   if (!total) return "0.0%";
   return `${((value / total) * 100).toFixed(1)}%`;
@@ -91,12 +129,27 @@ export function DatasetPage({ onOpenSyntheticPage }: DatasetPageProps) {
   const [selectedFeedback, setSelectedFeedback] = useState<number[]>([]);
   const [deleteStatus, setDeleteStatus] = useState<string | null>(null);
   const [deleteLoading, setDeleteLoading] = useState(false);
+  const [sourceOptions, setSourceOptions] = useState<string[]>([
+    "victsd_augmented",
+    "uit-vihsd_augmented",
+    "new_collected",
+  ]);
+
+  useEffect(() => {
+    const keys = Object.keys(stats?.by_source || {});
+    if (!keys.length) return;
+    setSourceOptions((prev) => {
+      const merged = new Set([...prev, ...keys]);
+      const filtered = Array.from(merged).filter(isVisibleSourceOption);
+      return sortSourcesByPreferredOrder(filtered);
+    });
+  }, [stats]);
 
   const availableSources = useMemo(() => {
-    if (!stats) return ["all", "victsd", "victsd_augmented", "vihsd", "vihsd_augmented", "new_collected"];
-    const keys = Object.keys(stats.by_source || {});
-    return ["all", ...keys.sort((a, b) => a.localeCompare(b))];
-  }, [stats]);
+    const merged = new Set([...sourceOptions, sourceFilter]);
+    const filtered = Array.from(merged).filter(isVisibleSourceOption);
+    return ["all", ...sortSourcesByPreferredOrder(filtered)];
+  }, [sourceFilter, sourceOptions]);
 
   const aggregatedStats = useMemo(() => {
     const bySource = stats?.by_source || {};
@@ -110,6 +163,20 @@ export function DatasetPage({ onOpenSyntheticPage }: DatasetPageProps) {
     const total = (stats?.total ?? 0) || clean + toxic;
     return { total, clean, toxic, sources };
   }, [stats]);
+
+  const sourceSummary = useMemo(() => {
+    const bySource = stats?.by_source || {};
+    return {
+      victsd: bySource.victsd_augmented || { total: 0, clean: 0, toxic: 0 },
+      vihsd: bySource["uit-vihsd_augmented"] || bySource.vihsd_augmented || { total: 0, clean: 0, toxic: 0 },
+      newCollected: bySource.new_collected || { total: 0, clean: 0, toxic: 0 },
+    };
+  }, [stats]);
+
+  const imbalanceRatioText = useMemo(() => {
+    if (!aggregatedStats.toxic) return "N/A";
+    return `${(aggregatedStats.clean / aggregatedStats.toxic).toFixed(1)}:1`;
+  }, [aggregatedStats.clean, aggregatedStats.toxic]);
 
   const imbalanceStatus = useMemo(() => {
     if (!aggregatedStats.total) return null;
@@ -304,23 +371,23 @@ export function DatasetPage({ onOpenSyntheticPage }: DatasetPageProps) {
                 <div className="mt-3 grid grid-cols-1 md:grid-cols-4 gap-3">
                   <div className="rounded-lg border bg-muted/30 p-4">
                     <p className="text-xs text-muted-foreground">Tổng samples</p>
-                    <p className="text-2xl font-semibold">9,269</p>
-                    <p className="text-xs text-muted-foreground">ViCTSD + ViHSD + collected</p>
+                    <p className="text-2xl font-semibold">{aggregatedStats.total.toLocaleString()}</p>
+                    <p className="text-xs text-muted-foreground">ViCTSD + UIT-ViHSD + collected</p>
                   </div>
                   <div className="rounded-lg border bg-muted/30 p-4">
                     <p className="text-xs text-muted-foreground">Clean (non-toxic)</p>
-                    <p className="text-2xl font-semibold text-blue-700">6,250</p>
-                    <p className="text-xs text-muted-foreground">67.4% tổng dataset</p>
+                    <p className="text-2xl font-semibold text-blue-700">{aggregatedStats.clean.toLocaleString()}</p>
+                    <p className="text-xs text-muted-foreground">{formatPercent(aggregatedStats.clean, aggregatedStats.total)} tổng dataset</p>
                   </div>
                   <div className="rounded-lg border bg-muted/30 p-4">
                     <p className="text-xs text-muted-foreground">Toxic</p>
-                    <p className="text-2xl font-semibold text-orange-600">3,019</p>
-                    <p className="text-xs text-muted-foreground">32.6% tổng dataset</p>
+                    <p className="text-2xl font-semibold text-orange-600">{aggregatedStats.toxic.toLocaleString()}</p>
+                    <p className="text-xs text-muted-foreground">{formatPercent(aggregatedStats.toxic, aggregatedStats.total)} tổng dataset</p>
                   </div>
                   <div className="rounded-lg border bg-muted/30 p-4">
                     <p className="text-xs text-muted-foreground">Imbalance ratio</p>
-                    <p className="text-2xl font-semibold">2.1:1</p>
-                    <p className="text-xs text-muted-foreground">Clean:Toxic (cải thiện từ 8.2:1)</p>
+                    <p className="text-2xl font-semibold">{imbalanceRatioText}</p>
+                    <p className="text-xs text-muted-foreground">Clean:Toxic theo dữ liệu hiện tại</p>
                   </div>
                 </div>
               </div>
@@ -329,10 +396,10 @@ export function DatasetPage({ onOpenSyntheticPage }: DatasetPageProps) {
                 <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">Đóng góp theo nguồn</p>
                 <div className="mt-3 flex flex-wrap gap-4 text-xs text-muted-foreground">
                   <span className="inline-flex items-center gap-2">
-                    <span className="h-3 w-3 rounded-sm bg-blue-600" />ViCTSD augmented
+                    <span className="h-3 w-3 rounded-sm bg-blue-600" />ViCTSD
                   </span>
                   <span className="inline-flex items-center gap-2">
-                    <span className="h-3 w-3 rounded-sm bg-orange-500" />ViHSD augmented (OFFENSIVE)
+                    <span className="h-3 w-3 rounded-sm bg-orange-500" />UIT-ViHSD
                   </span>
                   <span className="inline-flex items-center gap-2">
                     <span className="h-3 w-3 rounded-sm bg-zinc-400" />New collected
@@ -341,37 +408,38 @@ export function DatasetPage({ onOpenSyntheticPage }: DatasetPageProps) {
 
                 <div className="mt-4 space-y-3 text-sm">
                   <div className="flex items-center gap-3">
-                    <div className="w-44 text-muted-foreground">ViCTSD augmented</div>
+                    <div className="w-44 text-muted-foreground">ViCTSD</div>
                     <div className="flex-1 h-3 rounded bg-muted overflow-hidden">
                       <div className="flex h-full">
-                        <div className="bg-blue-600" style={{ width: "89.2%" }} />
-                        <div className="bg-orange-500" style={{ width: "10.8%" }} />
+                        <div className="bg-blue-600" style={{ width: formatPercent(sourceSummary.victsd.clean, sourceSummary.victsd.total) }} />
+                        <div className="bg-orange-500" style={{ width: formatPercent(sourceSummary.victsd.toxic, sourceSummary.victsd.total) }} />
                       </div>
                     </div>
-                    <div className="w-20 text-right text-xs text-muted-foreground">7,000</div>
+                    <div className="w-20 text-right text-xs text-muted-foreground">{sourceSummary.victsd.total.toLocaleString()}</div>
                   </div>
                   <div className="flex items-center gap-3">
-                    <div className="w-44 text-muted-foreground">ViHSD augmented</div>
+                    <div className="w-44 text-muted-foreground">UIT-ViHSD</div>
                     <div className="flex-1 h-3 rounded bg-muted overflow-hidden">
                       <div className="flex h-full">
-                        <div className="bg-orange-500" style={{ width: "100%" }} />
+                        <div className="bg-orange-500" style={{ width: formatPercent(sourceSummary.vihsd.toxic, sourceSummary.vihsd.total) }} />
                       </div>
                     </div>
-                    <div className="w-20 text-right text-xs text-muted-foreground">2,260</div>
+                    <div className="w-20 text-right text-xs text-muted-foreground">{sourceSummary.vihsd.total.toLocaleString()}</div>
                   </div>
                   <div className="flex items-center gap-3">
                     <div className="w-44 text-muted-foreground">New collected</div>
                     <div className="flex-1 h-3 rounded bg-muted overflow-hidden">
                       <div className="flex h-full">
-                        <div className="bg-blue-600" style={{ width: "100%" }} />
+                        <div className="bg-blue-600" style={{ width: formatPercent(sourceSummary.newCollected.clean, sourceSummary.newCollected.total) }} />
+                        <div className="bg-orange-500" style={{ width: formatPercent(sourceSummary.newCollected.toxic, sourceSummary.newCollected.total) }} />
                       </div>
                     </div>
-                    <div className="w-20 text-right text-xs text-muted-foreground">9</div>
+                    <div className="w-20 text-right text-xs text-muted-foreground">{sourceSummary.newCollected.total.toLocaleString()}</div>
                   </div>
                 </div>
 
                 <div className="mt-4 rounded-lg border-l-4 border-l-green-600 bg-green-50 p-4 text-sm text-green-800">
-                  <strong>Kết quả:</strong> Imbalance ratio cải thiện đáng kể — từ 8.2:1 (ViCTSD gốc) xuống còn 2.1:1 sau merge. Đây là mức ratio chấp nhận được cho phần lớn classifier.
+                  <strong>Kết quả:</strong> Dữ liệu được render động từ API dataset preview theo bộ lọc hiện tại, không còn hardcode số lượng.
                 </div>
               </div>
             </TabsContent>
@@ -617,7 +685,7 @@ export function DatasetPage({ onOpenSyntheticPage }: DatasetPageProps) {
               >
                 {availableSources.map((source) => (
                   <option key={source} value={source}>
-                    {source}
+                    {sourceLabel(source)}
                   </option>
                 ))}
               </select>
