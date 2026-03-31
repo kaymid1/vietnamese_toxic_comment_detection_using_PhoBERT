@@ -50,7 +50,8 @@ os.environ["WANDB_DISABLED"] = "true"
 # ================================================================
 # Config — tune here
 # ================================================================
-DATA_DIR = "/content/drive/MyDrive/victsd"
+DATA_DIR = os.environ.get("DATA_DIR", "/content/drive/MyDrive/victsd")
+DATASET_PREFIX = os.environ.get("DATASET_PREFIX", "victsd_v1_protocol_a")
 MODEL_NAME = "vinai/phobert-base"
 MAX_LENGTH = 256
 
@@ -71,10 +72,10 @@ FOCAL_GAMMA = 2.0
 
 TOXIC_WEIGHT_SCALE = 0.5
 
-SEED = 42
+SEED = int(os.environ.get("SEED", "42"))
 
-OUTPUT_BASE  = "models/phobert"
-RESULTS_BASE = "results/phobert"
+OUTPUT_BASE = os.environ.get("OUTPUT_BASE", f"models/phobert/{DATASET_PREFIX}")
+RESULTS_BASE = os.environ.get("RESULTS_BASE", f"results/phobert/{DATASET_PREFIX}")
 
 PRIMARY_METRIC = "f1_toxic"
 
@@ -107,22 +108,22 @@ show_gpu()
 # Dataset
 # ================================================================
 log("Checking dataset files...")
-for fname in [
-    "train_augmented.jsonl",
-    "validation_augmented.jsonl",
-    "test_augmented.jsonl",
-]:
-    assert os.path.exists(f"{DATA_DIR}/{fname}"), f"Missing {fname}"
+dataset_files = {
+    "train": f"{DATASET_PREFIX}_train_augmented.jsonl",
+    "validation": f"{DATASET_PREFIX}_validation_augmented.jsonl",
+    "test": f"{DATASET_PREFIX}_test_augmented.jsonl",
+}
+for split, fname in dataset_files.items():
+    path = f"{DATA_DIR}/{fname}"
+    assert os.path.exists(path), f"Missing {split} file: {path}"
 
 os.makedirs(f"{OUTPUT_BASE}/checkpoints", exist_ok=True)
-os.makedirs(f"{OUTPUT_BASE}/best",        exist_ok=True)
-os.makedirs(RESULTS_BASE,                 exist_ok=True)
+os.makedirs(f"{OUTPUT_BASE}/best", exist_ok=True)
+os.makedirs(RESULTS_BASE, exist_ok=True)
 
 log("Loading dataset ...")
 dataset = load_dataset("json", data_files={
-    "train":      f"{DATA_DIR}/train_augmented.jsonl",
-    "validation": f"{DATA_DIR}/validation_augmented.jsonl",
-    "test":       f"{DATA_DIR}/test_augmented.jsonl",
+    split: f"{DATA_DIR}/{fname}" for split, fname in dataset_files.items()
 })
 
 raw_text = {
@@ -636,7 +637,7 @@ with open(f"{RESULTS_BASE}/error_analysis.json","w",encoding="utf-8") as f:
 # Full metrics bundle
 # ================================================================
 results = {
-    "dataset_version": "victsd", "model": MODEL_NAME,
+    "dataset_version": DATASET_PREFIX, "model": MODEL_NAME,
     "env": {"torch": torch.__version__, "cuda_available": torch.cuda.is_available()},
     "config": {
         "MODEL_NAME": MODEL_NAME, "MAX_LENGTH": MAX_LENGTH,
@@ -687,7 +688,7 @@ log("Done. Saved model + metrics + calibration + error analysis.")
 from datetime import datetime
 
 MODEL_ID = "phobert/baseline"
-DATASET_VERSION = "victsd_vihsd"
+DATASET_VERSION = DATASET_PREFIX
 IS_BASELINE = True
 
 # --- training curve from trainer log_history ---
@@ -756,9 +757,13 @@ with open(f"{best_model_path}/training_curve.json", "w", encoding="utf-8") as f:
 # ================================================================
 import shutil
 
+zip_names = {
+    "best": f"best_model_full_{DATASET_PREFIX}",
+    "results": f"results_full_{DATASET_PREFIX}",
+}
 for name, path in [
-    ("best_model_full",   best_model_path),
-    ("results_full",      RESULTS_BASE),
+    (zip_names["best"], best_model_path),
+    (zip_names["results"], RESULTS_BASE),
 ]:
     if os.path.exists(path):
         log(f"Zipping {path} → {name}.zip ...")
@@ -767,8 +772,8 @@ for name, path in [
 log("All zips created.")
 try:
     from google.colab import files
-    files.download("best_model_full.zip")
-    files.download("results_full.zip")
+    files.download(f"{zip_names['best']}.zip")
+    files.download(f"{zip_names['results']}.zip")
     log("Download triggered.")
 except Exception:
     log("Not running in Colab, skip files.download().")

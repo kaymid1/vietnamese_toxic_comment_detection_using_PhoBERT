@@ -166,15 +166,62 @@ Model artifacts are resolved from `models/options/`.
 
 ## Data and Training Pipeline
 
-The repository also includes research scripts for:
+The repository includes research scripts for:
 
 - exporting raw ViCTSD data
 - preprocessing into `data/processed/victsd_v1`
+- building protocol datasets A/B/C from ViCTSD + ViHSD
 - exploratory data analysis
 - training TF-IDF + Logistic Regression baseline
-- fine-tuning PhoBERT
+- fine-tuning PhoBERT (full and LoRA variants)
 
-See `scripts/01_export_raw.py` through `scripts/05_train_phobert.py`.
+### Dataset sources used in current protocol workflow
+
+- ViCTSD raw: `data/raw/victsd/{train,validation,test}.jsonl`
+- ViHSD raw: `data/raw/vihsd/{train,validation,test}.jsonl`
+  - label map from `data/raw/vihsd/metadata.json`
+  - OFFENSIVE is mapped to binary `toxicity=1` for protocol augmentation
+
+### Protocol builder (A/B/C)
+
+Use:
+
+- `scripts/02a_build_protocol_datasets.py`
+
+This script:
+
+- preprocesses ViHSD OFFENSIVE text before merge (NFC + whitespace normalize + trim)
+- builds protocol datasets with collision-safe filenames
+- enforces exact dedup for protocol construction
+- keeps Protocol B validation/test as ViCTSD-only while augmenting train
+- writes a build report with counts, source distribution, toxic ratios, and overlap checks
+
+Output layout:
+
+- `data/victsd/protocol_a/victsd_v1_protocol_a_{train,validation,test}_augmented.jsonl`
+- `data/victsd/protocol_b/victsd_v1_protocol_b_{train,validation,test}_augmented.jsonl`
+- `data/victsd/protocol_c/victsd_v1_protocol_c_{train,validation,test}_augmented.jsonl`
+- `data/victsd/victsd_v1_protocol_build_report.json`
+
+### Colab-friendly training input convention
+
+Training scripts now support dataset selection via env vars:
+
+- `DATA_DIR`
+- `DATASET_PREFIX`
+- optional `OUTPUT_BASE`, `RESULTS_BASE`, `SEED`
+
+Examples:
+
+- `scripts/04_baseline_tfidf_lr.py`
+- `scripts/05_train_phobert.py`
+- `scripts/06_train_phobert_lora.py`
+
+Each script reads files by prefix pattern:
+
+- `${DATA_DIR}/${DATASET_PREFIX}_train_augmented.jsonl`
+- `${DATA_DIR}/${DATASET_PREFIX}_validation_augmented.jsonl`
+- `${DATA_DIR}/${DATASET_PREFIX}_test_augmented.jsonl`
 
 ## Hybrid Thresholding + AI Learned Penalty
 
@@ -275,3 +322,4 @@ Segment-level outputs (`crawled_predictions.jsonl`) include:
 - CORS is configured for local Vite development and ngrok testing
 - Feedback data and threshold overrides are stored in SQLite under `data/processed/feedback/`
 - Default model selection depends on locally available artifacts
+- Protocol A/B/C comparison in thesis should use a gating + weighted decision table (leakage, reproducibility, deploy feasibility, then weighted metrics like F1_toxic/Macro-F1/ECE/robustness)

@@ -122,10 +122,16 @@ const formatRatio = (value?: number) => (value === undefined ? "--" : `${(value 
 const formatScore = (value?: number | null) => (value == null ? "Chưa có metrics" : value.toFixed(3));
 
 const demoExamples = [
-  "Trời ơi!!! Đẹp vãi 😡😡",
-  "k có j đâu mà ồn ào...",
-  "Giỏi quá ha, chắc chưa? 😏",
+  "   Trời ơi!!!   Đẹp vãi 😡😡   ",
+  "k\t có   j đâu\n mà ồn ào...",
+  "Giỏi quá ha,   chắc chưa? 😏   ",
 ];
+
+const toVisibleWhitespace = (text: string) =>
+  text
+    .replace(/ /g, "·")
+    .replace(/\t/g, "↹")
+    .replace(/\n/g, "↵\n");
 
 const applyActiveSteps = (text: string, steps: PreprocessStep[]) => {
   let output = text;
@@ -509,11 +515,11 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
 
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
             <div className="border rounded-lg p-4 bg-gray-50">
-              <p className="text-xs text-gray-500 mb-2">Input</p>
-              <p className="text-gray-800 text-sm">{demoInput}</p>
+              <p className="text-xs text-gray-500 mb-2">Input (whitespace-visible)</p>
+              <p className="text-gray-800 text-sm font-mono whitespace-pre-wrap">{toVisibleWhitespace(demoInput)}</p>
               <div className="mt-4">
-                <p className="text-xs text-gray-500 mb-2">Output (sau {activeSteps.length} bước)</p>
-                <p className="text-gray-800 text-sm">{demoOutput}</p>
+                <p className="text-xs text-gray-500 mb-2">Output (whitespace-visible, sau {activeSteps.length} bước)</p>
+                <p className="text-gray-800 text-sm font-mono whitespace-pre-wrap">{toVisibleWhitespace(demoOutput)}</p>
               </div>
             </div>
 

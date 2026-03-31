@@ -1,0 +1,201 @@
+{
+  "config": {
+    "victsd_dir": "/Users/mac/git/Thesis/data/processed/victsd_v1",
+    "vihsd_dir": "/Users/mac/git/Thesis/data/raw/vihsd",
+    "output_root": "/Users/mac/git/Thesis/data/victsd",
+    "dataset_prefix": "victsd_v1",
+    "seed": 42,
+    "b_toxic_min": 0.3,
+    "b_toxic_max": 0.4,
+    "c_ratios": {
+      "train": 0.7,
+      "validation": 0.2,
+      "test": 0.1
+    }
+  },
+  "warnings": [],
+  "protocols": {
+    "a": {
+      "files": {
+        "train": "/Users/mac/git/Thesis/data/victsd/protocol_a/victsd_v1_protocol_a_train_augmented.jsonl",
+        "validation": "/Users/mac/git/Thesis/data/victsd/protocol_a/victsd_v1_protocol_a_validation_augmented.jsonl",
+        "test": "/Users/mac/git/Thesis/data/victsd/protocol_a/victsd_v1_protocol_a_test_augmented.jsonl"
+      },
+      "stats": {
+        "train": {
+          "total": 7000,
+          "toxic": 759,
+          "clean": 6241,
+          "toxic_ratio": 0.10842857142857143,
+          "sources": {
+            "ViCTSD": 7000
+          },
+          "source_splits": {
+            "ViCTSD:train": 7000
+          }
+        },
+        "validation": {
+          "total": 2000,
+          "toxic": 232,
+          "clean": 1768,
+          "toxic_ratio": 0.116,
+          "sources": {
+            "ViCTSD": 2000
+          },
+          "source_splits": {
+            "ViCTSD:validation": 2000
+          }
+        },
+        "test": {
+          "total": 1000,
+          "toxic": 110,
+          "clean": 890,
+          "toxic_ratio": 0.11,
+          "sources": {
+            "ViCTSD": 1000
+          },
+          "source_splits": {
+            "ViCTSD:test": 1000
+          }
+        }
+      },
+      "overlap_exact": {
+        "train_validation": 16,
+        "train_test": 8,
+        "validation_test": 4
+      }
+    },
+    "b": {
+      "files": {
+        "train": "/Users/mac/git/Thesis/data/victsd/protocol_b/victsd_v1_protocol_b_train_augmented.jsonl",
+        "validation": "/Users/mac/git/Thesis/data/victsd/protocol_b/victsd_v1_protocol_b_validation_augmented.jsonl",
+        "test": "/Users/mac/git/Thesis/data/victsd/protocol_b/victsd_v1_protocol_b_test_augmented.jsonl"
+      },
+      "stats": {
+        "train": {
+          "total": 8864,
+          "toxic": 2673,
+          "clean": 6191,
+          "toxic_ratio": 0.3015568592057762,
+          "sources": {
+            "ViCTSD": 6948,
+            "UIT-ViHSD": 1916
+          },
+          "source_splits": {
+            "ViCTSD:train": 6948,
+            "UIT-ViHSD:test": 374,
+            "UIT-ViHSD:train": 1364,
+            "UIT-ViHSD:validation": 178
+          }
+        },
+        "validation": {
+          "total": 2000,
+          "toxic": 232,
+          "clean": 1768,
+          "toxic_ratio": 0.116,
+          "sources": {
+            "ViCTSD": 2000
+          },
+          "source_splits": {
+            "ViCTSD:validation": 2000
+          }
+        },
+        "test": {
+          "total": 1000,
+          "toxic": 110,
+          "clean": 890,
+          "toxic_ratio": 0.11,
+          "sources": {
+            "ViCTSD": 1000
+          },
+          "source_splits": {
+            "ViCTSD:test": 1000
+          }
+        }
+      },
+      "merge": {
+        "vihsd_offensive_pool_after_dedup": 2164,
+        "candidate_pool_after_overlap_filter": 2164,
+        "selected_additions": 1916,
+        "base_train_total": 7000,
+        "base_train_toxic": 759,
+        "requested_additions_min": 1916,
+        "requested_additions_max": 3401
+      },
+      "overlap_exact": {
+        "train_validation": 0,
+        "train_test": 0,
+        "validation_test": 4
+      }
+    },
+    "c": {
+      "files": {
+        "train": "/Users/mac/git/Thesis/data/victsd/protocol_c/victsd_v1_protocol_c_train_augmented.jsonl",
+        "validation": "/Users/mac/git/Thesis/data/victsd/protocol_c/victsd_v1_protocol_c_validation_augmented.jsonl",
+        "test": "/Users/mac/git/Thesis/data/victsd/protocol_c/victsd_v1_protocol_c_test_augmented.jsonl"
+      },
+      "stats": {
+        "train": {
+          "total": 8468,
+          "toxic": 2285,
+          "clean": 6183,
+          "toxic_ratio": 0.26983939537080776,
+          "sources": {
+            "ViCTSD": 6953,
+            "UIT-ViHSD": 1515
+          },
+          "source_splits": {
+            "ViCTSD:train": 4881,
+            "ViCTSD:validation": 1387,
+            "UIT-ViHSD:test": 300,
+            "ViCTSD:test": 685,
+            "UIT-ViHSD:train": 1073,
+            "UIT-ViHSD:validation": 142
+          }
+        },
+        "validation": {
+          "total": 2420,
+          "toxic": 653,
+          "clean": 1767,
+          "toxic_ratio": 0.26983471074380166,
+          "sources": {
+            "ViCTSD": 1993,
+            "UIT-ViHSD": 427
+          },
+          "source_splits": {
+            "ViCTSD:train": 1386,
+            "UIT-ViHSD:train": 313,
+            "ViCTSD:test": 215,
+            "ViCTSD:validation": 392,
+            "UIT-ViHSD:test": 77,
+            "UIT-ViHSD:validation": 37
+          }
+        },
+        "test": {
+          "total": 1209,
+          "toxic": 326,
+          "clean": 883,
+          "toxic_ratio": 0.2696443341604632,
+          "sources": {
+            "UIT-ViHSD": 222,
+            "ViCTSD": 987
+          },
+          "source_splits": {
+            "UIT-ViHSD:test": 43,
+            "ViCTSD:train": 702,
+            "ViCTSD:validation": 197,
+            "UIT-ViHSD:validation": 22,
+            "UIT-ViHSD:train": 157,
+            "ViCTSD:test": 88
+          }
+        }
+      },
+      "pool_size_after_global_dedup": 12097,
+      "overlap_exact": {
+        "train_validation": 0,
+        "train_test": 0,
+        "validation_test": 0
+      }
+    }
+  }
+}

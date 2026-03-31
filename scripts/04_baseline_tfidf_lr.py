@@ -10,15 +10,16 @@ from sklearn.metrics import classification_report, confusion_matrix, f1_score
 # ================================================================
 # Config — match LoRA script data source / export layout
 # ================================================================
-DATA_DIR = "/content/drive/MyDrive/victsd"
-SEED = 42
+DATA_DIR = os.environ.get("DATA_DIR", "/content/drive/MyDrive/victsd")
+DATASET_PREFIX = os.environ.get("DATASET_PREFIX", "victsd_v1_protocol_a")
+SEED = int(os.environ.get("SEED", "42"))
 
 MODEL_ID = "tfidf_lr/baseline"
-DATASET_VERSION = "victsd_vihsd"
+DATASET_VERSION = DATASET_PREFIX
 IS_BASELINE = True
 
-OUTPUT_BASE  = "models/tfidf_lr"
-RESULTS_BASE = "results/baseline"
+OUTPUT_BASE = os.environ.get("OUTPUT_BASE", f"models/tfidf_lr/{DATASET_PREFIX}")
+RESULTS_BASE = os.environ.get("RESULTS_BASE", f"results/baseline/{DATASET_PREFIX}")
 
 random.seed(SEED)
 np.random.seed(SEED)
@@ -26,21 +27,21 @@ np.random.seed(SEED)
 # ================================================================
 # Dataset
 # ================================================================
-for fname in [
-    "train_augmented.jsonl",
-    "validation_augmented.jsonl",
-    "test_augmented.jsonl",
-]:
-    assert os.path.exists(f"{DATA_DIR}/{fname}"), f"Missing {fname}"
+dataset_files = {
+    "train": f"{DATASET_PREFIX}_train_augmented.jsonl",
+    "validation": f"{DATASET_PREFIX}_validation_augmented.jsonl",
+    "test": f"{DATASET_PREFIX}_test_augmented.jsonl",
+}
+for split, fname in dataset_files.items():
+    path = f"{DATA_DIR}/{fname}"
+    assert os.path.exists(path), f"Missing {split} file: {path}"
 
 os.makedirs(OUTPUT_BASE, exist_ok=True)
 os.makedirs(RESULTS_BASE, exist_ok=True)
 
 print("Loading dataset ...")
 dataset = load_dataset("json", data_files={
-    "train":      f"{DATA_DIR}/train_augmented.jsonl",
-    "validation": f"{DATA_DIR}/validation_augmented.jsonl",
-    "test":       f"{DATA_DIR}/test_augmented.jsonl",
+    split: f"{DATA_DIR}/{fname}" for split, fname in dataset_files.items()
 })
 
 train_texts = [ex["text"] for ex in dataset["train"]]
@@ -174,9 +175,13 @@ with open(f"{OUTPUT_BASE}/best/training_curve.json", "w", encoding="utf-8") as f
 # ================================================================
 import shutil
 
+zip_names = {
+    "best": f"best_model_tfidf_lr_{DATASET_PREFIX}",
+    "results": f"results_tfidf_lr_{DATASET_PREFIX}",
+}
 for name, path in [
-    ("best_model_tfidf_lr", f"{OUTPUT_BASE}/best"),
-    ("results_tfidf_lr", RESULTS_BASE),
+    (zip_names["best"], f"{OUTPUT_BASE}/best"),
+    (zip_names["results"], RESULTS_BASE),
 ]:
     if os.path.exists(path):
         print(f"Zipping {path} → {name}.zip ...")
@@ -185,8 +190,8 @@ for name, path in [
 print("All zips created.")
 try:
     from google.colab import files
-    files.download("best_model_tfidf_lr.zip")
-    files.download("results_tfidf_lr.zip")
+    files.download(f"{zip_names['best']}.zip")
+    files.download(f"{zip_names['results']}.zip")
     print("Download triggered.")
 except Exception:
     print("Not running in Colab, skip files.download().")

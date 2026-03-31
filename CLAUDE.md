@@ -59,6 +59,8 @@ When editing code, prioritize these files:
   - export raw ViCTSD
 - `scripts/02_preprocess.py`
   - preprocess dataset into `data/processed/victsd_v1`
+- `scripts/02a_build_protocol_datasets.py`
+  - build protocol A/B/C datasets from ViCTSD + ViHSD raw (includes offensive-only ViHSD preprocessing + merge)
 - `scripts/03_eda.py`
   - EDA
 - `scripts/04_baseline_tfidf_lr.py`
@@ -121,10 +123,17 @@ These files / folders are **not the main source**:
 
 - `data/raw/victsd/`
   - raw ViCTSD export from Hugging Face
+- `data/raw/vihsd/`
+  - raw UIT-ViHSD export (`free_text`, `label_id`, `label`) + `metadata.json` label map
 - `data/processed/victsd_v1/`
-  - preprocessed dataset used by the baseline + PhoBERT scripts
+  - preprocessed ViCTSD dataset used as base input
 - `data/victsd/`
-  - another simplified dataset copy with schema `{"text","toxicity"}`
+  - protocol artifacts and reports for A/B/C comparisons
+  - includes:
+    - `protocol_a/victsd_v1_protocol_a_{train,validation,test}_augmented.jsonl`
+    - `protocol_b/victsd_v1_protocol_b_{train,validation,test}_augmented.jsonl`
+    - `protocol_c/victsd_v1_protocol_c_{train,validation,test}_augmented.jsonl`
+    - `victsd_v1_protocol_build_report.json`
 - `data/raw/crawled_urls/<url_hash>/`
   - crawl artifact for each URL
 - `data/raw/mock_crawled_urls/`
@@ -223,14 +232,23 @@ Why:
 
 ## 6. Research / training pipeline
 
-The reasonable working order is:
+The current protocol-aware working order is:
 
-1. `scripts/01_export_raw.py`
-2. `scripts/02_preprocess.py`
-3. `scripts/03_eda.py`
-4. `scripts/04_baseline_tfidf_lr.py`
-5. `scripts/05_train_phobert.py`
-6. `generate_thesis_plots.py`
+1. `scripts/01_export_raw.py` (ViCTSD raw)
+2. `scripts/02_preprocess.py` (ViCTSD preprocessing)
+3. `scripts/02a_build_protocol_datasets.py` (build A/B/C from ViCTSD + ViHSD raw)
+4. `scripts/03_eda.py` (optional per-protocol EDA)
+5. `scripts/04_baseline_tfidf_lr.py` (protocol-specific run)
+6. `scripts/05_train_phobert.py` or `scripts/06_train_phobert_lora.py` (protocol-specific run)
+7. `generate_thesis_plots.py`
+
+### Protocol semantics used in thesis workflow
+
+- **Protocol A**: ViCTSD-only (legacy anchor baseline)
+- **Protocol B**: ViCTSD + ViHSD OFFENSIVE in train only; validation/test remain ViCTSD
+- **Protocol C**: merged benchmark with global exact dedup + stratified split
+
+This supports a final decision phase where A/B/C are compared by gating + weighted metrics.
 
 ### EDA
 
@@ -246,7 +264,21 @@ The reasonable working order is:
 
 ### Baseline
 
-`scripts/04_baseline_tfidf_lr.py` uses:
+`scripts/04_baseline_tfidf_lr.py` now supports protocol-specific dataset loading via env:
+
+- `DATA_DIR`
+- `DATASET_PREFIX`
+- optional `OUTPUT_BASE`, `RESULTS_BASE`, `SEED`
+
+Dataset file pattern:
+
+- `${DATA_DIR}/${DATASET_PREFIX}_train_augmented.jsonl`
+- `${DATA_DIR}/${DATASET_PREFIX}_validation_augmented.jsonl`
+- `${DATA_DIR}/${DATASET_PREFIX}_test_augmented.jsonl`
+
+This avoids filename collisions when training multiple protocols on Google Drive / Colab.
+
+`04_baseline_tfidf_lr.py` uses:
 
 - `TfidfVectorizer(ngram_range=(1, 2), lowercase=False, token_pattern=r"(?u)\\b\\w+\\b")`
 - `LogisticRegression(class_weight="balanced", max_iter=1000, n_jobs=-1)`
@@ -265,7 +297,21 @@ Important note:
   - test macro F1: `0.7043`
   - test F1_toxic: `0.4844`
 
-### PhoBERT training script
+### PhoBERT training scripts
+
+`scripts/05_train_phobert.py` and `scripts/06_train_phobert_lora.py` support protocol-specific dataset loading via env:
+
+- `DATA_DIR`
+- `DATASET_PREFIX`
+- optional `OUTPUT_BASE`, `RESULTS_BASE`, `SEED`
+
+Dataset file pattern:
+
+- `${DATA_DIR}/${DATASET_PREFIX}_train_augmented.jsonl`
+- `${DATA_DIR}/${DATASET_PREFIX}_validation_augmented.jsonl`
+- `${DATA_DIR}/${DATASET_PREFIX}_test_augmented.jsonl`
+
+Both scripts keep Colab compatibility while avoiding cross-protocol file collisions.
 
 `scripts/05_train_phobert.py`:
 
@@ -798,6 +844,10 @@ Important note:
 
 ## 15. Important gotchas
 
+0. Protocol outputs must be treated as versioned artifacts.
+   - Do not reuse generic `train_augmented.jsonl` naming across A/B/C in shared directories.
+   - Use `DATASET_PREFIX` consistently in Colab runs to avoid accidental overwrites.
+
 1. The README, static UI text, and actual code are not fully synchronized.
    - If they conflict, trust the source code + real artifacts.
 
@@ -819,7 +869,13 @@ Important note:
 7. There is no formal automated test suite in the repo.
    - Verification usually means running scripts, calling the API, and testing the UI manually.
 
-8. The repo contains many generated artifacts and the worktree may be dirty.
+8. Protocol build output currently confirms:
+   - B-train toxic ratio ~0.3016 (inside target 0.30–0.40)
+   - B has zero train-vs-val/test overlap
+   - C has zero overlap across train/validation/test
+   - A preserves ViCTSD behavior and may retain original cross-split duplicates from source data
+
+9. The repo contains many generated artifacts and the worktree may be dirty.
    - Distinguish source files from outputs / data before editing.
 
 ---
@@ -857,7 +913,26 @@ When asked to make changes, Claude should:
 
 ---
 
-## 17. Short summary
+## 17. Decision workflow for thesis protocol selection
+
+After running A/B/C, use this order:
+
+1. **Gating rules** (elimination):
+   - leakage constraints
+   - reproducibility evidence (script + report)
+   - deploy feasibility
+2. **Weighted scoring** (100 points):
+   - F1_toxic (30), Macro-F1 (20), ECE (10), Brier (5), Robustness (15), Stability (10), Practicality (5), Scientific clarity (5)
+3. **Tie-break**:
+   - `F1_toxic > Macro-F1 > ECE > Robustness`
+
+Interpretation:
+
+- A is anchor baseline
+- B is primary deploy candidate on ViCTSD-comparable evaluation
+- C is new benchmark contribution and should be reported alongside A/B
+
+## 18. Short summary
 
 Remember that this repo is a combination of:
 
