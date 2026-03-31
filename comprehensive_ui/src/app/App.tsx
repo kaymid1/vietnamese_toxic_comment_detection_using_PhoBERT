@@ -5,6 +5,7 @@ import { ResultsPage } from "@/app/components/ResultsPage";
 import { DatasetPage } from "@/app/components/DatasetPage";
 import { SyntheticGenerationPage } from "@/app/components/SyntheticGenerationPage";
 import { ModelPage } from "@/app/components/ModelPage";
+import { ProtocolPage } from "@/app/components/ProtocolPage";
 import { ContactPage } from "@/app/components/ContactPage";
 
 interface ApiSegment {
@@ -318,6 +319,8 @@ export default function App() {
       {currentPage === "dataset_synthetic" && (
         <SyntheticGenerationPage onBack={() => setCurrentPage("dataset")} />
       )}
+
+      {currentPage === "protocol" && <ProtocolPage />}
 
       {currentPage === "model" && <ModelPage onTryNow={handleTryNow} />}
 

@@ -1,0 +1,578 @@
+<!DOCTYPE html>
+
+<html class="light" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>The Precision Lab - Protocol Evaluation &amp; Decision Dashboard</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700;800&amp;family=Inter:wght@400;500;600&amp;family=Space+Grotesk:wght@400;500;700&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<style>
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+            vertical-align: middle;
+        }
+        body { font-family: 'Inter', sans-serif; }
+        h1, h2, h3, .font-headline { font-family: 'Manrope', sans-serif; }
+        .font-label { font-family: 'Space Grotesk', sans-serif; }
+        
+        /* Custom scrollbar for a cleaner academic look */
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #dbe4e7; border-radius: 10px; }
+    </style>
+<script id="tailwind-config">
+        tailwind.config = {
+          darkMode: "class",
+          theme: {
+            extend: {
+              colors: {
+                "background": "#f8f9fa",
+                "tertiary-container": "#8dedec",
+                "surface-container-high": "#e3e9ec",
+                "on-primary-container": "#00529a",
+                "surface-container": "#eaeff1",
+                "on-primary-fixed": "#003f7a",
+                "on-surface-variant": "#586064",
+                "tertiary-fixed-dim": "#7fdede",
+                "on-secondary-container": "#3a5659",
+                "on-secondary-fixed": "#274447",
+                "primary": "#1c5fa8",
+                "surface": "#f8f9fa",
+                "surface-tint": "#1c5fa8",
+                "secondary-fixed": "#c9e8ec",
+                "error-container": "#ff8b9a",
+                "primary-fixed-dim": "#bed6ff",
+                "surface-container-highest": "#dbe4e7",
+                "primary-fixed": "#d5e3ff",
+                "on-background": "#2b3437",
+                "tertiary-fixed": "#8dedec",
+                "surface-dim": "#d1dce0",
+                "inverse-primary": "#79b0ff",
+                "on-primary-fixed-variant": "#165ca5",
+                "on-secondary-fixed-variant": "#436063",
+                "primary-container": "#d5e3ff",
+                "on-tertiary-fixed": "#004343",
+                "on-tertiary-fixed-variant": "#006262",
+                "surface-container-lowest": "#ffffff",
+                "on-secondary": "#e8fdff",
+                "tertiary": "#006a6a",
+                "surface-variant": "#dbe4e7",
+                "inverse-surface": "#0c0f10",
+                "on-error-container": "#782232",
+                "primary-dim": "#00539b",
+                "surface-container-low": "#f1f4f6",
+                "outline-variant": "#abb3b7",
+                "on-primary": "#f6f7ff",
+                "tertiary-dim": "#005d5d",
+                "secondary": "#476467",
+                "on-surface": "#2b3437",
+                "secondary-fixed-dim": "#bbdadd",
+                "secondary-dim": "#3b585b",
+                "error-dim": "#4f0116",
+                "outline": "#737c7f",
+                "on-tertiary-container": "#005858",
+                "on-tertiary": "#e0fffe",
+                "secondary-container": "#c9e8ec",
+                "on-error": "#fff7f7",
+                "error": "#9e3f4e",
+                "surface-bright": "#f8f9fa",
+                "inverse-on-surface": "#9b9d9e"
+              },
+              fontFamily: {
+                "headline": ["Manrope"],
+                "body": ["Inter"],
+                "label": ["Space Grotesk"]
+              },
+              borderRadius: {"DEFAULT": "0.125rem", "lg": "0.25rem", "xl": "0.5rem", "full": "0.75rem"},
+            },
+          },
+        }
+    </script>
+</head>
+<body class="bg-background text-on-surface selection:bg-primary-container">
+<!-- SideNavBar (Shared Component) -->
+<aside class="fixed left-0 top-0 h-screen w-64 flex flex-col bg-slate-50 dark:bg-slate-900 z-50">
+<div class="p-6">
+<h1 class="text-xl font-bold tracking-tight text-slate-900 dark:text-slate-100 font-headline">The Precision Lab</h1>
+<p class="text-xs font-label text-slate-500 mt-1">VNToxic-Pipeline v1.0</p>
+</div>
+<nav class="flex-1 mt-4 space-y-1">
+<a class="flex items-center px-6 py-3 text-slate-500 hover:bg-slate-200/50 transition-colors group" href="#">
+<span class="material-symbols-outlined mr-3 text-xl" data-icon="database">database</span>
+<span class="font-medium">Raw Data</span>
+</a>
+<a class="flex items-center px-6 py-3 text-slate-500 hover:bg-slate-200/50 transition-colors group" href="#">
+<span class="material-symbols-outlined mr-3 text-xl" data-icon="steps">steps</span>
+<span class="font-medium">Preprocessing</span>
+</a>
+<a class="flex items-center px-6 py-3 text-slate-500 hover:bg-slate-200/50 transition-colors group" href="#">
+<span class="material-symbols-outlined mr-3 text-xl" data-icon="science">science</span>
+<span class="font-medium">Protocol Building</span>
+</a>
+<a class="flex items-center px-6 py-3 text-slate-500 hover:bg-slate-200/50 transition-colors group" href="#">
+<span class="material-symbols-outlined mr-3 text-xl" data-icon="model_training">model_training</span>
+<span class="font-medium">Training</span>
+</a>
+<a class="flex items-center px-6 py-3 text-slate-500 hover:bg-slate-200/50 transition-colors group" href="#">
+<span class="material-symbols-outlined mr-3 text-xl" data-icon="assessment">assessment</span>
+<span class="font-medium">Evaluation</span>
+</a>
+<!-- Active State: Decision -->
+<a class="flex items-center px-6 py-3 text-blue-600 dark:text-blue-400 font-bold border-r-2 border-blue-600 dark:border-blue-400 hover:bg-slate-200/50 transition-colors active:scale-95 transition-transform" href="#">
+<span class="material-symbols-outlined mr-3 text-xl" data-icon="gavel">gavel</span>
+<span class="font-medium">Decision</span>
+</a>
+</nav>
+<div class="p-6 border-t border-slate-100 mt-auto flex items-center space-x-3">
+<div class="w-8 h-8 rounded-full bg-primary-container flex items-center justify-center overflow-hidden">
+<img alt="Lab Technician Avatar" class="w-full h-full object-cover" data-alt="professional portrait of a laboratory technician in a clean white environment" src="https://lh3.googleusercontent.com/aida-public/AB6AXuCxA-Mv8xdfzi3zoYdGusk5f5so3uUPzf-EWSuD_i6CNStAzYcyPduxGp9bdBFdVrVMbSmaG-EhWWMIwj_9YDie8vrNwrDXNVMyRKCPyxmkMUwsXK5JEs-tFLHCQCbmJciDfubZx13QOErfvmgFtSdGQ4hxtjwmFid75LgPw_d1HovOndoLnzHHHB8Nm-Wuu3DYwf1UfbR8VrhRcZ7YaVNOHFi6Ag0tU6hXdPwrsWnwaYwap7GnhJ-zSpcoox7-n3gfRDH5RUGyoi73"/>
+</div>
+<div class="flex-1 overflow-hidden">
+<p class="text-sm font-bold truncate">Nguyen Van A</p>
+<p class="text-xs text-slate-500 truncate">Thesis Candidate</p>
+</div>
+</div>
+</aside>
+<!-- TopAppBar (Shared Component) -->
+<header class="fixed top-0 right-0 left-64 h-16 flex items-center justify-between px-8 z-40 bg-white/80 backdrop-blur-md shadow-sm">
+<div class="flex items-center space-x-6">
+<span class="text-lg font-extrabold text-slate-900 font-headline">Vietnamese Toxic Text Detection</span>
+<nav class="hidden md:flex space-x-4">
+<a class="text-slate-500 hover:text-blue-500 transition-colors font-label text-sm uppercase tracking-wide" href="#">Overview</a>
+<a class="text-slate-500 hover:text-blue-500 transition-colors font-label text-sm uppercase tracking-wide" href="#">Protocols</a>
+<a class="text-blue-600 border-b-2 border-blue-600 transition-colors font-label text-sm uppercase tracking-wide" href="#">Metrics</a>
+</nav>
+</div>
+<div class="flex items-center space-x-4">
+<div class="relative">
+<span class="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" data-icon="search">search</span>
+<input class="pl-10 pr-4 py-1.5 bg-surface-container rounded-full text-sm border-none focus:ring-2 focus:ring-blue-500/20 w-64" placeholder="Search metrics..." type="text"/>
+</div>
+<button class="text-slate-500 hover:text-blue-500"><span class="material-symbols-outlined" data-icon="notifications">notifications</span></button>
+<button class="text-slate-500 hover:text-blue-500"><span class="material-symbols-outlined" data-icon="settings">settings</span></button>
+</div>
+</header>
+<!-- Main Content Area -->
+<main class="ml-64 pt-24 px-8 pb-12 min-h-screen bg-surface">
+<!-- Header Section -->
+<section class="mb-10">
+<div class="max-w-4xl">
+<h2 class="text-3xl font-extrabold text-on-surface mb-2 tracking-tight">Protocol Evaluation &amp; Decision Dashboard</h2>
+<p class="text-on-surface-variant text-lg leading-relaxed">Compare ViCTSD/ViHSD protocols and choose the final thesis protocol for production deployment.</p>
+</div>
+<div class="flex flex-wrap gap-2 mt-6">
+<span class="px-3 py-1 bg-secondary-container text-on-secondary-container rounded-full text-xs font-label font-bold flex items-center space-x-1">
+<span class="material-symbols-outlined text-sm" data-icon="dataset">dataset</span>
+<span>ViCTSD</span>
+</span>
+<span class="px-3 py-1 bg-surface-container-high text-on-surface-variant rounded-full text-xs font-label flex items-center space-x-1">
+<span class="material-symbols-outlined text-sm" data-icon="dataset">dataset</span>
+<span>ViHSD</span>
+</span>
+<span class="px-3 py-1 bg-surface-container-high text-on-surface-variant rounded-full text-xs font-label flex items-center space-x-1">
+<span class="material-symbols-outlined text-sm" data-icon="warning">warning</span>
+<span>Toxicity</span>
+</span>
+<span class="px-3 py-1 bg-surface-container-high text-on-surface-variant rounded-full text-xs font-label flex items-center space-x-1">
+<span class="material-symbols-outlined text-sm" data-icon="terminal">terminal</span>
+<span>Preprocessing</span>
+</span>
+<span class="px-3 py-1 bg-surface-container-high text-on-surface-variant rounded-full text-xs font-label flex items-center space-x-1">
+<span class="material-symbols-outlined text-sm" data-icon="equalizer">equalizer</span>
+<span>Data Normalization</span>
+</span>
+<span class="px-3 py-1 bg-surface-container-high text-on-surface-variant rounded-full text-xs font-label flex items-center space-x-1">
+<span class="material-symbols-outlined text-sm" data-icon="add_box">add_box</span>
+<span>Data Augmentation</span>
+</span>
+</div>
+</section>
+<div class="grid grid-cols-12 gap-8 items-start">
+<!-- Left Column: 8/12 -->
+<div class="col-span-12 lg:col-span-8 space-y-8">
+<!-- Colab Import Panel (Simulated) -->
+<div class="bg-surface-container-lowest p-6 rounded-xl shadow-sm border border-outline-variant/15 relative overflow-hidden">
+<div class="absolute top-0 right-0 p-4">
+<span class="material-symbols-outlined text-slate-100 text-6xl rotate-12 select-none" data-icon="cloud_download">cloud_download</span>
+</div>
+<div class="flex items-center space-x-3 mb-6">
+<div class="w-10 h-10 bg-primary-container rounded-lg flex items-center justify-center text-primary">
+<span class="material-symbols-outlined" data-icon="folder_zip">folder_zip</span>
+</div>
+<h3 class="text-xl font-bold">Import artifacts from Colab <span class="text-sm font-normal text-on-surface-variant">(Simulated)</span></h3>
+</div>
+<div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+<div class="space-y-4">
+<div>
+<label class="block text-xs font-bold uppercase tracking-wider text-on-surface-variant mb-2 font-label">Google Drive Artifact URL</label>
+<div class="flex space-x-2">
+<input class="flex-1 px-4 py-2 bg-surface-container-low border-none rounded-lg text-sm focus:ring-2 focus:ring-primary/20" type="text" value="https://drive.google.com/drive/folders/1z9X-k9..."/>
+<button class="bg-primary hover:bg-primary-dim text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors flex items-center">
+<span class="material-symbols-outlined text-sm mr-2" data-icon="sync">sync</span> Validate
+                                    </button>
+</div>
+</div>
+<div class="flex gap-2">
+<button class="flex-1 py-2 border border-primary text-primary hover:bg-primary/5 rounded-lg text-sm font-bold transition-colors">Load sample artifacts</button>
+<button class="flex-1 py-2 bg-primary text-white rounded-lg text-sm font-bold shadow-md shadow-primary/20 transition-transform active:scale-95">Import and validate</button>
+</div>
+</div>
+<div class="bg-surface-container-low p-4 rounded-lg">
+<div class="flex items-center justify-between mb-3 pb-2 border-b border-outline-variant/15">
+<span class="text-xs font-bold font-label uppercase text-on-surface-variant">Artifact Manifest</span>
+<div class="flex space-x-1">
+<div class="w-2 h-2 rounded-full bg-green-500"></div>
+<div class="w-2 h-2 rounded-full bg-green-500"></div>
+<div class="w-2 h-2 rounded-full bg-green-500"></div>
+</div>
+</div>
+<ul class="space-y-2">
+<li class="flex items-center justify-between text-xs">
+<span class="flex items-center text-on-surface-variant"><span class="material-symbols-outlined text-sm mr-2 text-blue-500" data-icon="description">description</span> metrics_a.json</span>
+<span class="text-tertiary font-medium">Verified</span>
+</li>
+<li class="flex items-center justify-between text-xs">
+<span class="flex items-center text-on-surface-variant"><span class="material-symbols-outlined text-sm mr-2 text-blue-500" data-icon="description">description</span> metrics_b.json</span>
+<span class="text-tertiary font-medium">Verified</span>
+</li>
+<li class="flex items-center justify-between text-xs">
+<span class="flex items-center text-on-surface-variant"><span class="material-symbols-outlined text-sm mr-2 text-blue-500" data-icon="description">description</span> metrics_c.json</span>
+<span class="text-tertiary font-medium">Verified</span>
+</li>
+<li class="flex items-center justify-between text-xs">
+<span class="flex items-center text-on-surface-variant"><span class="material-symbols-outlined text-sm mr-2 text-blue-500" data-icon="lab_profile">lab_profile</span> victsd_v1_protocol_build_report.json</span>
+<span class="text-tertiary font-medium">Verified</span>
+</li>
+</ul>
+</div>
+</div>
+<div class="mt-6 flex flex-wrap gap-4 pt-4 border-t border-outline-variant/15">
+<div class="flex items-center space-x-2">
+<span class="material-symbols-outlined text-green-600" data-icon="check_circle" style="font-variation-settings: 'FILL' 1;">check_circle</span>
+<span class="text-xs font-bold text-on-surface">Artifacts loaded</span>
+</div>
+<div class="flex items-center space-x-2">
+<span class="material-symbols-outlined text-green-600" data-icon="check_circle" style="font-variation-settings: 'FILL' 1;">check_circle</span>
+<span class="text-xs font-bold text-on-surface">Schema valid</span>
+</div>
+<div class="flex items-center space-x-2">
+<span class="material-symbols-outlined text-green-600" data-icon="check_circle" style="font-variation-settings: 'FILL' 1;">check_circle</span>
+<span class="text-xs font-bold text-on-surface">Ready for scoring</span>
+</div>
+</div>
+</div>
+<!-- Weighted Decision Table -->
+<div class="bg-surface-container-low rounded-xl overflow-hidden shadow-sm">
+<div class="px-6 py-4 bg-white border-b border-outline-variant/15 flex items-center justify-between">
+<h3 class="font-bold flex items-center"><span class="material-symbols-outlined mr-2 text-primary" data-icon="table_chart">table_chart</span> Weighted Decision Matrix</h3>
+<span class="text-xs font-label bg-tertiary-container text-on-tertiary-container px-2 py-0.5 rounded">Calculated at 2:15 PM</span>
+</div>
+<div class="overflow-x-auto">
+<table class="w-full text-left border-collapse">
+<thead class="bg-surface-container-high/50 text-xs font-label uppercase text-on-surface-variant">
+<tr>
+<th class="px-6 py-4">Protocol</th>
+<th class="px-3 py-4 text-center">F1_toxic</th>
+<th class="px-3 py-4 text-center">Macro-F1</th>
+<th class="px-3 py-4 text-center">ECE ↓</th>
+<th class="px-3 py-4 text-center">Robustness</th>
+<th class="px-3 py-4 text-center">Cost/Lat</th>
+<th class="px-3 py-4 text-center font-bold text-on-surface">Score</th>
+<th class="px-6 py-4 text-right">Decision</th>
+</tr>
+</thead>
+<tbody class="text-sm">
+<!-- Row Protocol A -->
+<tr class="bg-white border-b border-outline-variant/10 hover:bg-white/60 transition-colors">
+<td class="px-6 py-4 flex items-center">
+<div class="w-6 h-6 rounded-full bg-slate-200 text-[10px] font-bold flex items-center justify-center mr-3">#2</div>
+<span class="font-semibold">Protocol A</span>
+</td>
+<td class="px-3 py-4 text-center font-label">0.842</td>
+<td class="px-3 py-4 text-center font-label">0.785</td>
+<td class="px-3 py-4 text-center font-label">0.054</td>
+<td class="px-3 py-4 text-center font-label text-orange-600">Med</td>
+<td class="px-3 py-4 text-center font-label">0.12s</td>
+<td class="px-3 py-4 text-center font-bold">82.4</td>
+<td class="px-6 py-4 text-right">
+<span class="text-xs font-bold text-on-surface-variant bg-surface-container-high px-2 py-1 rounded">Benchmark</span>
+</td>
+</tr>
+<!-- Row Protocol B (Winner) -->
+<tr class="bg-primary/5 border-b-2 border-primary ring-1 ring-primary/20 hover:bg-primary/10 transition-colors relative">
+<td class="px-6 py-4 flex items-center">
+<div class="w-6 h-6 rounded-full bg-primary text-white text-[10px] font-bold flex items-center justify-center mr-3 shadow-sm">#1</div>
+<span class="font-bold text-primary">Protocol B</span>
+<span class="ml-2 material-symbols-outlined text-primary text-base" data-icon="stars" style="font-variation-settings: 'FILL' 1;">stars</span>
+</td>
+<td class="px-3 py-4 text-center font-label font-bold text-primary">0.895</td>
+<td class="px-3 py-4 text-center font-label font-bold text-primary">0.831</td>
+<td class="px-3 py-4 text-center font-label">0.031</td>
+<td class="px-3 py-4 text-center font-label text-tertiary font-bold">High</td>
+<td class="px-3 py-4 text-center font-label">0.24s</td>
+<td class="px-3 py-4 text-center font-bold text-primary text-lg">91.8</td>
+<td class="px-6 py-4 text-right">
+<span class="text-xs font-bold text-white bg-primary px-3 py-1 rounded-full uppercase tracking-tight">Selected</span>
+</td>
+</tr>
+<!-- Row Protocol C -->
+<tr class="bg-white hover:bg-white/60 transition-colors">
+<td class="px-6 py-4 flex items-center">
+<div class="w-6 h-6 rounded-full bg-slate-200 text-[10px] font-bold flex items-center justify-center mr-3">#3</div>
+<span class="font-semibold">Protocol C</span>
+</td>
+<td class="px-3 py-4 text-center font-label">0.761</td>
+<td class="px-3 py-4 text-center font-label">0.712</td>
+<td class="px-3 py-4 text-center font-label text-tertiary">0.022</td>
+<td class="px-3 py-4 text-center font-label text-tertiary font-bold">Ultra</td>
+<td class="px-3 py-4 text-center font-label">0.68s</td>
+<td class="px-3 py-4 text-center font-bold">76.2</td>
+<td class="px-6 py-4 text-right">
+<span class="text-xs font-bold text-on-surface-variant bg-surface-container-high px-2 py-1 rounded">Robust Opt.</span>
+</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+<!-- Gating Rules Panel -->
+<div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+<div class="bg-white p-5 rounded-xl border border-outline-variant/15 flex flex-col h-full">
+<div class="flex items-center justify-between mb-4">
+<span class="material-symbols-outlined text-on-surface-variant" data-icon="leak_add">leak_add</span>
+<span class="px-2 py-1 bg-tertiary-container text-on-tertiary-container text-[10px] font-bold rounded uppercase">Gating Rule 01</span>
+</div>
+<h4 class="font-bold text-sm mb-1">Data Leakage Check</h4>
+<p class="text-xs text-on-surface-variant mb-4">Ensuring no overlap between train and test distributions.</p>
+<div class="space-y-2 mt-auto">
+<div class="flex items-center justify-between">
+<span class="text-[10px] font-bold uppercase font-label">Protocol A</span>
+<span class="text-[10px] px-2 py-0.5 bg-green-100 text-green-700 font-bold rounded">PASS</span>
+</div>
+<div class="flex items-center justify-between">
+<span class="text-[10px] font-bold uppercase font-label">Protocol B</span>
+<span class="text-[10px] px-2 py-0.5 bg-green-100 text-green-700 font-bold rounded">PASS</span>
+</div>
+<div class="flex flex-col">
+<div class="flex items-center justify-between">
+<span class="text-[10px] font-bold uppercase font-label">Protocol C</span>
+<span class="text-[10px] px-2 py-0.5 bg-error-container text-on-error-container font-bold rounded">FAIL</span>
+</div>
+<span class="text-[10px] text-error mt-1 italic">Leakage check required</span>
+</div>
+</div>
+</div>
+<div class="bg-white p-5 rounded-xl border border-outline-variant/15 flex flex-col h-full">
+<div class="flex items-center justify-between mb-4">
+<span class="material-symbols-outlined text-on-surface-variant" data-icon="history_edu">history_edu</span>
+<span class="px-2 py-1 bg-tertiary-container text-on-tertiary-container text-[10px] font-bold rounded uppercase">Gating Rule 02</span>
+</div>
+<h4 class="font-bold text-sm mb-1">Reproducibility</h4>
+<p class="text-xs text-on-surface-variant mb-4">Standard deviation across 5 seeds below 0.02 F1.</p>
+<div class="space-y-2 mt-auto">
+<div class="flex items-center justify-between">
+<span class="text-[10px] font-bold uppercase font-label">Protocol A</span>
+<span class="text-[10px] px-2 py-0.5 bg-green-100 text-green-700 font-bold rounded">PASS</span>
+</div>
+<div class="flex items-center justify-between">
+<span class="text-[10px] font-bold uppercase font-label">Protocol B</span>
+<span class="text-[10px] px-2 py-0.5 bg-green-100 text-green-700 font-bold rounded">PASS</span>
+</div>
+<div class="flex items-center justify-between">
+<span class="text-[10px] font-bold uppercase font-label">Protocol C</span>
+<span class="text-[10px] px-2 py-0.5 bg-green-100 text-green-700 font-bold rounded">PASS</span>
+</div>
+</div>
+</div>
+<div class="bg-white p-5 rounded-xl border border-outline-variant/15 flex flex-col h-full">
+<div class="flex items-center justify-between mb-4">
+<span class="material-symbols-outlined text-on-surface-variant" data-icon="rocket_launch">rocket_launch</span>
+<span class="px-2 py-1 bg-tertiary-container text-on-tertiary-container text-[10px] font-bold rounded uppercase">Gating Rule 03</span>
+</div>
+<h4 class="font-bold text-sm mb-1">Deploy Feasibility</h4>
+<p class="text-xs text-on-surface-variant mb-4">RAM footprint &lt; 8GB on inferencing server.</p>
+<div class="space-y-2 mt-auto">
+<div class="flex items-center justify-between">
+<span class="text-[10px] font-bold uppercase font-label">Protocol A</span>
+<span class="text-[10px] px-2 py-0.5 bg-green-100 text-green-700 font-bold rounded">PASS</span>
+</div>
+<div class="flex items-center justify-between">
+<span class="text-[10px] font-bold uppercase font-label">Protocol B</span>
+<span class="text-[10px] px-2 py-0.5 bg-green-100 text-green-700 font-bold rounded">PASS</span>
+</div>
+<div class="flex items-center justify-between">
+<span class="text-[10px] font-bold uppercase font-label">Protocol C</span>
+<span class="text-[10px] px-2 py-0.5 bg-green-100 text-green-700 font-bold rounded">PASS</span>
+</div>
+</div>
+</div>
+</div>
+</div>
+<!-- Right Column: Sidebar (4/12) -->
+<aside class="col-span-12 lg:col-span-4 space-y-8">
+<!-- Scoring Controls & Tie-break -->
+<div class="bg-surface-container-low p-6 rounded-xl border border-outline-variant/15">
+<div class="flex items-center justify-between mb-6">
+<h3 class="font-bold">Scoring Configuration</h3>
+<span class="material-symbols-outlined text-primary" data-icon="tune">tune</span>
+</div>
+<div class="space-y-6">
+<div class="space-y-2">
+<div class="flex justify-between items-center">
+<label class="text-xs font-bold text-on-surface font-label">F1_TOXIC WEIGHT</label>
+<span class="text-xs font-bold text-primary bg-primary/10 px-2 py-0.5 rounded">30%</span>
+</div>
+<input class="w-full h-1.5 bg-surface-variant rounded-lg appearance-none cursor-pointer accent-primary" type="range" value="30"/>
+</div>
+<div class="space-y-2">
+<div class="flex justify-between items-center">
+<label class="text-xs font-bold text-on-surface font-label">MACRO-F1 WEIGHT</label>
+<span class="text-xs font-bold text-primary bg-primary/10 px-2 py-0.5 rounded">20%</span>
+</div>
+<input class="w-full h-1.5 bg-surface-variant rounded-lg appearance-none cursor-pointer accent-primary" type="range" value="20"/>
+</div>
+<div class="space-y-2">
+<div class="flex justify-between items-center">
+<label class="text-xs font-bold text-on-surface font-label">CALIBRATION (ECE)</label>
+<span class="text-xs font-bold text-primary bg-primary/10 px-2 py-0.5 rounded">15%</span>
+</div>
+<input class="w-full h-1.5 bg-surface-variant rounded-lg appearance-none cursor-pointer accent-primary" type="range" value="15"/>
+</div>
+<div class="space-y-2">
+<div class="flex justify-between items-center">
+<label class="text-xs font-bold text-on-surface font-label">ROBUSTNESS</label>
+<span class="text-xs font-bold text-primary bg-primary/10 px-2 py-0.5 rounded">20%</span>
+</div>
+<input class="w-full h-1.5 bg-surface-variant rounded-lg appearance-none cursor-pointer accent-primary" type="range" value="20"/>
+</div>
+<div class="space-y-2">
+<div class="flex justify-between items-center">
+<label class="text-xs font-bold text-on-surface font-label">EFFICIENCY</label>
+<span class="text-xs font-bold text-primary bg-primary/10 px-2 py-0.5 rounded">15%</span>
+</div>
+<input class="w-full h-1.5 bg-surface-variant rounded-lg appearance-none cursor-pointer accent-primary" type="range" value="15"/>
+</div>
+</div>
+<div class="mt-8 pt-6 border-t border-outline-variant/20">
+<div class="flex items-center justify-between mb-4">
+<span class="text-sm font-semibold">Thesis Default Weights</span>
+<div class="relative inline-flex items-center cursor-pointer">
+<input checked="" class="sr-only peer" type="checkbox"/>
+<div class="w-9 h-5 bg-slate-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:bg-primary after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all"></div>
+</div>
+</div>
+<button class="w-full py-3 bg-primary text-white font-bold rounded-lg shadow-lg shadow-primary/20 hover:bg-primary-dim transition-all flex items-center justify-center space-x-2">
+<span class="material-symbols-outlined" data-icon="refresh">refresh</span>
+<span>Recalculate Winner</span>
+</button>
+</div>
+</div>
+<!-- Tie-break rule card -->
+<div class="bg-white p-6 rounded-xl border-l-4 border-l-tertiary shadow-sm">
+<div class="flex items-center space-x-3 mb-4">
+<span class="material-symbols-outlined text-tertiary" data-icon="account_tree">account_tree</span>
+<h4 class="font-bold text-sm">Tie-break Protocol</h4>
+</div>
+<p class="text-xs text-on-surface-variant mb-4 leading-relaxed">In the event of a weighted score within ±0.5 margin, the following priority hierarchy is automatically applied:</p>
+<div class="flex items-center justify-center space-x-2 text-[10px] font-bold font-label">
+<span class="px-2 py-1 bg-surface-container rounded">F1_TOXIC</span>
+<span class="material-symbols-outlined text-xs" data-icon="chevron_right">chevron_right</span>
+<span class="px-2 py-1 bg-surface-container rounded">MACRO-F1</span>
+<span class="material-symbols-outlined text-xs" data-icon="chevron_right">chevron_right</span>
+<span class="px-2 py-1 bg-surface-container rounded">ECE</span>
+</div>
+</div>
+<!-- Stats summary card -->
+<div class="bg-surface-container-highest p-6 rounded-xl border border-outline-variant/15 relative overflow-hidden group">
+<img alt="Training Visualisation" class="absolute inset-0 w-full h-full object-cover opacity-10 group-hover:opacity-20 transition-opacity" data-alt="a minimalist network graph representing neural connections with glowing teal nodes and thin white lines on a grey background" src="https://lh3.googleusercontent.com/aida-public/AB6AXuBTnd0eSucIQaCZbh_JDSJeKiQbOrJPRqGccakWe8IBlpltt68jx3tIY1T3FSf0sZaMvOcPofHKp3NQt4JwKJ5kwcH0vw3tH2MubRBrAV-g1vexzZK4X3qD9SreUjTI8WZzryEgVznO5TpUNuRkeTm8riKpHG_1iJHB75o1J62ij6yDwlShigNTOk0mak2hnaPpl6Yca4kUgUw0jq_LDDqQ9agVSOyaiv0e7-cZ4MjD9LjURbMmzaYE0B-U_2__etG9mpyQmlSxowwJ"/>
+<div class="relative z-10">
+<div class="flex items-center justify-between mb-6">
+<span class="text-xs font-bold font-label uppercase text-on-secondary-fixed-variant">System Status</span>
+<span class="flex items-center space-x-1">
+<span class="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>
+<span class="text-[10px] font-bold text-green-700">LIVE ENGINE</span>
+</span>
+</div>
+<div class="space-y-4">
+<div>
+<p class="text-[10px] font-bold font-label text-on-surface-variant">AVERAGE F1 (ALL TRIALS)</p>
+<p class="text-2xl font-extrabold font-headline">0.832</p>
+</div>
+<div>
+<p class="text-[10px] font-bold font-label text-on-surface-variant">TOTAL TOXIC SAMPLES</p>
+<p class="text-2xl font-extrabold font-headline">24,591</p>
+</div>
+</div>
+</div>
+</div>
+</aside>
+<!-- Bottom: Winner Summary Card -->
+<div class="col-span-12">
+<div class="bg-gradient-to-br from-primary to-primary-dim text-white p-8 rounded-2xl shadow-xl shadow-primary/25 relative overflow-hidden">
+<!-- Background abstract shape -->
+<div class="absolute -right-20 -bottom-20 w-80 h-80 bg-white/10 rounded-full blur-3xl"></div>
+<div class="relative z-10 flex flex-col md:flex-row items-center gap-8">
+<div class="w-24 h-24 bg-white/20 backdrop-blur-md rounded-2xl flex items-center justify-center border border-white/30 shadow-inner">
+<span class="material-symbols-outlined text-5xl" data-icon="verified" style="font-variation-settings: 'FILL' 1;">verified</span>
+</div>
+<div class="flex-1">
+<div class="flex items-center space-x-3 mb-2">
+<span class="px-2 py-0.5 bg-tertiary-container text-tertiary-dim text-[10px] font-bold rounded">THESIS SELECTION</span>
+<h3 class="text-2xl font-extrabold font-headline">Selected protocol: Protocol B</h3>
+</div>
+<p class="text-primary-fixed leading-relaxed mb-6 max-w-2xl">Based on the weighted analysis of 45 performance metrics across ViCTSD and ViHSD datasets, Protocol B demonstrates the most robust performance profile with exceptional recall on extreme toxicity cases.</p>
+<div class="grid grid-cols-1 md:grid-cols-2 gap-8">
+<div>
+<h4 class="text-sm font-bold uppercase tracking-widest text-white/70 mb-3 flex items-center">
+<span class="material-symbols-outlined text-sm mr-2" data-icon="lightbulb">lightbulb</span> Selection Rationale
+                                    </h4>
+<ul class="space-y-2 text-sm text-primary-fixed">
+<li class="flex items-start">
+<span class="material-symbols-outlined text-xs mr-2 mt-1" data-icon="check">check</span>
+<span>Highest F1-Score on high-severity toxic labels (0.895)</span>
+</li>
+<li class="flex items-start">
+<span class="material-symbols-outlined text-xs mr-2 mt-1" data-icon="check">check</span>
+<span>Superior calibration (ECE: 0.031) reducing overconfidence in errors</span>
+</li>
+<li class="flex items-start">
+<span class="material-symbols-outlined text-xs mr-2 mt-1" data-icon="check">check</span>
+<span>Maintains 85% accuracy under adversarial data augmentation</span>
+</li>
+</ul>
+</div>
+<div>
+<h4 class="text-sm font-bold uppercase tracking-widest text-white/70 mb-3 flex items-center">
+<span class="material-symbols-outlined text-sm mr-2" data-icon="assignment_turned_in">assignment_turned_in</span> Next Steps
+                                    </h4>
+<ul class="space-y-2 text-sm text-primary-fixed">
+<li class="flex items-start">
+<span class="material-symbols-outlined text-xs mr-2 mt-1" data-icon="arrow_forward">arrow_forward</span>
+<span>Export weights to production ONNX format for deployment.</span>
+</li>
+<li class="flex items-start">
+<span class="material-symbols-outlined text-xs mr-2 mt-1" data-icon="arrow_forward">arrow_forward</span>
+<span>Finalize "Discussion" chapter with Protocol B's error analysis.</span>
+</li>
+</ul>
+</div>
+</div>
+</div>
+<div class="flex flex-col gap-3">
+<button class="bg-white text-primary hover:bg-primary-fixed font-bold py-3 px-8 rounded-xl transition-all shadow-lg flex items-center justify-center">
+<span class="material-symbols-outlined mr-2" data-icon="download">download</span>
+                                Export Protocol
+                            </button>
+<button class="bg-white/10 hover:bg-white/20 border border-white/30 text-white font-bold py-3 px-8 rounded-xl transition-all flex items-center justify-center">
+<span class="material-symbols-outlined mr-2" data-icon="share">share</span>
+                                Share Results
+                            </button>
+</div>
+</div>
+</div>
+</div>
+</div>
+</main>
+</body></html>

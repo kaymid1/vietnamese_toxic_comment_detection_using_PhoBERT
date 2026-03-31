@@ -34,6 +34,8 @@ EXPERIMENT_REGISTRY_PATH = BASE_DIR / "experiments" / "registry.json"
 EVAL_POLICY_PATH = BASE_DIR / "config" / "eval_policy.json"
 ERROR_ANALYSIS_PATH = BASE_DIR / "data" / "processed" / "error_analysis.json"
 HARD_CASES_PATH = BASE_DIR / "data" / "processed" / "hard_case_candidates.json"
+PROTOCOL_BUILD_REPORT_PATH = BASE_DIR / "data" / "victsd" / "victsd_v1_protocol_build_report.json"
+PROTOCOL_METRICS_ROOT = BASE_DIR / "viettoxic_outputs"
 
 MODEL_TYPES = {
     "phobert": {
@@ -2964,3 +2966,83 @@ def eval_errors() -> Dict[str, Any]:
 def eval_hard_cases() -> Dict[str, Any]:
     rows = load_json_file(HARD_CASES_PATH, [])
     return {"items": rows if isinstance(rows, list) else [], "last_updated": file_last_updated(HARD_CASES_PATH)}
+
+
+@app.get("/api/protocols/summary")
+def protocol_summary() -> Dict[str, Any]:
+    report = load_json_file(PROTOCOL_BUILD_REPORT_PATH, {})
+    report_protocols = report.get("protocols") if isinstance(report, dict) else {}
+
+    warnings: List[str] = []
+    protocols: List[Dict[str, Any]] = []
+
+    for protocol_id in ["a", "b", "c"]:
+        report_entry = report_protocols.get(protocol_id, {}) if isinstance(report_protocols, dict) else {}
+        stats = report_entry.get("stats", {}) if isinstance(report_entry, dict) else {}
+        overlap = report_entry.get("overlap_exact", {}) if isinstance(report_entry, dict) else {}
+
+        metrics_path = (
+            PROTOCOL_METRICS_ROOT
+            / f"protocol_{protocol_id}"
+            / "results"
+            / "metrics.json"
+        )
+        metrics_json = load_json_file(metrics_path, {})
+        final_metrics = metrics_json.get("final_test_rich", {}) if isinstance(metrics_json, dict) else {}
+
+        available = bool(final_metrics)
+        if not available:
+            warnings.append(f"Missing or invalid metrics for protocol_{protocol_id}: {metrics_path}")
+
+        protocols.append(
+            {
+                "id": protocol_id,
+                "name": f"Protocol {protocol_id.upper()}",
+                "available": available,
+                "metrics": {
+                    "macro_f1": final_metrics.get("macro_f1"),
+                    "f1_toxic": final_metrics.get("f1_toxic"),
+                    "accuracy": final_metrics.get("accuracy"),
+                    "ece": final_metrics.get("ece"),
+                    "brier": final_metrics.get("brier"),
+                    "threshold": final_metrics.get("threshold"),
+                    "support_clean": final_metrics.get("support_clean"),
+                    "support_toxic": final_metrics.get("support_toxic"),
+                },
+                "stats": {
+                    "train": stats.get("train") if isinstance(stats, dict) else None,
+                    "validation": stats.get("validation") if isinstance(stats, dict) else None,
+                    "test": stats.get("test") if isinstance(stats, dict) else None,
+                },
+                "overlap_exact": overlap if isinstance(overlap, dict) else {},
+                "metrics_last_updated": file_last_updated(metrics_path),
+            }
+        )
+
+    best_protocol = None
+    scored = [
+        p for p in protocols
+        if p.get("available") and isinstance((p.get("metrics") or {}).get("f1_toxic"), (int, float))
+    ]
+    if scored:
+        best_protocol = max(
+            scored,
+            key=lambda p: (
+                (p.get("metrics") or {}).get("f1_toxic", float("-inf")),
+                (p.get("metrics") or {}).get("macro_f1", float("-inf")),
+            ),
+        ).get("id")
+
+    if isinstance(report, dict):
+        report_warnings = report.get("warnings")
+        if isinstance(report_warnings, list):
+            warnings.extend(str(w) for w in report_warnings)
+
+    return {
+        "dataset_version": (report.get("config") or {}).get("dataset_prefix") if isinstance(report, dict) else None,
+        "build_report_last_updated": file_last_updated(PROTOCOL_BUILD_REPORT_PATH),
+        "protocols": protocols,
+        "winner": best_protocol,
+        "warnings": warnings,
+        "source_note": "Source: viettoxic_outputs/protocol_{a,b,c}/results/metrics.json (final_test_rich), run date 2026-03-31",
+    }

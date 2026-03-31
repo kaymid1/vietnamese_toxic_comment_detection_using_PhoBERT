@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+
+<html class="light" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>Decision &amp; Winner | The Precision Lab</title>
+<!-- Fonts -->
+<link href="https://fonts.googleapis.com" rel="preconnect"/>
+<link crossorigin="" href="https://fonts.gstatic.com" rel="preconnect"/>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=Manrope:wght@600;700;800&amp;family=Space+Grotesk:wght@500;700&amp;display=swap" rel="stylesheet"/>
+<!-- Icons -->
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<script id="tailwind-config">
+      tailwind.config = {
+        darkMode: "class",
+        theme: {
+          extend: {
+            colors: {
+              "secondary-fixed": "#c9e8ec",
+              "on-primary-fixed": "#003f7a",
+              "error-container": "#ff8b9a",
+              "inverse-primary": "#79b0ff",
+              "surface-bright": "#f8f9fa",
+              "surface-variant": "#dbe4e7",
+              "surface-tint": "#1c5fa8",
+              "primary-fixed-dim": "#bed6ff",
+              "tertiary": "#006a6a",
+              "tertiary-fixed-dim": "#7fdede",
+              "on-surface-variant": "#586064",
+              "surface-container": "#eaeff1",
+              "surface-container-high": "#e3e9ec",
+              "surface-container-highest": "#dbe4e7",
+              "on-primary-fixed-variant": "#165ca5",
+              "secondary-dim": "#3b585b",
+              "on-secondary-fixed-variant": "#436063",
+              "error": "#9e3f4e",
+              "on-secondary-fixed": "#274447",
+              "on-primary": "#f6f7ff",
+              "on-tertiary-fixed-variant": "#006262",
+              "on-error-container": "#782232",
+              "background": "#f8f9fa",
+              "surface-dim": "#d1dce0",
+              "primary-fixed": "#d5e3ff",
+              "surface": "#f8f9fa",
+              "tertiary-dim": "#005d5d",
+              "surface-container-low": "#f1f4f6",
+              "outline-variant": "#abb3b7",
+              "on-surface": "#2b3437",
+              "inverse-surface": "#0c0f10",
+              "on-error": "#fff7f7",
+              "tertiary-container": "#8dedec",
+              "primary-container": "#d5e3ff",
+              "on-tertiary-fixed": "#004343",
+              "secondary": "#476467",
+              "error-dim": "#4f0116",
+              "on-tertiary": "#e0fffe",
+              "tertiary-fixed": "#8dedec",
+              "secondary-container": "#c9e8ec",
+              "on-background": "#2b3437",
+              "primary": "#1c5fa8",
+              "on-primary-container": "#00529a",
+              "secondary-fixed-dim": "#bbdadd",
+              "inverse-on-surface": "#9b9d9e",
+              "on-secondary-container": "#3a5659",
+              "on-tertiary-container": "#005858",
+              "primary-dim": "#00539b",
+              "on-secondary": "#e8fdff",
+              "surface-container-lowest": "#ffffff",
+              "outline": "#737c7f"
+            },
+            fontFamily: {
+              "headline": ["Manrope"],
+              "body": ["Inter"],
+              "label": ["Space Grotesk"]
+            },
+            borderRadius: {"DEFAULT": "0.125rem", "lg": "0.25rem", "xl": "0.5rem", "full": "0.75rem"},
+          },
+        },
+      }
+    </script>
+<style>
+      .material-symbols-outlined {
+        font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+      }
+      .glass-header {
+        backdrop-filter: blur(12px);
+      }
+      body {
+        font-family: 'Inter', sans-serif;
+        color: #2b3437;
+      }
+    </style>
+</head>
+<body class="bg-surface text-on-surface">
+<!-- TopAppBar -->
+<header class="bg-white/80 dark:bg-slate-900/80 backdrop-blur-md fixed top-0 w-full z-50 flex items-center justify-between px-8 h-16 w-full shadow-sm dark:shadow-none no-border bg-surface-container-low">
+<div class="flex items-center gap-8">
+<span class="font-headline text-xl font-bold tracking-tighter text-slate-900 dark:text-slate-100">The Precision Lab</span>
+<nav class="hidden md:flex gap-6 items-center h-full">
+<a class="font-manrope text-sm font-semibold tracking-tight text-slate-500 dark:text-slate-400 hover:text-blue-600 dark:hover:text-blue-400 transition-colors opacity-90 active:scale-95 duration-200" href="#">Project Overview</a>
+<a class="font-manrope text-sm font-semibold tracking-tight text-slate-500 dark:text-slate-400 hover:text-blue-600 dark:hover:text-blue-400 transition-colors opacity-90 active:scale-95 duration-200" href="#">Protocol Library</a>
+<a class="font-manrope text-sm font-semibold tracking-tight text-slate-500 dark:text-slate-400 hover:text-blue-600 dark:hover:text-blue-400 transition-colors opacity-90 active:scale-95 duration-200" href="#">Archive</a>
+</nav>
+</div>
+<div class="flex items-center gap-4">
+<button class="material-symbols-outlined text-on-surface-variant hover:text-primary transition-colors">notifications</button>
+<button class="material-symbols-outlined text-on-surface-variant hover:text-primary transition-colors">settings</button>
+<div class="w-8 h-8 rounded-full overflow-hidden bg-surface-container-highest border border-outline-variant/20">
+<img alt="Researcher Profile" class="w-full h-full object-cover" data-alt="professional portrait of a male researcher in a modern laboratory environment with neutral lighting" src="https://lh3.googleusercontent.com/aida-public/AB6AXuDdMvjQYhwd9nJfLz6-F-JpWrnrlC7aOqG2fKcim-KG-DaGfqhkTqvV_1lMws8JXJ-VtvGYRNPk2DZdd6v9NT-q_7jP8jgCvyJ2zrvYR_2mcTC4e7sjnSVD2yGuDGeji6aO3q-MBvXfhQre7JpDvn7K-aF8vH_swndK98B2Vw8Newt447ld4pfr5SXXkUGQ5HcAOG2fjkGgV9yg4Rx3LdxozZ0GbQzMxn3KlmdhDtvbdc8GnWxAMkmPMdQ8_X2-zfus5VzHhN_MIZ2Y"/>
+</div>
+</div>
+</header>
+<!-- SideNavBar -->
+<aside class="fixed left-0 h-full w-64 pt-20 border-r-0 bg-slate-50 dark:bg-slate-950 bg-slate-100 dark:bg-slate-900 flat no-shadows flex flex-col gap-2 p-4">
+<div class="px-4 py-2 mb-6">
+<h3 class="font-headline text-lg font-black text-slate-900 dark:text-slate-100 uppercase tracking-tight">Active Pipeline</h3>
+<p class="font-label text-[10px] text-slate-500 dark:text-slate-400 tracking-widest font-bold">v2.4.0-Alpha</p>
+</div>
+<nav class="flex flex-col gap-1">
+<a class="flex items-center gap-3 px-4 py-3 font-inter text-xs uppercase tracking-widest font-bold text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-200/50 dark:hover:bg-slate-800/50 transition-all duration-300 ease-in-out" href="#">
+<span class="material-symbols-outlined text-sm" data-icon="database">database</span>
+                Data Source
+            </a>
+<a class="flex items-center gap-3 px-4 py-3 font-inter text-xs uppercase tracking-widest font-bold text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-200/50 dark:hover:bg-slate-800/50 transition-all duration-300 ease-in-out" href="#">
+<span class="material-symbols-outlined text-sm" data-icon="terminal">terminal</span>
+                Preprocessing
+            </a>
+<a class="flex items-center gap-3 px-4 py-3 font-inter text-xs uppercase tracking-widest font-bold text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-200/50 dark:hover:bg-slate-800/50 transition-all duration-300 ease-in-out" href="#">
+<span class="material-symbols-outlined text-sm" data-icon="analytics">analytics</span>
+                Model Evaluation
+            </a>
+<a class="flex items-center gap-3 px-4 py-3 font-inter text-xs uppercase tracking-widest font-bold bg-white dark:bg-slate-800 text-blue-600 dark:text-blue-400 shadow-sm rounded-l-xl ml-4 transition-all duration-300 ease-in-out" href="#">
+<span class="material-symbols-outlined text-sm" data-icon="gavel">gavel</span>
+                Final Decision
+            </a>
+</nav>
+<div class="mt-auto pt-6 border-t border-outline-variant/10">
+<button class="w-full bg-gradient-to-r from-primary to-on-primary-fixed-variant text-white py-3 rounded-lg font-headline text-sm font-bold shadow-md hover:shadow-lg transition-all active:scale-[0.98] mb-4">
+                Run Pipeline
+            </button>
+<div class="flex flex-col gap-1">
+<a class="flex items-center gap-3 px-4 py-2 font-inter text-xs uppercase tracking-widest font-bold text-slate-400 hover:text-slate-200 transition-colors" href="#">
+<span class="material-symbols-outlined text-sm" data-icon="description">description</span>
+                    Documentation
+                </a>
+<a class="flex items-center gap-3 px-4 py-2 font-inter text-xs uppercase tracking-widest font-bold text-slate-400 hover:text-slate-200 transition-colors" href="#">
+<span class="material-symbols-outlined text-sm" data-icon="help">help</span>
+                    Support
+                </a>
+</div>
+</div>
+</aside>
+<!-- Main Content Canvas -->
+<main class="ml-64 pt-24 px-10 pb-16 bg-surface min-h-screen">
+<div class="max-w-7xl mx-auto space-y-12">
+<!-- Page Header -->
+<section class="flex flex-col md:flex-row md:items-end justify-between gap-6">
+<div>
+<span class="font-label text-xs font-bold uppercase tracking-widest text-primary mb-2 block">Stage 04: Synthesis &amp; Selection</span>
+<h1 class="font-headline text-4xl font-extrabold tracking-tight text-on-surface">Decision Synthesis &amp; Winner Selection</h1>
+<p class="font-body text-on-surface-variant mt-2 max-w-2xl">Final comparative analysis for Vietnamese toxic text detection. This synthesis aggregates performance, stability, and calibration metrics into a final deployment decision.</p>
+</div>
+<div class="flex gap-3">
+<button class="px-6 py-2 rounded-full border border-outline-variant/30 font-headline text-sm font-bold text-on-surface-variant bg-surface hover:bg-surface-container transition-colors">Export Report</button>
+<button class="px-6 py-2 rounded-full bg-tertiary text-on-tertiary font-headline text-sm font-bold shadow-sm hover:shadow-md transition-all">Approve Winner</button>
+</div>
+</section>
+<!-- Winner Highlight & Score Overview -->
+<div class="grid grid-cols-1 lg:grid-cols-12 gap-8 items-stretch">
+<!-- Winner Card -->
+<div class="lg:col-span-8 relative overflow-hidden bg-surface-container-lowest rounded-xl shadow-sm flex flex-col md:flex-row">
+<!-- Status Gradient Accent -->
+<div class="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-tertiary to-primary"></div>
+<div class="p-8 flex-1">
+<div class="flex items-center gap-3 mb-4">
+<span class="material-symbols-outlined text-tertiary text-3xl" style="font-variation-settings: 'FILL' 1;">workspace_premium</span>
+<h2 class="font-headline text-2xl font-bold">Protocol C Identified as Winner</h2>
+</div>
+<p class="font-body text-on-surface-variant leading-relaxed text-sm mb-6">
+                            After extensive seed testing and calibration across five Vietnamese social media datasets, **Protocol C** (Vi-BERT-Robust-Alpha) demonstrates the highest Pareto efficiency. While Protocol B marginally leads in raw F1, Protocol C maintains superior calibration (ECE &lt; 0.04) and demonstrates significant robustness against adversarial "tone-shifting" in colloquial Vietnamese.
+                        </p>
+<div class="grid grid-cols-3 gap-6">
+<div class="space-y-1">
+<span class="font-label text-[10px] text-outline uppercase tracking-wider block">Decision Index</span>
+<span class="font-headline text-xl font-bold text-on-surface">94.8<span class="text-sm font-normal text-on-surface-variant">/100</span></span>
+</div>
+<div class="space-y-1">
+<span class="font-label text-[10px] text-outline uppercase tracking-wider block">Model Latency</span>
+<span class="font-headline text-xl font-bold text-on-surface">12ms</span>
+</div>
+<div class="space-y-1">
+<span class="font-label text-[10px] text-outline uppercase tracking-wider block">Stability Rank</span>
+<span class="font-headline text-xl font-bold text-tertiary">Platinum</span>
+</div>
+</div>
+</div>
+<div class="w-full md:w-64 bg-surface-container-low p-8 flex flex-col justify-center items-center border-l border-outline-variant/10">
+<div class="w-32 h-32 rounded-full border-8 border-tertiary-container/30 flex items-center justify-center relative">
+<svg class="absolute inset-0 w-full h-full transform -rotate-90">
+<circle class="text-tertiary" cx="64" cy="64" fill="none" r="56" stroke="currentColor" stroke-dasharray="351.85" stroke-dashoffset="17.59" stroke-width="8"></circle>
+</svg>
+<span class="font-headline text-3xl font-extrabold text-on-surface">95%</span>
+</div>
+<span class="font-label text-xs font-bold text-on-surface-variant mt-4 tracking-widest uppercase">Confidence Score</span>
+</div>
+</div>
+<!-- Gating Rules Sidebar -->
+<div class="lg:col-span-4 bg-surface-container-low rounded-xl p-8 space-y-6">
+<h3 class="font-headline text-lg font-bold">Gating Safeguards</h3>
+<div class="space-y-4">
+<div class="flex items-start gap-4 p-3 bg-surface-container-lowest rounded-lg">
+<span class="material-symbols-outlined text-tertiary mt-1" style="font-variation-settings: 'FILL' 1;">check_circle</span>
+<div>
+<h4 class="font-headline text-xs font-bold uppercase tracking-tight">Data Leakage</h4>
+<p class="font-body text-xs text-on-surface-variant">Cross-contamination scan passed. No overlap between VHate &amp; ViHSD splits.</p>
+</div>
+</div>
+<div class="flex items-start gap-4 p-3 bg-surface-container-lowest rounded-lg">
+<span class="material-symbols-outlined text-tertiary mt-1" style="font-variation-settings: 'FILL' 1;">check_circle</span>
+<div>
+<h4 class="font-headline text-xs font-bold uppercase tracking-tight">Reproducibility</h4>
+<p class="font-body text-xs text-on-surface-variant">Confirmed. Seed stability across 10 iterations within 0.2% variance.</p>
+</div>
+</div>
+<div class="flex items-start gap-4 p-3 bg-surface-container-lowest rounded-lg border-2 border-primary/20">
+<span class="material-symbols-outlined text-primary mt-1" style="font-variation-settings: 'FILL' 1;">pending</span>
+<div>
+<h4 class="font-headline text-xs font-bold uppercase tracking-tight">Deploy Feasibility</h4>
+<p class="font-body text-xs text-on-surface-variant">Under review. Inference profile fits within k8s horizontal scaling constraints.</p>
+</div>
+</div>
+</div>
+</div>
+</div>
+<!-- Weighted Scoring Table -->
+<section class="space-y-6">
+<div class="flex items-center justify-between">
+<h3 class="font-headline text-xl font-bold">Multivariate Comparative Matrix</h3>
+<div class="flex gap-2">
+<span class="px-3 py-1 bg-surface-container-high rounded-full font-label text-[10px] text-on-surface-variant">Normalization: Min-Max</span>
+<span class="px-3 py-1 bg-secondary-container rounded-full font-label text-[10px] text-on-secondary-container">Weights: Thesis Standard v1.2</span>
+</div>
+</div>
+<div class="overflow-hidden bg-surface-container-lowest rounded-xl shadow-sm">
+<table class="w-full text-left border-collapse">
+<thead>
+<tr class="bg-surface-container-low border-b border-outline-variant/10">
+<th class="p-6 font-headline text-xs font-bold uppercase tracking-widest text-on-surface-variant">Evaluation Criteria</th>
+<th class="p-6 font-headline text-xs font-bold uppercase tracking-widest text-on-surface-variant">Weight</th>
+<th class="p-6 font-headline text-xs font-bold uppercase tracking-widest text-on-surface-variant">Protocol A</th>
+<th class="p-6 font-headline text-xs font-bold uppercase tracking-widest text-on-surface-variant">Protocol B</th>
+<th class="p-6 font-headline text-xs font-bold uppercase tracking-widest text-primary">Protocol C (Winner)</th>
+</tr>
+</thead>
+<tbody class="divide-y divide-surface-container-low">
+<!-- Row 1 -->
+<tr class="hover:bg-surface-container-low transition-colors">
+<td class="p-6 font-body font-semibold text-sm">F1-Toxic <span class="block font-label text-[10px] font-normal text-outline mt-1 uppercase">Primary detection accuracy</span></td>
+<td class="p-6 font-label text-sm text-on-surface-variant">30%</td>
+<td class="p-6 font-label text-sm">0.842</td>
+<td class="p-6 font-label text-sm font-bold text-primary">0.881</td>
+<td class="p-6 font-label text-sm font-bold bg-primary-container/20">0.876</td>
+</tr>
+<!-- Row 2 -->
+<tr class="bg-surface-container-low/30 hover:bg-surface-container-low transition-colors">
+<td class="p-6 font-body font-semibold text-sm">Macro-F1 <span class="block font-label text-[10px] font-normal text-outline mt-1 uppercase">Balance across label space</span></td>
+<td class="p-6 font-label text-sm text-on-surface-variant">15%</td>
+<td class="p-6 font-label text-sm">0.791</td>
+<td class="p-6 font-label text-sm">0.812</td>
+<td class="p-6 font-label text-sm font-bold bg-primary-container/20">0.834</td>
+</tr>
+<!-- Row 3 -->
+<tr class="hover:bg-surface-container-low transition-colors">
+<td class="p-6 font-body font-semibold text-sm">Calibration (ECE/Brier) <span class="block font-label text-[10px] font-normal text-outline mt-1 uppercase">Probabilistic reliability</span></td>
+<td class="p-6 font-label text-sm text-on-surface-variant">15%</td>
+<td class="p-6 font-label text-sm">0.124</td>
+<td class="p-6 font-label text-sm text-error">0.142</td>
+<td class="p-6 font-label text-sm font-bold text-tertiary bg-primary-container/20">0.038</td>
+</tr>
+<!-- Row 4 -->
+<tr class="bg-surface-container-low/30 hover:bg-surface-container-low transition-colors">
+<td class="p-6 font-body font-semibold text-sm">Robustness <span class="block font-label text-[10px] font-normal text-outline mt-1 uppercase">Response to adversarial perturbations</span></td>
+<td class="p-6 font-label text-sm text-on-surface-variant">15%</td>
+<td class="p-6 font-label text-sm">62.4%</td>
+<td class="p-6 font-label text-sm">58.1%</td>
+<td class="p-6 font-label text-sm font-bold bg-primary-container/20">78.5%</td>
+</tr>
+<!-- Row 5 -->
+<tr class="hover:bg-surface-container-low transition-colors">
+<td class="p-6 font-body font-semibold text-sm">Stability (Seed Variance) <span class="block font-label text-[10px] font-normal text-outline mt-1 uppercase">Reliability across runs</span></td>
+<td class="p-6 font-label text-sm text-on-surface-variant">15%</td>
+<td class="p-6 font-label text-sm">±0.4%</td>
+<td class="p-6 font-label text-sm">±1.2%</td>
+<td class="p-6 font-label text-sm font-bold bg-primary-container/20">±0.1%</td>
+</tr>
+<!-- Row 6 -->
+<tr class="bg-surface-container-low/30 hover:bg-surface-container-low transition-colors">
+<td class="p-6 font-body font-semibold text-sm">Practicality <span class="block font-label text-[10px] font-normal text-outline mt-1 uppercase">Latency &amp; Token Cost</span></td>
+<td class="p-6 font-label text-sm text-on-surface-variant">10%</td>
+<td class="p-6 font-label text-sm">High</td>
+<td class="p-6 font-label text-sm">Med</td>
+<td class="p-6 font-label text-sm font-bold bg-primary-container/20">Optimal</td>
+</tr>
+</tbody>
+<tfoot>
+<tr class="bg-surface-container-highest/50">
+<td class="p-8 font-headline text-base font-bold text-on-surface" colspan="2">Final Weighted Aggregate</td>
+<td class="p-8">
+<div class="font-headline text-2xl font-extrabold text-on-surface-variant">74.2</div>
+</td>
+<td class="p-8">
+<div class="font-headline text-2xl font-extrabold text-on-surface-variant">71.8</div>
+</td>
+<td class="p-8 bg-primary-container/30">
+<div class="flex items-center gap-2">
+<div class="font-headline text-3xl font-black text-primary">94.8</div>
+<span class="material-symbols-outlined text-primary" style="font-variation-settings: 'FILL' 1;">trending_up</span>
+</div>
+</td>
+</tr>
+</tfoot>
+</table>
+</div>
+</section>
+<!-- Bottom Narrative Grid -->
+<section class="grid grid-cols-1 md:grid-cols-2 gap-8">
+<div class="bg-surface-container rounded-xl p-8 border border-outline-variant/10">
+<h4 class="font-headline text-sm font-bold uppercase tracking-widest text-on-surface-variant mb-4">Strategic Trade-offs</h4>
+<p class="font-body text-sm leading-relaxed text-on-surface-variant">
+                        While **Protocol B** achieved the highest peak F1 score on the validation set, its poor calibration and high variance across random seeds suggested an over-fitting to specific syntactic structures of the ViHSD dataset. **Protocol C** was selected despite a 0.5% lower F1 because of its significantly more robust handling of tone-marked sarcasm and its production-ready latency profile of &lt;15ms per inference call.
+                    </p>
+</div>
+<div class="bg-surface-container rounded-xl p-8 border border-outline-variant/10">
+<h4 class="font-headline text-sm font-bold uppercase tracking-widest text-on-surface-variant mb-4">Implementation Path</h4>
+<div class="flex items-center gap-4">
+<img alt="Circuit Detail" class="w-24 h-24 rounded-lg object-cover" data-alt="close-up of a high-tech microprocessor and blue glowing circuit patterns on a sleek dark surface" src="https://lh3.googleusercontent.com/aida-public/AB6AXuDCY-VwSgx8GyeFI7ZTu-ngoiBSpUeXpm-5Fzdb4nmPHvBa2jhD_T1eQXwjRy7_ZEcvgNUGqcw6M65rgJ7XBaChKRpMIwtsSxVuTxlr07fA4zZ6H8hdwhq3nb9Z0MdKDGC5ztJhn23aM2Q4Jo6425zDQwaZYtKsbXVzyzks4rjBpBsZyMzwMJX9V7W4vH4siks89l7A6rxwp8CRacHHCMMQhwM9AfZpfcQu2VuCnmNg8jIWkzSLzOj5M5khSrYm5ivRS6stC3OedpP2"/>
+<ul class="space-y-2 flex-1">
+<li class="flex items-center gap-2 font-body text-xs font-medium">
+<span class="w-1.5 h-1.5 rounded-full bg-primary"></span>
+                                ONNX quantization for CPU deployment
+                            </li>
+<li class="flex items-center gap-2 font-body text-xs font-medium">
+<span class="w-1.5 h-1.5 rounded-full bg-primary"></span>
+                                Integration with Docker monitoring stack
+                            </li>
+<li class="flex items-center gap-2 font-body text-xs font-medium text-outline">
+<span class="w-1.5 h-1.5 rounded-full bg-outline-variant"></span>
+                                Final A/B testing in production shadow mode
+                            </li>
+</ul>
+</div>
+</div>
+</section>
+</div>
+</main>
+<!-- Contextual FAB -->
+<button class="fixed bottom-8 right-8 bg-primary text-on-primary w-14 h-14 rounded-full shadow-lg flex items-center justify-center hover:scale-110 active:scale-95 transition-all z-50">
+<span class="material-symbols-outlined">print</span>
+</button>
+</body></html>

@@ -10,6 +10,7 @@ export function Navigation({ currentPage, onNavigate }: NavigationProps) {
     { name: "Home", id: "home" },
     { name: "Results", id: "results" },
     { name: "Dataset", id: "dataset" },
+    { name: "Protocol", id: "protocol" },
     { name: "Model & Performance", id: "model" },
     { name: "Contact", id: "contact" },
   ];

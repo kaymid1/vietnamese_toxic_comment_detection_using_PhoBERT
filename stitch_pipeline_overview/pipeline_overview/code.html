@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+
+<html class="light" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>The Precision Lab - VNToxic-Pipeline</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700;800&amp;family=Inter:wght@400;500;600&amp;family=Space+Grotesk:wght@400;500;700&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    colors: {
+                        "surface-container-high": "#e3e9ec",
+                        "surface-dim": "#d1dce0",
+                        "secondary": "#476467",
+                        "on-secondary-fixed": "#274447",
+                        "surface-tint": "#1c5fa8",
+                        "secondary-container": "#c9e8ec",
+                        "tertiary-container": "#8dedec",
+                        "tertiary": "#006a6a",
+                        "primary-fixed-dim": "#bed6ff",
+                        "on-tertiary-container": "#005858",
+                        "secondary-dim": "#3b585b",
+                        "surface-bright": "#f8f9fa",
+                        "inverse-on-surface": "#9b9d9e",
+                        "on-primary": "#f6f7ff",
+                        "surface-container-low": "#f1f4f6",
+                        "on-secondary-container": "#3a5659",
+                        "inverse-surface": "#0c0f10",
+                        "on-tertiary-fixed-variant": "#006262",
+                        "primary": "#1c5fa8",
+                        "error-container": "#ff8b9a",
+                        "secondary-fixed-dim": "#bbdadd",
+                        "surface-container-highest": "#dbe4e7",
+                        "on-primary-container": "#00529a",
+                        "outline-variant": "#abb3b7",
+                        "on-secondary": "#e8fdff",
+                        "on-primary-fixed-variant": "#165ca5",
+                        "secondary-fixed": "#c9e8ec",
+                        "background": "#f8f9fa",
+                        "tertiary-fixed": "#8dedec",
+                        "inverse-primary": "#79b0ff",
+                        "surface-container-lowest": "#ffffff",
+                        "outline": "#737c7f",
+                        "primary-fixed": "#d5e3ff",
+                        "primary-container": "#d5e3ff",
+                        "surface-container": "#eaeff1",
+                        "primary-dim": "#00539b",
+                        "tertiary-fixed-dim": "#7fdede",
+                        "on-error-container": "#782232",
+                        "on-error": "#fff7f7",
+                        "on-tertiary": "#e0fffe",
+                        "surface-variant": "#dbe4e7",
+                        "on-surface-variant": "#586064",
+                        "on-secondary-fixed-variant": "#436063",
+                        "on-background": "#2b3437",
+                        "error-dim": "#4f0116",
+                        "on-primary-fixed": "#003f7a",
+                        "tertiary-dim": "#005d5d",
+                        "on-surface": "#2b3437",
+                        "surface": "#f8f9fa",
+                        "on-tertiary-fixed": "#004343",
+                        "error": "#9e3f4e"
+                    },
+                    fontFamily: {
+                        "headline": ["Manrope"],
+                        "body": ["Inter"],
+                        "label": ["Space Grotesk"]
+                    },
+                    borderRadius: { "DEFAULT": "0.125rem", "lg": "0.25rem", "xl": "0.5rem", "full": "0.75rem" },
+                },
+            },
+        }
+    </script>
+<style>
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+        }
+        body { font-family: 'Inter', sans-serif; background-color: #f8f9fa; }
+        .glass-header { backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); }
+        .hide-scrollbar::-webkit-scrollbar { display: none; }
+        .hide-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+    </style>
+</head>
+<body class="text-on-surface">
+<!-- SideNavBar -->
+<aside class="fixed left-0 top-0 h-screen flex flex-col w-64 bg-slate-50 dark:bg-slate-900 border-r-0 z-50">
+<div class="p-8">
+<h1 class="text-xl font-bold tracking-tight text-slate-900 dark:text-slate-100 font-headline">The Precision Lab</h1>
+<p class="text-xs font-label text-on-surface-variant opacity-70 mt-1 uppercase tracking-widest">VNToxic-Pipeline v1.0</p>
+</div>
+<nav class="flex-1 px-4 space-y-1">
+<a class="flex items-center gap-3 px-4 py-3 text-blue-600 dark:text-blue-400 font-bold border-r-2 border-blue-600 dark:border-blue-400 hover:bg-slate-200/50 dark:hover:bg-slate-800/50 transition-colors Active: scale-95 transition-transform" href="#">
+<span class="material-symbols-outlined" data-icon="database">database</span>
+<span class="font-body text-sm">Raw Data</span>
+</a>
+<a class="flex items-center gap-3 px-4 py-3 text-slate-500 dark:text-slate-400 hover:bg-slate-200/50 dark:hover:bg-slate-800/50 transition-colors" href="#">
+<span class="material-symbols-outlined" data-icon="Steps">steps</span>
+<span class="font-body text-sm">Preprocessing</span>
+</a>
+<a class="flex items-center gap-3 px-4 py-3 text-slate-500 dark:text-slate-400 hover:bg-slate-200/50 dark:hover:bg-slate-800/50 transition-colors" href="#">
+<span class="material-symbols-outlined" data-icon="Science">science</span>
+<span class="font-body text-sm">Protocol Building</span>
+</a>
+<a class="flex items-center gap-3 px-4 py-3 text-slate-500 dark:text-slate-400 hover:bg-slate-200/50 dark:hover:bg-slate-800/50 transition-colors" href="#">
+<span class="material-symbols-outlined" data-icon="Model_Training">model_training</span>
+<span class="font-body text-sm">Training</span>
+</a>
+<a class="flex items-center gap-3 px-4 py-3 text-slate-500 dark:text-slate-400 hover:bg-slate-200/50 dark:hover:bg-slate-800/50 transition-colors" href="#">
+<span class="material-symbols-outlined" data-icon="Assessment">assessment</span>
+<span class="font-body text-sm">Evaluation</span>
+</a>
+<a class="flex items-center gap-3 px-4 py-3 text-slate-500 dark:text-slate-400 hover:bg-slate-200/50 dark:hover:bg-slate-800/50 transition-colors" href="#">
+<span class="material-symbols-outlined" data-icon="Gavel">gavel</span>
+<span class="font-body text-sm">Decision</span>
+</a>
+</nav>
+<div class="p-8 mt-auto border-t border-slate-200/50">
+<div class="flex items-center gap-3">
+<img alt="Lab Technician Avatar" class="w-8 h-8 rounded-full bg-surface-container-high" src="https://lh3.googleusercontent.com/aida-public/AB6AXuA1NCPTgwUzHaJ1mrQcEPLYyOPyCi__-S7vFZD6fc3AANSE9JVik3tmv-JjhXPvfLDcV_Vjq0i3s0srVchTF3IlPTfOeQhJrgrr-QdvfX6UDODR09ZIIXljmaHGwRSBhDEFLJxqEd8k9Ol6YLOfFCBstYbICU0BV5NSqaKKtk2JzA8SgVbB_8RZCjNdCaKuVqDr2u7uBpTiU6CHBVckm-KejqCGdTc-PsHJ--VQKe9U7hy7zANJf4ue7AvAx1isvJtJ9Q0GcIzGk6B0"/>
+<div>
+<p class="text-sm font-bold font-headline">Dr. Nguyen</p>
+<p class="text-xs font-label opacity-60">Lead Researcher</p>
+</div>
+</div>
+</div>
+</aside>
+<!-- TopAppBar -->
+<header class="fixed top-0 right-0 left-64 h-16 flex items-center justify-between px-8 z-40 bg-white/80 dark:bg-slate-950/80 backdrop-blur-md border-b border-slate-100 dark:border-slate-800/50 shadow-sm dark:shadow-none">
+<div class="flex items-center gap-8">
+<span class="text-lg font-extrabold text-slate-900 dark:text-slate-50 font-headline tracking-tight">Vietnamese Toxic Text Detection</span>
+<nav class="hidden md:flex gap-6">
+<a class="text-blue-600 dark:text-blue-400 border-b-2 border-blue-600 text-sm font-label uppercase tracking-tighter py-5" href="#">Overview</a>
+<a class="text-slate-500 dark:text-slate-400 hover:text-blue-500 transition-colors text-sm font-label uppercase tracking-tighter py-5" href="#">Protocols</a>
+<a class="text-slate-500 dark:text-slate-400 hover:text-blue-500 transition-colors text-sm font-label uppercase tracking-tighter py-5" href="#">Metrics</a>
+</nav>
+</div>
+<div class="flex items-center gap-4">
+<div class="relative group">
+<span class="absolute inset-y-0 left-3 flex items-center text-on-surface-variant/50">
+<span class="material-symbols-outlined text-sm" data-icon="search">search</span>
+</span>
+<input class="bg-surface-container-low border-none rounded-full pl-10 pr-4 py-1.5 text-xs font-body focus:ring-2 ring-blue-500/20 w-64 transition-all" placeholder="Search datasets..." type="text"/>
+</div>
+<button class="p-2 text-on-surface-variant hover:text-primary transition-colors">
+<span class="material-symbols-outlined" data-icon="notifications">notifications</span>
+</button>
+<button class="p-2 text-on-surface-variant hover:text-primary transition-colors">
+<span class="material-symbols-outlined" data-icon="settings">settings</span>
+</button>
+</div>
+</header>
+<!-- Main Content Canvas -->
+<main class="ml-64 mt-16 p-10 min-h-screen">
+<!-- Hero Section / Editorial Header -->
+<section class="mb-12 flex justify-between items-end">
+<div>
+<h2 class="text-4xl font-headline font-extrabold tracking-tighter text-on-surface mb-2">Pipeline Architecture</h2>
+<p class="text-on-surface-variant font-body max-w-xl">A high-fidelity flow for Vietnamese linguistics processing. Monitoring real-time toxicity classification across merged multi-source benchmarks.</p>
+</div>
+<button class="bg-gradient-to-r from-primary to-primary-dim text-on-primary px-6 py-3 rounded-lg font-headline font-bold flex items-center gap-2 shadow-lg shadow-primary/20 hover:scale-[1.02] transition-transform">
+<span class="material-symbols-outlined text-sm" data-icon="play_arrow">play_arrow</span>
+                Run Full Pipeline
+            </button>
+</section>
+<!-- Pipeline Horizontal Flow (Asymmetric Bento Style) -->
+<div class="flex gap-4 overflow-x-auto pb-8 hide-scrollbar">
+<!-- Stage 1: Raw Data -->
+<div class="min-w-[320px] flex flex-col gap-4">
+<div class="flex items-center gap-2 mb-2">
+<span class="w-8 h-8 rounded-full bg-primary-container text-primary flex items-center justify-center font-label font-bold text-xs">01</span>
+<h3 class="font-headline font-bold uppercase tracking-widest text-xs opacity-50">Raw Data</h3>
+</div>
+<div class="bg-surface-container-lowest p-6 rounded-xl border border-outline-variant/15 hover:shadow-xl hover:shadow-on-surface/5 transition-all">
+<div class="flex justify-between items-start mb-6">
+<span class="material-symbols-outlined text-primary" data-icon="dataset">dataset</span>
+<span class="text-[10px] font-label font-bold px-2 py-0.5 bg-secondary-container text-on-secondary-container rounded">STABLE</span>
+</div>
+<div class="space-y-4">
+<div class="group cursor-default">
+<p class="text-[10px] font-label text-on-surface-variant uppercase mb-1">Source A</p>
+<div class="flex justify-between items-center">
+<span class="font-headline font-bold text-lg">ViCTSD</span>
+<span class="text-xs font-label">10.2k items</span>
+</div>
+<div class="w-full bg-surface-container-high h-1 mt-2 rounded-full overflow-hidden">
+<div class="bg-primary w-4/5 h-full"></div>
+</div>
+</div>
+<div class="group cursor-default">
+<p class="text-[10px] font-label text-on-surface-variant uppercase mb-1">Source B</p>
+<div class="flex justify-between items-center">
+<span class="font-headline font-bold text-lg">ViHSD</span>
+<span class="text-xs font-label">35.4k items</span>
+</div>
+<div class="w-full bg-surface-container-high h-1 mt-2 rounded-full overflow-hidden">
+<div class="bg-tertiary w-3/4 h-full"></div>
+</div>
+</div>
+</div>
+</div>
+</div>
+<!-- Arrow Connector -->
+<div class="flex items-center px-2 opacity-20">
+<span class="material-symbols-outlined text-4xl" data-icon="trending_flat">trending_flat</span>
+</div>
+<!-- Stage 2: Preprocessing -->
+<div class="min-w-[340px] flex flex-col gap-4">
+<div class="flex items-center gap-2 mb-2">
+<span class="w-8 h-8 rounded-full bg-primary-container text-primary flex items-center justify-center font-label font-bold text-xs">02</span>
+<h3 class="font-headline font-bold uppercase tracking-widest text-xs opacity-50">Preprocessing</h3>
+</div>
+<div class="bg-surface-container-low p-6 rounded-xl border border-outline-variant/15 flex flex-col justify-between">
+<ul class="space-y-3 mb-6">
+<li class="flex items-center gap-3 p-3 bg-surface-container-lowest rounded-lg border border-outline-variant/10">
+<span class="material-symbols-outlined text-secondary text-sm" data-icon="check_circle">check_circle</span>
+<span class="text-sm font-body font-medium">NFC Normalization</span>
+</li>
+<li class="flex items-center gap-3 p-3 bg-surface-container-lowest rounded-lg border border-outline-variant/10">
+<span class="material-symbols-outlined text-secondary text-sm" data-icon="check_circle">check_circle</span>
+<span class="text-sm font-body font-medium">Whitespace &amp; Trim</span>
+</li>
+<li class="flex items-center gap-3 p-3 bg-surface-container-lowest rounded-lg border border-outline-variant/10 border-dashed">
+<span class="material-symbols-outlined text-primary text-sm" data-icon="sync">sync</span>
+<span class="text-sm font-body font-medium">Data Augmentation</span>
+</li>
+</ul>
+<div class="bg-tertiary/10 p-3 rounded flex items-center gap-2">
+<span class="material-symbols-outlined text-tertiary text-sm" data-icon="info">info</span>
+<p class="text-[10px] font-label text-on-tertiary-container uppercase">Binary Toxicity: Active</p>
+</div>
+</div>
+</div>
+<!-- Arrow Connector -->
+<div class="flex items-center px-2 opacity-20">
+<span class="material-symbols-outlined text-4xl" data-icon="trending_flat">trending_flat</span>
+</div>
+<!-- Stage 3: Protocol Building -->
+<div class="min-w-[360px] flex flex-col gap-4">
+<div class="flex items-center gap-2 mb-2">
+<span class="w-8 h-8 rounded-full bg-primary-container text-primary flex items-center justify-center font-label font-bold text-xs">03</span>
+<h3 class="font-headline font-bold uppercase tracking-widest text-xs opacity-50">Protocol Building</h3>
+</div>
+<div class="bg-surface-container-lowest p-6 rounded-xl border border-outline-variant/15 shadow-sm space-y-4">
+<div class="p-4 rounded-lg bg-surface border border-outline-variant/20 hover:border-primary/50 cursor-pointer transition-colors group">
+<div class="flex justify-between items-center mb-1">
+<span class="font-headline font-bold text-sm">Protocol A</span>
+<span class="text-[9px] font-label px-1.5 py-0.5 bg-primary-container text-on-primary-container rounded">BASELINE</span>
+</div>
+<p class="text-[11px] text-on-surface-variant font-body">ViCTSD-only local validation.</p>
+</div>
+<div class="p-4 rounded-lg bg-surface border border-primary/20 bg-primary/5 cursor-pointer transition-colors">
+<div class="flex justify-between items-center mb-1">
+<span class="font-headline font-bold text-sm">Protocol B</span>
+<span class="text-[9px] font-label px-1.5 py-0.5 bg-tertiary-container text-on-tertiary-container rounded">HYBRID</span>
+</div>
+<p class="text-[11px] text-on-surface-variant font-body">ViCTSD + ViHSD offensive-only train.</p>
+</div>
+<div class="p-4 rounded-lg bg-surface border border-outline-variant/20 hover:border-primary/50 cursor-pointer transition-colors group">
+<div class="flex justify-between items-center mb-1">
+<span class="font-headline font-bold text-sm">Protocol C</span>
+<span class="text-[9px] font-label px-1.5 py-0.5 bg-surface-container-highest text-on-surface-variant rounded">FULL</span>
+</div>
+<p class="text-[11px] text-on-surface-variant font-body">Merged benchmark cross-validation.</p>
+</div>
+</div>
+</div>
+<!-- Arrow Connector -->
+<div class="flex items-center px-2 opacity-20">
+<span class="material-symbols-outlined text-4xl" data-icon="trending_flat">trending_flat</span>
+</div>
+<!-- Stage 4: Training & Eval -->
+<div class="min-w-[320px] flex flex-col gap-4">
+<div class="flex items-center gap-2 mb-2">
+<span class="w-8 h-8 rounded-full bg-primary-container text-primary flex items-center justify-center font-label font-bold text-xs">04</span>
+<h3 class="font-headline font-bold uppercase tracking-widest text-xs opacity-50">Evaluation</h3>
+</div>
+<div class="bg-surface-container-lowest p-6 rounded-xl border border-outline-variant/15 flex flex-col gap-6">
+<div class="relative w-32 h-32 mx-auto">
+<svg class="w-full h-full transform -rotate-90">
+<circle class="text-surface-container-high" cx="64" cy="64" fill="transparent" r="58" stroke="currentColor" stroke-width="8"></circle>
+<circle class="text-primary" cx="64" cy="64" fill="transparent" r="58" stroke="currentColor" stroke-dasharray="364" stroke-dashoffset="40" stroke-width="8"></circle>
+</svg>
+<div class="absolute inset-0 flex flex-col items-center justify-center">
+<span class="text-2xl font-headline font-extrabold">89%</span>
+<span class="text-[9px] font-label opacity-60">F1 SCORE</span>
+</div>
+</div>
+<div class="grid grid-cols-2 gap-2">
+<div class="p-2 bg-surface rounded text-center">
+<p class="text-[10px] font-label opacity-60">Precision</p>
+<p class="text-sm font-bold font-headline text-secondary">0.91</p>
+</div>
+<div class="p-2 bg-surface rounded text-center">
+<p class="text-[10px] font-label opacity-60">Recall</p>
+<p class="text-sm font-bold font-headline text-secondary">0.87</p>
+</div>
+</div>
+</div>
+</div>
+</div>
+<!-- Analytical Section: Lower Bento -->
+<section class="mt-8 grid grid-cols-12 gap-6">
+<!-- Technical Details: Protocol Insights -->
+<div class="col-span-12 lg:col-span-8 bg-surface-container-low rounded-2xl p-8 border border-outline-variant/10">
+<div class="flex justify-between items-center mb-8">
+<div>
+<h4 class="text-xl font-headline font-extrabold tracking-tight">Protocol Distribution</h4>
+<p class="text-sm font-body text-on-surface-variant">Comparative analysis across toxic vs. clean labels.</p>
+</div>
+<button class="text-sm font-label text-primary font-bold flex items-center gap-1">
+                        View Log <span class="material-symbols-outlined text-xs" data-icon="open_in_new">open_in_new</span>
+</button>
+</div>
+<div class="space-y-6">
+<!-- Data Bar Chart Simulation -->
+<div class="space-y-2">
+<div class="flex justify-between text-[11px] font-label uppercase">
+<span>Toxic Samples</span>
+<span class="text-error font-bold">14,203 detected</span>
+</div>
+<div class="w-full h-8 bg-surface-container-highest rounded-lg flex overflow-hidden">
+<div class="h-full bg-error/80 w-[45%]" data-alt="vibrant abstract visualization of toxic data clusters using warm red tones"></div>
+<div class="h-full bg-primary w-[55%]" data-alt="cool blue abstract gradient representing clean dataset segments"></div>
+</div>
+</div>
+<div class="grid grid-cols-3 gap-6 pt-4">
+<div class="flex flex-col">
+<span class="text-[10px] font-label opacity-50 uppercase mb-1">Processing Time</span>
+<span class="text-lg font-headline font-bold">1.4s / text</span>
+</div>
+<div class="flex flex-col border-l border-outline-variant/20 pl-6">
+<span class="text-[10px] font-label opacity-50 uppercase mb-1">Model Arch</span>
+<span class="text-lg font-headline font-bold">ViBERT-v2</span>
+</div>
+<div class="flex flex-col border-l border-outline-variant/20 pl-6">
+<span class="text-[10px] font-label opacity-50 uppercase mb-1">Epochs</span>
+<span class="text-lg font-headline font-bold">15 / 50</span>
+</div>
+</div>
+</div>
+</div>
+<!-- Contextual Sidebar: Decision Logic -->
+<div class="col-span-12 lg:col-span-4 bg-primary text-on-primary rounded-2xl p-8 relative overflow-hidden shadow-2xl shadow-primary/30">
+<!-- Background decorative image -->
+<div class="absolute inset-0 opacity-10 mix-blend-overlay pointer-events-none">
+<img alt="Technical Pattern" class="w-full h-full object-cover" data-alt="microscopic detail of a silicon wafer with intricate neural network patterns in deep metallic blue" src="https://lh3.googleusercontent.com/aida-public/AB6AXuBNP8fev6ruMjUjAONWBioVABTEy7DKkNZ0hCRKFORFCBTiEPpij0CTo3MHbSsDK5awJidE_PPs2nBi_yrumSfDD6lShoO_J_JxtT_VM6x41dAayNReipYd4KlDWwu1AlIZBVSLj2ZO61kn7iPQ4260C712_2BQb6jvigsGFlFiTVatPPGGOWLXutxbRdQTT9kwxs2itiHE54VyDboYmxeYjm8oZOeRHkhfnetbbinmfHw2QTk35AbJiIJxTifuj4Lh0vQ-r0eBAJV2"/>
+</div>
+<div class="relative z-10">
+<h4 class="text-xl font-headline font-extrabold tracking-tight mb-4">Final Decision Layer</h4>
+<p class="text-sm font-body opacity-80 mb-8 leading-relaxed">The Gavel protocol evaluates model confidence thresholds. Only results &gt; 0.85 pass as "Toxic" automatically.</p>
+<div class="space-y-4">
+<div class="p-4 bg-white/10 rounded-xl backdrop-blur-sm border border-white/20">
+<div class="flex items-center gap-3 mb-2">
+<span class="material-symbols-outlined text-tertiary-fixed" data-icon="verified_user">verified_user</span>
+<span class="text-sm font-bold">Auto-Approve</span>
+</div>
+<p class="text-xs opacity-70">Low toxicity risk (&lt; 0.12)</p>
+</div>
+<div class="p-4 bg-white/10 rounded-xl backdrop-blur-sm border border-white/20">
+<div class="flex items-center gap-3 mb-2">
+<span class="material-symbols-outlined text-tertiary-fixed" data-icon="flag">flag</span>
+<span class="text-sm font-bold">Manual Review</span>
+</div>
+<p class="text-xs opacity-70">Ambiguous detection (0.45 - 0.70)</p>
+</div>
+</div>
+<button class="mt-8 w-full py-4 bg-on-primary text-primary rounded-xl font-headline font-extrabold hover:bg-primary-container transition-colors">
+                        Configure Thresholds
+                    </button>
+</div>
+</div>
+</section>
+</main>
+<!-- Contextual Floating Action -->
+<button class="fixed bottom-8 right-8 w-14 h-14 bg-secondary text-on-secondary rounded-full shadow-2xl flex items-center justify-center hover:rotate-12 transition-transform z-50">
+<span class="material-symbols-outlined" data-icon="add">add</span>
+</button>
+</body></html>

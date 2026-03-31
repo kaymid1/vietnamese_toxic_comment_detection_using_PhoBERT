@@ -10,6 +10,8 @@ comprehensive_ui/node_modules/
 comprehensive_ui/package-lock.json
 data/processed/
 data/raw/crawled_urls/
+viettoxic_outputs/
+viettoxic_outputs_extract/
 .env
 .env.local
 .env.*

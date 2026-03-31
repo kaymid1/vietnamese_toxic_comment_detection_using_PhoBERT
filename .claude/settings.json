@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__stitch__edit_screens",
+      "Bash(npm run:*)"
+    ]
+  }
+}
