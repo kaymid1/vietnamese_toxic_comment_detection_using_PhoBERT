@@ -72,7 +72,6 @@ const sourceLabel = (source: string) => {
     all: "Tất cả nguồn",
     victsd_augmented: "ViCTSD",
     "uit-vihsd_augmented": "UIT-ViHSD",
-    new_collected: "New collected",
     unknown: "Không xác định",
   };
   return map[normalized] || source.replaceAll("_", " ");
@@ -109,11 +108,7 @@ const formatPercent = (value: number, total: number) => {
   return `${((value / total) * 100).toFixed(1)}%`;
 };
 
-interface DatasetPageProps {
-  onOpenSyntheticPage?: () => void;
-}
-
-export function DatasetPage({ onOpenSyntheticPage }: DatasetPageProps) {
+export function DatasetPage() {
   const [rows, setRows] = useState<DatasetRow[]>([]);
   const [stats, setStats] = useState<DatasetStats | null>(null);
   const [page, setPage] = useState(1);
@@ -169,7 +164,6 @@ export function DatasetPage({ onOpenSyntheticPage }: DatasetPageProps) {
     return {
       victsd: bySource.victsd_augmented || { total: 0, clean: 0, toxic: 0 },
       vihsd: bySource["uit-vihsd_augmented"] || bySource.vihsd_augmented || { total: 0, clean: 0, toxic: 0 },
-      newCollected: bySource.new_collected || { total: 0, clean: 0, toxic: 0 },
     };
   }, [stats]);
 
@@ -372,7 +366,7 @@ export function DatasetPage({ onOpenSyntheticPage }: DatasetPageProps) {
                   <div className="rounded-lg border bg-muted/30 p-4">
                     <p className="text-xs text-muted-foreground">Tổng samples</p>
                     <p className="text-2xl font-semibold">{aggregatedStats.total.toLocaleString()}</p>
-                    <p className="text-xs text-muted-foreground">ViCTSD + UIT-ViHSD + collected</p>
+                    <p className="text-xs text-muted-foreground">ViCTSD + UIT-ViHSD</p>
                   </div>
                   <div className="rounded-lg border bg-muted/30 p-4">
                     <p className="text-xs text-muted-foreground">Clean (non-toxic)</p>
@@ -401,9 +395,6 @@ export function DatasetPage({ onOpenSyntheticPage }: DatasetPageProps) {
                   <span className="inline-flex items-center gap-2">
                     <span className="h-3 w-3 rounded-sm bg-orange-500" />UIT-ViHSD
                   </span>
-                  <span className="inline-flex items-center gap-2">
-                    <span className="h-3 w-3 rounded-sm bg-zinc-400" />New collected
-                  </span>
                 </div>
 
                 <div className="mt-4 space-y-3 text-sm">
@@ -425,16 +416,6 @@ export function DatasetPage({ onOpenSyntheticPage }: DatasetPageProps) {
                       </div>
                     </div>
                     <div className="w-20 text-right text-xs text-muted-foreground">{sourceSummary.vihsd.total.toLocaleString()}</div>
-                  </div>
-                  <div className="flex items-center gap-3">
-                    <div className="w-44 text-muted-foreground">New collected</div>
-                    <div className="flex-1 h-3 rounded bg-muted overflow-hidden">
-                      <div className="flex h-full">
-                        <div className="bg-blue-600" style={{ width: formatPercent(sourceSummary.newCollected.clean, sourceSummary.newCollected.total) }} />
-                        <div className="bg-orange-500" style={{ width: formatPercent(sourceSummary.newCollected.toxic, sourceSummary.newCollected.total) }} />
-                      </div>
-                    </div>
-                    <div className="w-20 text-right text-xs text-muted-foreground">{sourceSummary.newCollected.total.toLocaleString()}</div>
                   </div>
                 </div>
 
@@ -739,11 +720,6 @@ export function DatasetPage({ onOpenSyntheticPage }: DatasetPageProps) {
             <Button variant="outline" onClick={handleExport}>
               Export JSONL
             </Button>
-            {onOpenSyntheticPage && (
-              <Button className="bg-violet-600 hover:bg-violet-700 text-white font-semibold" onClick={onOpenSyntheticPage}>
-                Synthetic Generation
-              </Button>
-            )}
             <Button
               variant="destructive"
               onClick={handleDeleteFeedback}

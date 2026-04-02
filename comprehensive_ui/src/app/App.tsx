@@ -314,7 +314,7 @@ export default function App() {
         />
       )}
 
-      {currentPage === "dataset" && <DatasetPage onOpenSyntheticPage={() => setCurrentPage("dataset_synthetic")} />}
+      {currentPage === "dataset" && <DatasetPage />}
 
       {currentPage === "dataset_synthetic" && (
         <SyntheticGenerationPage onBack={() => setCurrentPage("dataset")} />

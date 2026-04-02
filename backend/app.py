@@ -4,6 +4,7 @@ import json
 import logging
 import math
 import os
+import statistics
 import re
 import shutil
 import sqlite3
@@ -2968,6 +2969,78 @@ def eval_hard_cases() -> Dict[str, Any]:
     return {"items": rows if isinstance(rows, list) else [], "last_updated": file_last_updated(HARD_CASES_PATH)}
 
 
+def _parse_optional_seed(value: Any) -> Optional[int]:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, str):
+        raw = value.strip()
+        if raw.startswith("-"):
+            digits = raw[1:]
+            if digits.isdigit():
+                return int(raw)
+        elif raw.isdigit():
+            return int(raw)
+    return None
+
+
+def _collect_protocol_seed_runs(protocol_id: str) -> List[Dict[str, Any]]:
+    prefix = f"protocol_{protocol_id}"
+    runs: List[Dict[str, Any]] = []
+
+    if not PROTOCOL_METRICS_ROOT.exists():
+        return runs
+
+    for candidate in sorted(PROTOCOL_METRICS_ROOT.iterdir(), key=lambda p: p.name):
+        if not candidate.is_dir() or not candidate.name.startswith(prefix):
+            continue
+
+        metrics_path = candidate / "results" / "metrics.json"
+        metrics_json = load_json_file(metrics_path, {})
+        if not isinstance(metrics_json, dict):
+            continue
+
+        final_metrics = metrics_json.get("final_test_rich")
+        if not isinstance(final_metrics, dict):
+            continue
+
+        run_config = load_json_file(candidate / "models" / "best" / "run_config.json", {})
+        seed = None
+        if isinstance(run_config, dict):
+            seed = _parse_optional_seed((run_config.get("config") or {}).get("SEED"))
+        if seed is None:
+            seed = _parse_optional_seed((metrics_json.get("hyperparameters") or {}).get("SEED"))
+
+        runs.append(
+            {
+                "run_key": candidate.name,
+                "run_id": metrics_json.get("run_id") if isinstance(metrics_json.get("run_id"), str) else candidate.name,
+                "seed": seed,
+                "macro_f1": final_metrics.get("macro_f1"),
+                "f1_toxic": final_metrics.get("f1_toxic"),
+                "accuracy": final_metrics.get("accuracy"),
+                "ece": final_metrics.get("ece"),
+                "brier": final_metrics.get("brier"),
+                "metrics_last_updated": file_last_updated(metrics_path),
+            }
+        )
+
+    runs.sort(
+        key=lambda r: (
+            -1 if isinstance(r.get("f1_toxic"), (int, float)) else 1,
+            -(r.get("f1_toxic") or -1),
+            -(r.get("macro_f1") or -1),
+            r.get("seed") is None,
+            r.get("seed") if isinstance(r.get("seed"), int) else 0,
+            r.get("run_key") or "",
+        )
+    )
+    return runs
+
+
 @app.get("/api/protocols/summary")
 def protocol_summary() -> Dict[str, Any]:
     report = load_json_file(PROTOCOL_BUILD_REPORT_PATH, {})
@@ -2994,6 +3067,14 @@ def protocol_summary() -> Dict[str, Any]:
         if not available:
             warnings.append(f"Missing or invalid metrics for protocol_{protocol_id}: {metrics_path}")
 
+        seed_runs = _collect_protocol_seed_runs(protocol_id)
+        macro_values = [
+            float(run["macro_f1"]) for run in seed_runs if isinstance(run.get("macro_f1"), (int, float))
+        ]
+        f1_toxic_values = [
+            float(run["f1_toxic"]) for run in seed_runs if isinstance(run.get("f1_toxic"), (int, float))
+        ]
+
         protocols.append(
             {
                 "id": protocol_id,
@@ -3016,6 +3097,15 @@ def protocol_summary() -> Dict[str, Any]:
                 },
                 "overlap_exact": overlap if isinstance(overlap, dict) else {},
                 "metrics_last_updated": file_last_updated(metrics_path),
+                "seed_runs": seed_runs,
+                "seed_summary": {
+                    "n_runs": len(seed_runs),
+                    "n_with_seed": sum(1 for run in seed_runs if isinstance(run.get("seed"), int)),
+                    "macro_f1_mean": statistics.fmean(macro_values) if macro_values else None,
+                    "macro_f1_std": statistics.stdev(macro_values) if len(macro_values) >= 2 else None,
+                    "f1_toxic_mean": statistics.fmean(f1_toxic_values) if f1_toxic_values else None,
+                    "f1_toxic_std": statistics.stdev(f1_toxic_values) if len(f1_toxic_values) >= 2 else None,
+                },
             }
         )
 
