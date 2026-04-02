@@ -2,7 +2,8 @@
   "permissions": {
     "allow": [
       "mcp__stitch__edit_screens",
-      "Bash(npm run:*)"
+      "Bash(npm run:*)",
+      "Bash(python3 -m py_compile \"/Users/mac/git/Thesis/backend/app.py\" \"/Users/mac/git/Thesis/setup_and_crawl.py\")"
     ]
   }
 }

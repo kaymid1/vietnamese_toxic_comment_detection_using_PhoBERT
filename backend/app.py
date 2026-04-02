@@ -110,6 +110,52 @@ def save_job_meta(out_dir: Path, meta: Dict[str, Any]) -> None:
         logger.warning("Failed to write job_meta.json for %s", out_dir)
 
 
+def load_job_meta(out_dir: Path) -> Dict[str, Any]:
+    path = out_dir / "job_meta.json"
+    if not path.exists():
+        return {}
+    try:
+        raw = path.read_text(encoding="utf-8")
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+
+def pending_crawl_results_path(out_dir: Path) -> Path:
+    return out_dir / "crawl_pending_results.json"
+
+
+def save_pending_crawl_results(out_dir: Path, results: List[Dict[str, Any]]) -> None:
+    try:
+        pending_crawl_results_path(out_dir).write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        logger.warning("Failed to write crawl_pending_results.json for %s", out_dir)
+
+
+def load_pending_crawl_results(out_dir: Path) -> List[Dict[str, Any]]:
+    path = pending_crawl_results_path(out_dir)
+    if not path.exists():
+        return []
+    try:
+        raw = path.read_text(encoding="utf-8")
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, list) else []
+    except Exception:
+        return []
+
+
+def build_fallback_decisions_map(items: Optional[List["FallbackDecision"]]) -> Dict[str, str]:
+    decision_map: Dict[str, str] = {}
+    for item in items or []:
+        action = "use_selenium" if item.action == "use_selenium" else "skip"
+        if item.url_hash:
+            decision_map[item.url_hash] = action
+        if item.url:
+            decision_map[item.url.strip()] = action
+    return decision_map
+
+
 app = FastAPI(title="VietToxic Local API")
 app.add_middleware(
     CORSMiddleware,
@@ -157,11 +203,20 @@ class AnalyzeOptions(BaseModel):
     model_name: Optional[str] = None
     model_path: Optional[str] = None
     enable_video: bool = False
+    selenium_fallback_mode: Literal["auto", "ask"] = "auto"
+
+
+class FallbackDecision(BaseModel):
+    url: Optional[str] = None
+    url_hash: Optional[str] = None
+    action: Literal["use_selenium", "skip"]
 
 
 class AnalyzeRequest(BaseModel):
     urls: List[str] = Field(min_items=1)
     options: Optional[AnalyzeOptions] = None
+    pending_job_id: Optional[str] = None
+    fallback_decisions: Optional[List[FallbackDecision]] = None
 
 
 class FeedbackPageItem(BaseModel):
@@ -255,6 +310,8 @@ class AnalyzeCompareOptions(AnalyzeOptions):
 class AnalyzeCompareRequest(BaseModel):
     urls: List[str] = Field(min_items=1)
     options: AnalyzeCompareOptions
+    pending_job_id: Optional[str] = None
+    fallback_decisions: Optional[List[FallbackDecision]] = None
 
 
 class AnalyzeRerunRequest(BaseModel):
@@ -2060,36 +2117,74 @@ def cleanup_old_jobs(ttl_hours: float = 24.0) -> int:
 def analyze(request: AnalyzeRequest) -> Dict[str, Any]:
     try:
         cleanup_old_jobs(float(os.getenv("JOB_RETENTION_HOURS", "24")))
-        options = request.options or AnalyzeOptions()
-        urls = [u.strip() for u in request.urls if u and u.strip()]
-        if not urls:
-            raise HTTPException(status_code=400, detail="No valid URLs provided.")
 
-        job_id = uuid.uuid4().hex
-        out_dir = BASE_DIR / "data" / "processed" / f"job_{job_id}"
-        out_dir.mkdir(parents=True, exist_ok=True)
+        is_resume = bool(request.pending_job_id)
+        options = request.options or AnalyzeOptions()
+
+        if is_resume:
+            job_id = (request.pending_job_id or "").strip()
+            if not job_id:
+                raise HTTPException(status_code=400, detail="Missing pending_job_id")
+            out_dir = BASE_DIR / "data" / "processed" / f"job_{job_id}"
+            if not out_dir.exists():
+                raise HTTPException(status_code=404, detail=f"Pending job not found: {job_id}")
+            meta = load_job_meta(out_dir)
+            urls = [u.strip() for u in (meta.get("urls") or []) if u and u.strip()]
+            if not urls:
+                raise HTTPException(status_code=400, detail="Pending job has no URLs")
+            model_ids = [m for m in (meta.get("model_ids") or []) if isinstance(m, str) and m.strip()]
+            model_id = model_ids[0] if model_ids else None
+            if not model_id:
+                raise HTTPException(status_code=400, detail="Pending job is missing model_id")
+        else:
+            urls = [u.strip() for u in request.urls if u and u.strip()]
+            if not urls:
+                raise HTTPException(status_code=400, detail="No valid URLs provided.")
+            job_id = uuid.uuid4().hex
+            out_dir = BASE_DIR / "data" / "processed" / f"job_{job_id}"
+            out_dir.mkdir(parents=True, exist_ok=True)
+
+            model_root = resolve_model_root()
+            try:
+                if options.model_path:
+                    requested_model_path = Path(options.model_path).expanduser().resolve()
+                    model_root_resolved = model_root.resolve()
+                    try:
+                        requested_model_path.relative_to(model_root_resolved)
+                    except ValueError as exc:
+                        raise ValueError(
+                            f"Model path must be under {model_root_resolved}: {requested_model_path}"
+                        ) from exc
+                    relative_parts = requested_model_path.relative_to(model_root_resolved).parts
+                    if len(relative_parts) < 2:
+                        raise ValueError(f"Model path must point to a model directory under {model_root_resolved}")
+                    model_type = relative_parts[0]
+                    model_name = requested_model_path.name
+                    _, _, model_path = resolve_model_path(model_root, f"{model_type}/{model_name}")
+                    model_id = f"{model_type}/{model_name}"
+                else:
+                    model_type, model_name, model_path = resolve_model_path(model_root, options.model_name)
+                    model_id = f"{model_type}/{model_name}"
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            except (PermissionError, OSError) as exc:
+                raise HTTPException(status_code=500, detail=f"Unable to access model directory: {exc}") from exc
+
+            save_job_meta(
+                out_dir,
+                build_job_meta(
+                    job_id=job_id,
+                    urls=urls,
+                    url_hashes=[],
+                    model_ids=[model_id],
+                    enable_video=options.enable_video,
+                    merged_used=False,
+                ),
+            )
 
         model_root = resolve_model_root()
         try:
-            if options.model_path:
-                requested_model_path = Path(options.model_path).expanduser().resolve()
-                model_root_resolved = model_root.resolve()
-                try:
-                    requested_model_path.relative_to(model_root_resolved)
-                except ValueError as exc:
-                    raise ValueError(
-                        f"Model path must be under {model_root_resolved}: {requested_model_path}"
-                    ) from exc
-                relative_parts = requested_model_path.relative_to(model_root_resolved).parts
-                if len(relative_parts) < 2:
-                    raise ValueError(f"Model path must point to a model directory under {model_root_resolved}")
-                model_type = relative_parts[0]
-                model_name = requested_model_path.name
-                _, _, model_path = resolve_model_path(model_root, f"{model_type}/{model_name}")
-                model_id = f"{model_type}/{model_name}"
-            else:
-                model_type, model_name, model_path = resolve_model_path(model_root, options.model_name)
-                model_id = f"{model_type}/{model_name}"
+            model_type, model_name, model_path = resolve_model_path(model_root, model_id)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except (PermissionError, OSError) as exc:
@@ -2099,8 +2194,110 @@ def analyze(request: AnalyzeRequest) -> Dict[str, Any]:
 
         logger.info("Job %s: start analyze for %s urls", job_id, len(urls))
         logger.info("Job %s: using model '%s' (%s) from %s", job_id, model_id, model_type, model_path)
-        logger.info("Job %s: crawling", job_id)
-        crawl_results = crawl_urls(urls, out_dir=str(DATA_DIR), enable_video=options.enable_video)
+
+        decision_map = build_fallback_decisions_map(request.fallback_decisions)
+        ask_mode = options.selenium_fallback_mode == "ask"
+        should_detect = ask_mode and not is_resume
+        should_resume = ask_mode and is_resume
+
+        if should_detect:
+            crawl_results = crawl_urls(
+                urls,
+                out_dir=str(DATA_DIR),
+                enable_video=options.enable_video,
+                allow_selenium_fallback=False,
+            )
+            pending = [r for r in crawl_results if r.get("status") == "needs_fallback_confirmation"]
+            save_pending_crawl_results(out_dir, crawl_results)
+            if pending:
+                pending_urls = [
+                    {
+                        "url": item.get("url"),
+                        "url_hash": item.get("url_hash"),
+                        "reason": item.get("fallback_reason") or "trafilatura_short_text",
+                        "trafilatura_text_len": item.get("trafilatura_text_len"),
+                    }
+                    for item in pending
+                ]
+                return {
+                    "job_id": job_id,
+                    "flow_state": "awaiting_user_choice",
+                    "model_name": model_id,
+                    "pending_fallback_urls": pending_urls,
+                }
+        elif should_resume:
+            pending_results = load_pending_crawl_results(out_dir)
+            if not pending_results:
+                raise HTTPException(status_code=400, detail="No pending fallback URLs for this job")
+
+            pending_by_hash = {
+                item.get("url_hash"): item
+                for item in pending_results
+                if item.get("status") == "needs_fallback_confirmation" and item.get("url_hash")
+            }
+            missing = [h for h in pending_by_hash.keys() if decision_map.get(h) not in {"use_selenium", "skip"}]
+            if missing:
+                raise HTTPException(status_code=400, detail=f"Missing decisions for url_hashes: {missing}")
+
+            recrawl_targets = [item.get("url") for item in pending_by_hash.values() if decision_map.get(item.get("url_hash")) == "use_selenium"]
+            recrawled_map: Dict[str, Dict[str, Any]] = {}
+            if recrawl_targets:
+                recrawled = crawl_urls(
+                    recrawl_targets,
+                    out_dir=str(DATA_DIR),
+                    enable_video=options.enable_video,
+                    allow_selenium_fallback=True,
+                )
+                recrawled_map = {item.get("url_hash"): item for item in recrawled if item.get("url_hash")}
+
+            merged_crawl_results: List[Dict[str, Any]] = []
+            for item in pending_results:
+                status = item.get("status")
+                url_hash = item.get("url_hash")
+                if status != "needs_fallback_confirmation":
+                    merged_crawl_results.append(item)
+                    continue
+
+                action = decision_map.get(url_hash)
+                if action == "skip":
+                    merged_crawl_results.append(
+                        {
+                            "url": item.get("url"),
+                            "url_hash": url_hash,
+                            "status": "skipped",
+                            "error": None,
+                            "output_dir": item.get("output_dir"),
+                            "segments_path": None,
+                            "num_segments": 0,
+                            "method": "skip_by_user",
+                            "duration_sec": item.get("duration_sec"),
+                            "warnings": (item.get("warnings") or []) + [{
+                                "code": "fallback_skipped",
+                                "message": "Skipped Selenium fallback by user choice",
+                            }],
+                            "skip_reason": item.get("fallback_reason") or "fallback_skipped_by_user",
+                        }
+                    )
+                else:
+                    merged_crawl_results.append(
+                        recrawled_map.get(
+                            url_hash,
+                            {
+                                "url": item.get("url"),
+                                "url_hash": url_hash,
+                                "status": "error",
+                                "error": "Selenium fallback requested but crawl did not produce a result",
+                                "output_dir": item.get("output_dir"),
+                                "segments_path": None,
+                                "num_segments": 0,
+                            },
+                        )
+                    )
+            crawl_results = merged_crawl_results
+            save_pending_crawl_results(out_dir, crawl_results)
+        else:
+            crawl_results = crawl_urls(urls, out_dir=str(DATA_DIR), enable_video=options.enable_video)
+
         for r in crawl_results:
             logger.info(
                 "Job %s: crawl result url=%s status=%s method=%s segments_path=%s error=%s",
@@ -2164,7 +2361,6 @@ def analyze(request: AnalyzeRequest) -> Dict[str, Any]:
         else:
             logger.warning("Job %s: no successful crawls to run inference", job_id)
 
-        page_results = load_page_results(out_dir)
         segment_results = load_segment_results(out_dir)
 
         page_by_hash, page_by_url = load_page_results_map(out_dir)
@@ -2188,6 +2384,7 @@ def analyze(request: AnalyzeRequest) -> Dict[str, Any]:
         logger.info("Job %s: completed", job_id)
         return {
             "job_id": job_id,
+            "flow_state": "completed",
             "model_name": model_id,
             "thresholds": {
                 "seg_threshold": options.seg_threshold,
@@ -2244,20 +2441,33 @@ def submit_feedback(request: FeedbackRequest) -> Dict[str, Any]:
 @app.post("/api/analyze_compare")
 def analyze_compare(request: AnalyzeCompareRequest) -> Dict[str, Any]:
     try:
+        is_resume = bool(request.pending_job_id)
         options = request.options
-        urls = [u.strip() for u in request.urls if u and u.strip()]
-        if not urls:
-            raise HTTPException(status_code=400, detail="No valid URLs provided.")
 
-        job_id = uuid.uuid4().hex
-        out_dir = BASE_DIR / "data" / "processed" / f"job_{job_id}"
-        out_dir.mkdir(parents=True, exist_ok=True)
+        if is_resume:
+            job_id = (request.pending_job_id or "").strip()
+            if not job_id:
+                raise HTTPException(status_code=400, detail="Missing pending_job_id")
+            out_dir = BASE_DIR / "data" / "processed" / f"job_{job_id}"
+            if not out_dir.exists():
+                raise HTTPException(status_code=404, detail=f"Pending job not found: {job_id}")
+            meta = load_job_meta(out_dir)
+            urls = [u.strip() for u in (meta.get("urls") or []) if u and u.strip()]
+            model_ids = [m for m in (meta.get("model_ids") or []) if isinstance(m, str) and m.strip()]
+            if not urls or len(model_ids) < 2:
+                raise HTTPException(status_code=400, detail="Pending compare job metadata is incomplete")
+        else:
+            urls = [u.strip() for u in request.urls if u and u.strip()]
+            if not urls:
+                raise HTTPException(status_code=400, detail="No valid URLs provided.")
+            model_ids = [m.strip() for m in options.model_names if m and m.strip()]
+            if len(model_ids) < 2:
+                raise HTTPException(status_code=400, detail="Need at least 2 model_names")
+            job_id = uuid.uuid4().hex
+            out_dir = BASE_DIR / "data" / "processed" / f"job_{job_id}"
+            out_dir.mkdir(parents=True, exist_ok=True)
 
         model_root = resolve_model_root()
-        model_ids = [m.strip() for m in options.model_names if m and m.strip()]
-        if len(model_ids) < 2:
-            raise HTTPException(status_code=400, detail="Need at least 2 model_names")
-
         model_infos: List[Dict[str, Any]] = []
         for model_id in model_ids:
             try:
@@ -2276,8 +2486,117 @@ def analyze_compare(request: AnalyzeCompareRequest) -> Dict[str, Any]:
             )
 
         logger.info("Compare job %s: start analyze for %s urls", job_id, len(urls))
-        logger.info("Compare job %s: crawling", job_id)
-        crawl_results = crawl_urls(urls, out_dir=str(DATA_DIR), enable_video=options.enable_video)
+
+        decision_map = build_fallback_decisions_map(request.fallback_decisions)
+        ask_mode = options.selenium_fallback_mode == "ask"
+        should_detect = ask_mode and not is_resume
+        should_resume = ask_mode and is_resume
+
+        if should_detect:
+            crawl_results = crawl_urls(
+                urls,
+                out_dir=str(DATA_DIR),
+                enable_video=options.enable_video,
+                allow_selenium_fallback=False,
+            )
+            pending = [r for r in crawl_results if r.get("status") == "needs_fallback_confirmation"]
+            save_pending_crawl_results(out_dir, crawl_results)
+            save_job_meta(
+                out_dir,
+                build_job_meta(
+                    job_id=job_id,
+                    urls=urls,
+                    url_hashes=[],
+                    model_ids=model_ids,
+                    enable_video=options.enable_video,
+                    merged_used=False,
+                ),
+            )
+            if pending:
+                pending_urls = [
+                    {
+                        "url": item.get("url"),
+                        "url_hash": item.get("url_hash"),
+                        "reason": item.get("fallback_reason") or "trafilatura_short_text",
+                        "trafilatura_text_len": item.get("trafilatura_text_len"),
+                    }
+                    for item in pending
+                ]
+                return {
+                    "job_id": job_id,
+                    "flow_state": "awaiting_user_choice",
+                    "pending_fallback_urls": pending_urls,
+                }
+        elif should_resume:
+            pending_results = load_pending_crawl_results(out_dir)
+            if not pending_results:
+                raise HTTPException(status_code=400, detail="No pending fallback URLs for this compare job")
+            pending_by_hash = {
+                item.get("url_hash"): item
+                for item in pending_results
+                if item.get("status") == "needs_fallback_confirmation" and item.get("url_hash")
+            }
+            missing = [h for h in pending_by_hash.keys() if decision_map.get(h) not in {"use_selenium", "skip"}]
+            if missing:
+                raise HTTPException(status_code=400, detail=f"Missing decisions for url_hashes: {missing}")
+
+            recrawl_targets = [item.get("url") for item in pending_by_hash.values() if decision_map.get(item.get("url_hash")) == "use_selenium"]
+            recrawled_map: Dict[str, Dict[str, Any]] = {}
+            if recrawl_targets:
+                recrawled = crawl_urls(
+                    recrawl_targets,
+                    out_dir=str(DATA_DIR),
+                    enable_video=options.enable_video,
+                    allow_selenium_fallback=True,
+                )
+                recrawled_map = {item.get("url_hash"): item for item in recrawled if item.get("url_hash")}
+
+            merged_crawl_results: List[Dict[str, Any]] = []
+            for item in pending_results:
+                status = item.get("status")
+                url_hash = item.get("url_hash")
+                if status != "needs_fallback_confirmation":
+                    merged_crawl_results.append(item)
+                    continue
+                action = decision_map.get(url_hash)
+                if action == "skip":
+                    merged_crawl_results.append(
+                        {
+                            "url": item.get("url"),
+                            "url_hash": url_hash,
+                            "status": "skipped",
+                            "error": None,
+                            "output_dir": item.get("output_dir"),
+                            "segments_path": None,
+                            "num_segments": 0,
+                            "method": "skip_by_user",
+                            "duration_sec": item.get("duration_sec"),
+                            "warnings": (item.get("warnings") or []) + [{
+                                "code": "fallback_skipped",
+                                "message": "Skipped Selenium fallback by user choice",
+                            }],
+                            "skip_reason": item.get("fallback_reason") or "fallback_skipped_by_user",
+                        }
+                    )
+                else:
+                    merged_crawl_results.append(
+                        recrawled_map.get(
+                            url_hash,
+                            {
+                                "url": item.get("url"),
+                                "url_hash": url_hash,
+                                "status": "error",
+                                "error": "Selenium fallback requested but crawl did not produce a result",
+                                "output_dir": item.get("output_dir"),
+                                "segments_path": None,
+                                "num_segments": 0,
+                            },
+                        )
+                    )
+            crawl_results = merged_crawl_results
+            save_pending_crawl_results(out_dir, crawl_results)
+        else:
+            crawl_results = crawl_urls(urls, out_dir=str(DATA_DIR), enable_video=options.enable_video)
 
         ok_hashes = [r["url_hash"] for r in crawl_results if r.get("status") == "ok"]
         infer_data_dir = DATA_DIR
@@ -2374,6 +2693,7 @@ def analyze_compare(request: AnalyzeCompareRequest) -> Dict[str, Any]:
 
         return {
             "job_id": job_id,
+            "flow_state": "completed",
             "models": compare_results,
         }
     except HTTPException:

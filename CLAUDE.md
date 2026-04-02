@@ -407,8 +407,10 @@ Take a web URL, crawl text, split it into segments, optionally fetch video / tra
 
 1. use `trafilatura.fetch_url()`
 2. run `trafilatura.extract(..., include_comments=True)`
-3. if text is missing / short (`< 800` chars), fall back to Selenium
-4. Selenium scrolls the page and extracts again
+3. if text is missing / short (`< 800` chars):
+   - with `allow_selenium_fallback=True`: continue to Selenium
+   - with `allow_selenium_fallback=False`: return `needs_fallback_confirmation` metadata (no Selenium yet)
+4. Selenium scrolls the page and extracts again (only when allowed)
 5. if text is still `< 200` chars, mark as failure
 6. on success, segment with VnCoreNLP; if VnCoreNLP fails, fall back to regex sentence splitting
 7. save:
@@ -633,10 +635,18 @@ Allows:
     "seg_threshold": 0.4,
     "model_name": "phobert/v1",
     "model_path": null,
-    "enable_video": false
-  }
+    "enable_video": false,
+    "selenium_fallback_mode": "auto"
+  },
+  "pending_job_id": null,
+  "fallback_decisions": []
 }
 ```
+
+`selenium_fallback_mode` supports:
+
+- `auto`: keep old behavior (auto Selenium when trafilatura text is short)
+- `ask`: detect URLs that may need Selenium, return them for user decision, then resume with `pending_job_id` + `fallback_decisions`
 
 ### `/api/analyze` flow
 
@@ -644,12 +654,15 @@ Allows:
 2. create `job_id`
 3. create output dir `data/processed/job_<job_id>`
 4. resolve model from `model_name` or `model_path`
-5. call `crawl_urls()`
-6. if `enable_video=True` and `video_data.jsonl` exists, merge text segments + transcripts into `merged_crawl/`
-7. resolve `thresholds_by_domain` from `CATEGORY_THRESHOLDS` + saved overrides in `feedback.db`
-8. call `infer_crawled()`
-9. read page-level + segment-level artifacts
-10. map everything back by URL for the response
+5. crawl step:
+   - `selenium_fallback_mode="auto"`: call `crawl_urls()` with normal Selenium fallback
+   - `selenium_fallback_mode="ask"`: run detect-only crawl first; if needed, return `flow_state="awaiting_user_choice"` + `pending_fallback_urls`
+6. resume step (only for ask mode): client sends `pending_job_id` + `fallback_decisions`, backend applies per-URL decisions (`use_selenium` or `skip`)
+7. if `enable_video=True` and `video_data.jsonl` exists, merge text segments + transcripts into `merged_crawl/`
+8. resolve `thresholds_by_domain` from `CATEGORY_THRESHOLDS` + saved overrides in `feedback.db`
+9. call `infer_crawled()`
+10. read page-level + segment-level artifacts
+11. map everything back by URL for the response
 
 The backend also deletes old `data/processed/job_*` folders using `JOB_RETENTION_HOURS` (default 24h).
 
@@ -658,6 +671,7 @@ The backend also deletes old `data/processed/job_*` folders using `JOB_RETENTION
 ```json
 {
   "job_id": "uuidhex",
+  "flow_state": "completed",
   "model_name": "phobert/v1",
   "thresholds": {
     "seg_threshold": 0.4,
@@ -705,6 +719,9 @@ Important notes:
 - `overall` prefers `avg_toxic_prob`, and only falls back to `toxic_ratio`
 - the backend returns `videos` loaded from `video_data.jsonl`
 - `job_id` is an important debugging handle
+- in ask mode, backend can return an intermediate payload:
+  - `flow_state: "awaiting_user_choice"`
+  - `pending_fallback_urls: [{url, url_hash, reason, trafilatura_text_len}]`
 - page / segment feedback is stored in `data/processed/feedback/feedback.db`
 
 ---
@@ -722,6 +739,14 @@ The real backend-connected frontend logic is in:
 - `src/app/components/ResultsPage.tsx`
 - `src/app/components/DatasetPage.tsx`
 - `src/app/components/Navigation.tsx`
+  - top bar, including dark/light toggle UI
+
+### App shell (`App.tsx`)
+
+- handles two-step Selenium decision flow in ask mode with in-app popup (no browser `confirm`)
+- stores scan history in `localStorage` (`viettoxic:scan-history`)
+- stores theme preference in `localStorage` (`viettoxic:theme`)
+- applies dark mode via `document.documentElement.classList.toggle("dark", ...)`
 
 ### API base
 
@@ -743,6 +768,8 @@ The real backend-connected frontend logic is in:
   - `page_threshold: 0.25`
   - `seg_threshold: 0.4`
   - `enable_video: true`
+  - `selenium_fallback_mode: "ask"`
+- loading UX now shows animated percentage progress (UI-driven ramp) instead of a static spinner while waiting for API response
 
 ### ResultsPage
 
@@ -752,6 +779,7 @@ The real backend-connected frontend logic is in:
 - uses `page_toxic` if present; otherwise falls back to `overall >= page_threshold`
 - can submit page feedback, segment feedback, preview/apply current thresholds, and call `/api/ask-ai`
 - when compare results are present, `App.tsx` lets the user switch the displayed model payload without rerunning the crawl
+- explicitly renders skipped URLs with neutral amber status message (`status: "skipped"`) when user chooses not to chuyển qua Selenium
 
 ### DatasetPage
 

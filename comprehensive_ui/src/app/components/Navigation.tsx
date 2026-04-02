@@ -1,11 +1,13 @@
-import { Shield } from "lucide-react";
+import { Moon, Shield, Sun } from "lucide-react";
 
 interface NavigationProps {
   currentPage: string;
   onNavigate: (page: string) => void;
+  theme: "light" | "dark";
+  onToggleTheme: () => void;
 }
 
-export function Navigation({ currentPage, onNavigate }: NavigationProps) {
+export function Navigation({ currentPage, onNavigate, theme, onToggleTheme }: NavigationProps) {
   const navItems = [
     { name: "Home", id: "home" },
     { name: "Results", id: "results" },
@@ -16,7 +18,7 @@ export function Navigation({ currentPage, onNavigate }: NavigationProps) {
   ];
 
   return (
-    <nav className="sticky top-0 z-50 bg-white shadow-sm border-b border-gray-200">
+    <nav className="sticky top-0 z-50 border-b border-border bg-background/95 shadow-sm backdrop-blur">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="flex justify-between items-center h-16">
           {/* Logo */}
@@ -37,43 +39,35 @@ export function Navigation({ currentPage, onNavigate }: NavigationProps) {
             </span>
           </div>
 
-          {/* Navigation Items */}
-          <div className="hidden md:flex items-center gap-8">
-            {navItems.map((item) => (
-              <button
-                key={item.id}
-                onClick={() => onNavigate(item.id)}
-                className={`transition-colors px-3 py-2 rounded-lg ${
-                  currentPage === item.id
-                    ? "font-medium"
-                    : "hover:bg-gray-100"
-                }`}
-                style={{
-                  color: currentPage === item.id ? "var(--viet-primary)" : "#374151",
-                  backgroundColor: currentPage === item.id ? "rgba(0, 51, 102, 0.05)" : "transparent",
-                }}
-              >
-                {item.name}
-              </button>
-            ))}
-          </div>
+          <div className="flex items-center gap-3">
+            {/* Navigation Items */}
+            <div className="hidden md:flex items-center gap-8">
+              {navItems.map((item) => (
+                <button
+                  key={item.id}
+                  onClick={() => onNavigate(item.id)}
+                  className={`rounded-lg px-3 py-2 transition-colors ${
+                    currentPage === item.id ? "font-medium" : "text-foreground/80 hover:bg-accent"
+                  }`}
+                  style={{
+                    color: currentPage === item.id ? "var(--viet-primary)" : undefined,
+                    backgroundColor:
+                      currentPage === item.id ? "color-mix(in srgb, var(--viet-primary) 10%, transparent)" : "transparent",
+                  }}
+                >
+                  {item.name}
+                </button>
+              ))}
+            </div>
 
-          {/* Mobile menu button */}
-          <div className="md:hidden">
-            <button className="p-2 rounded-lg hover:bg-gray-100">
-              <svg
-                className="w-6 h-6"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M4 6h16M4 12h16M4 18h16"
-                />
-              </svg>
+            <button
+              type="button"
+              onClick={onToggleTheme}
+              aria-label={theme === "dark" ? "Chuyển sang giao diện sáng" : "Chuyển sang giao diện tối"}
+              title={theme === "dark" ? "Light mode" : "Dark mode"}
+              className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-border bg-muted/70 text-foreground/80 transition-colors hover:bg-accent"
+            >
+              {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
             </button>
           </div>
         </div>

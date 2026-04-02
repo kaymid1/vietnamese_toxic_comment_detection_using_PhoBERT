@@ -29,7 +29,7 @@ import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urljoin, urlparse, parse_qs
 from datetime import datetime
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 def ensure_runtime_deps():
     """
@@ -855,6 +855,7 @@ def crawl_and_save(
     keep_artifacts: bool = False,
     asr_max_seconds: int = 600,
     asr_language: str = "vi",
+    allow_selenium_fallback: bool = True,
 ) -> dict:
     import trafilatura
 
@@ -893,7 +894,26 @@ def crawl_and_save(
 
     # Step 2: Fallback Selenium
     if not text or len(text) < 800:
-        print(f"[FALLBACK] Text short ({len(text) if text else 0} chars) -> Selenium")
+        text_len = len(text) if text else 0
+        if not allow_selenium_fallback:
+            duration = round(time.time() - start_total, 2)
+            reason = "trafilatura_empty" if text_len == 0 else "trafilatura_short_text"
+            return {
+                "url": url,
+                "url_hash": url_hash,
+                "status": "needs_fallback_confirmation",
+                "error": None,
+                "output_dir": save_folder,
+                "segments_path": None,
+                "num_segments": 0,
+                "method": "trafilatura_fast",
+                "duration_sec": duration,
+                "warnings": warnings,
+                "fallback_reason": reason,
+                "trafilatura_text_len": text_len,
+            }
+
+        print(f"[FALLBACK] Text short ({text_len} chars) -> Selenium")
         driver = None
         try:
             driver = make_driver(timeout=timeout, headless=True)
@@ -1326,6 +1346,8 @@ def crawl_urls(
     keep_artifacts: bool = False,
     asr_max_seconds: int = 600,
     asr_language: str = "vi",
+    allow_selenium_fallback: bool = True,
+    fallback_decisions: Optional[Dict[str, str]] = None,
 ) -> List[dict]:
     """
     Crawl a list of URLs and return per-URL crawl info.
@@ -1335,11 +1357,22 @@ def crawl_urls(
     ensure_vncorenlp_assets()
     seg = Segmenter(VNC_JAR_PATH)
 
+    decisions = fallback_decisions or {}
+
     results: List[dict] = []
     for url in urls:
         url = url.strip()
         if not url:
             continue
+
+        url_hash = hash_url(url)
+        decision = decisions.get(url_hash) or decisions.get(url)
+        should_allow_selenium = allow_selenium_fallback
+        if decision == "use_selenium":
+            should_allow_selenium = True
+        elif decision == "skip":
+            should_allow_selenium = False
+
         try:
             info = crawl_and_save(
                 url,
@@ -1351,14 +1384,33 @@ def crawl_urls(
                 keep_artifacts=keep_artifacts,
                 asr_max_seconds=asr_max_seconds,
                 asr_language=asr_language,
+                allow_selenium_fallback=should_allow_selenium,
             )
+            if info.get("status") == "needs_fallback_confirmation" and decision == "skip":
+                info = {
+                    "url": url,
+                    "url_hash": url_hash,
+                    "status": "skipped",
+                    "error": None,
+                    "output_dir": info.get("output_dir") or os.path.join(out_dir, url_hash),
+                    "segments_path": None,
+                    "num_segments": 0,
+                    "method": "skip_by_user",
+                    "duration_sec": info.get("duration_sec"),
+                    "warnings": (info.get("warnings") or []) + [{
+                        "code": "fallback_skipped",
+                        "message": "Skipped Selenium fallback by user choice",
+                    }],
+                    "skip_reason": info.get("fallback_reason") or "fallback_skipped_by_user",
+                    "trafilatura_text_len": info.get("trafilatura_text_len"),
+                }
         except Exception as e:
             info = {
                 "url": url,
-                "url_hash": hash_url(url),
+                "url_hash": url_hash,
                 "status": "error",
                 "error": f"Unexpected crawl error: {e}",
-                "output_dir": os.path.join(out_dir, hash_url(url)),
+                "output_dir": os.path.join(out_dir, url_hash),
                 "segments_path": None,
                 "num_segments": 0,
             }

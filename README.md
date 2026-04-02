@@ -50,6 +50,10 @@ flowchart TD
 
 - Analyze one or more URLs from the web UI
 - Crawl real webpage content before inference
+- Interactive Selenium decision flow for hard URLs:
+  - backend can pause and ask for per-URL decision (`use_selenium` or `skip`)
+  - UI shows in-app popup choices (no browser confirm dialog)
+  - skipped URLs are preserved in results with `status: "skipped"`
 - Return:
   - page-level toxicity score
   - segment-level toxicity scores
@@ -59,6 +63,7 @@ flowchart TD
 - Reuse learned segment feedback at inference-time via hash matching (`segment_hash` / `context_segment_hash`)
 - Apply stronger toxic penalty (`toxic_lock`) when toxic feedback is sufficiently consistent
 - Optional Gemini-based explanation for results when `GEMINI_API_KEY` is configured
+- UI includes dark/light toggle in top navigation, persisted via localStorage (`viettoxic:theme`)
 
 **Feedback scope & runtime behavior**
 
@@ -120,8 +125,10 @@ Current API is defined in `backend/app.py`.
   - list available local models and default model
 - `POST /api/analyze`
   - crawl URLs, run inference, return page-level and segment-level results
+  - supports two-step interactive flow with `selenium_fallback_mode: "ask"`
 - `POST /api/analyze_compare`
   - run the same URLs through multiple models and compare outputs
+  - also supports the same two-step interactive Selenium decision flow
 
 ### AI explanation
 
@@ -152,10 +159,21 @@ curl -X POST http://localhost:8000/api/analyze \
       "max_length": 256,
       "page_threshold": 0.25,
       "seg_threshold": 0.4,
-      "enable_video": true
+      "enable_video": true,
+      "selenium_fallback_mode": "ask"
     }
   }'
 ```
+
+When `selenium_fallback_mode` is `"ask"`, API may first return:
+
+- `flow_state: "awaiting_user_choice"`
+- `pending_fallback_urls: [{url, url_hash, trafilatura_text_len, reason}]`
+
+Then client resumes by calling the same endpoint with:
+
+- `pending_job_id`
+- `fallback_decisions: [{url_hash, action}]` where `action` is `"use_selenium"` or `"skip"`
 
 ## Available Model Types
 
@@ -304,10 +322,13 @@ Segment-level outputs (`crawled_predictions.jsonl`) include:
 
 - Web UI is implemented
 - URL analysis works end-to-end
+- Interactive per-URL Selenium/skip decision flow is implemented for both analyze and compare mode
 - Local model comparison is implemented
 - Feedback loop is implemented
 - Hybrid domain-aware thresholding is implemented
 - Local model artifacts are present in `models/options/`
+- HomePage loading indicator now shows animated percentage progress while waiting for analysis
+- Top navigation supports persisted dark/light toggle
 
 ## Known Limitations
 
