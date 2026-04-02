@@ -204,7 +204,7 @@ export function ProtocolPage() {
   if (error) {
     return (
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-10 space-y-4">
-        <Card className="p-6 text-red-700">Lỗi tải dữ liệu Protocol: {error}</Card>
+        <Card className="p-6 text-text-danger">Lỗi tải dữ liệu Protocol: {error}</Card>
         <Button onClick={() => void fetchSummary()}>Thử lại</Button>
       </div>
     );
@@ -213,10 +213,10 @@ export function ProtocolPage() {
   return (
     <div className="max-w-[1450px] mx-auto px-4 sm:px-6 lg:px-8 py-10">
       <div className="flex items-start gap-6">
-        <aside className="hidden xl:block w-60 shrink-0 sticky top-24 bg-[#f1f4f6] rounded-xl p-4">
+        <aside className="hidden xl:block w-60 shrink-0 sticky top-24 bg-background-secondary rounded-xl p-4">
           <div className="mb-4">
-            <h2 className="text-base font-bold text-slate-900">The Precision Lab</h2>
-            <p className="text-[11px] text-slate-500">VNToxic-Pipeline v1.0</p>
+            <h2 className="text-base font-bold text-foreground">The Precision Lab</h2>
+            <p className="text-[11px] text-muted-foreground">VNToxic-Pipeline v1.0</p>
           </div>
           <nav className="space-y-1 text-sm">
             {SIDEBAR_ITEMS.map((item) => {
@@ -227,8 +227,8 @@ export function ProtocolPage() {
                   onClick={() => jumpToSection(item.id)}
                   className={`w-full text-left px-3 py-2 rounded-lg transition ${
                     active
-                      ? "bg-white text-[#1c5fa8] font-semibold border-r-2 border-[#1c5fa8]"
-                      : "text-slate-500 hover:bg-white/70"
+                      ? "bg-card text-text-info font-semibold border-r-2 border-border-info"
+                      : "text-muted-foreground hover:bg-card/70"
                   }`}
                 >
                   {item.label}
@@ -236,24 +236,24 @@ export function ProtocolPage() {
               );
             })}
           </nav>
-          <div className="mt-5 pt-4 border-t border-slate-200">
-            <p className="text-sm font-semibold text-slate-800">Nguyen Van A</p>
-            <p className="text-xs text-slate-500">Thesis Candidate</p>
+          <div className="mt-5 pt-4 border-t border-border">
+            <p className="text-sm font-semibold text-foreground">Nguyen Van A</p>
+            <p className="text-xs text-muted-foreground">Thesis Candidate</p>
           </div>
         </aside>
 
         <div className="flex-1 space-y-6">
           <section className="space-y-3" id="decision">
             <div className="flex flex-wrap items-center gap-2">
-              <Badge className="bg-[#c9e8ec] text-[#3a5659] hover:bg-[#c9e8ec]">ViCTSD</Badge>
-              <Badge variant="secondary" className="bg-[#e3e9ec] text-[#586064]">ViHSD</Badge>
-              <Badge variant="secondary" className="bg-[#e3e9ec] text-[#586064]">Toxicity</Badge>
-              <Badge variant="secondary" className="bg-[#e3e9ec] text-[#586064]">Preprocessing</Badge>
+              <Badge className="bg-background-info text-text-info hover:bg-background-info">ViCTSD</Badge>
+              <Badge variant="secondary" className="bg-muted text-muted-foreground">ViHSD</Badge>
+              <Badge variant="secondary" className="bg-muted text-muted-foreground">Toxicity</Badge>
+              <Badge variant="secondary" className="bg-muted text-muted-foreground">Preprocessing</Badge>
             </div>
-            <h1 className="text-3xl font-bold text-[#2b3437]">
+            <h1 className="text-3xl font-bold text-foreground">
               Protocol Evaluation & Decision Dashboard
             </h1>
-            <p className="text-[#586064]">
+            <p className="text-muted-foreground">
               Compare ViCTSD/ViHSD protocols and choose the final thesis protocol for production deployment.
             </p>
           </section>
@@ -261,10 +261,10 @@ export function ProtocolPage() {
           <div className="grid grid-cols-12 gap-6 items-start">
             <div className="col-span-12 lg:col-span-8 space-y-6">
               <section id="evaluation">
-                <Card className="p-5 bg-white border border-[#abb3b7]/40 shadow-sm">
+                <Card className="p-5 bg-card border border-border/40 shadow-sm">
                   <div className="flex items-center justify-between mb-4">
                     <h2 className="text-xl font-semibold">Weighted Decision Matrix</h2>
-                    <Badge variant="outline" className="text-[#1c5fa8]">Calculated 2:15 PM</Badge>
+                    <Badge variant="outline" className="text-text-info">Calculated 2:15 PM</Badge>
                   </div>
                   <Table>
                     <TableHeader>
@@ -301,40 +301,40 @@ export function ProtocolPage() {
 
               <section id="protocol-building">
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                  <Card className="p-4 bg-white border border-[#abb3b7]/40">
+                  <Card className="p-4 bg-card border border-border/40">
                     <h3 className="font-semibold mb-2">Data Leakage Check</h3>
-                    <ul className="space-y-1 text-sm text-[#586064]">
+                    <ul className="space-y-1 text-sm text-muted-foreground">
                       {protocols.map((p) => (
                         <li key={p.id} className="flex items-center justify-between">
                           <span>{p.name}</span>
-                          <span className={p.overlap_exact?.train_test ? "text-amber-700" : "text-[#006a6a]"}>
+                          <span className={p.overlap_exact?.train_test ? "text-text-warning" : "text-text-success"}>
                             {(p.overlap_exact?.train_test ?? 0) === 0 ? "PASS" : "CHECK"}
                           </span>
                         </li>
                       ))}
                     </ul>
                   </Card>
-                  <Card className="p-4 bg-white border border-[#abb3b7]/40">
+                  <Card className="p-4 bg-card border border-border/40">
                     <h3 className="font-semibold mb-2">Reproducibility</h3>
-                    <p className="text-sm text-[#586064]">Training artifacts available with consistent schema and finalized metrics outputs.</p>
+                    <p className="text-sm text-muted-foreground">Training artifacts available with consistent schema and finalized metrics outputs.</p>
                   </Card>
-                  <Card className="p-4 bg-white border border-[#abb3b7]/40">
+                  <Card className="p-4 bg-card border border-border/40">
                     <h3 className="font-semibold mb-2">Deploy Feasibility</h3>
-                    <p className="text-sm text-[#586064]">All protocols provide deployable metrics bundles; Protocol C leads final score.</p>
+                    <p className="text-sm text-muted-foreground">All protocols provide deployable metrics bundles; Protocol C leads final score.</p>
                   </Card>
                 </div>
               </section>
 
               <section id="decision">
-                <Card className="p-6 bg-gradient-to-r from-[#1c5fa8] to-[#00539b] text-white border-0 shadow-lg">
+                <Card className="p-6 bg-gradient-to-r from-text-info to-primary text-white border-0 shadow-lg">
                   <h2 className="text-2xl font-bold mb-2">Selected protocol: {winner?.name || "--"}</h2>
-                  <p className="text-blue-50 mb-4">
+                  <p className="text-background-info mb-4">
                     Based on weighted analysis and gating checks, this protocol shows the strongest balance of toxicity detection and overall stability.
                   </p>
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
                     <div>
                       <p className="font-semibold mb-1">Selection rationale</p>
-                      <ul className="list-disc pl-5 space-y-1 text-blue-50">
+                      <ul className="list-disc pl-5 space-y-1 text-background-info">
                         <li>Highest F1_toxic among evaluated protocols</li>
                         <li>Strong Macro-F1 consistency</li>
                         <li>Better calibration profile (ECE/Brier)</li>
@@ -342,7 +342,7 @@ export function ProtocolPage() {
                     </div>
                     <div>
                       <p className="font-semibold mb-1">Next step</p>
-                      <ul className="list-disc pl-5 space-y-1 text-blue-50">
+                      <ul className="list-disc pl-5 space-y-1 text-background-info">
                         <li>Export selected artifacts for deployment handoff</li>
                         <li>Write thesis discussion with A/B comparative error analysis</li>
                       </ul>
@@ -350,14 +350,14 @@ export function ProtocolPage() {
                   </div>
                   <div className="mt-5 flex flex-wrap gap-2">
                     <Button variant="secondary">Export Protocol</Button>
-                    <Button variant="outline" className="text-white border-white/40 hover:bg-white/10">Share Results</Button>
+                    <Button variant="outline" className="text-white border-white/40 hover:bg-card/10">Share Results</Button>
                   </div>
                 </Card>
               </section>
             </div>
 
             <div className="col-span-12 lg:col-span-4 space-y-6" id="preprocessing">
-              <Card className="p-5 bg-white border border-[#abb3b7]/40 shadow-sm">
+              <Card className="p-5 bg-card border border-border/40 shadow-sm">
                 <h3 className="text-lg font-semibold mb-4">Scoring Configuration</h3>
                 <div className="space-y-3 text-sm">
                   <div className="flex items-center justify-between"><span>F1_toxic weight</span><span className="font-semibold">30%</span></div>
@@ -366,10 +366,10 @@ export function ProtocolPage() {
                   <div className="flex items-center justify-between"><span>Robustness</span><span className="font-semibold">20%</span></div>
                   <div className="flex items-center justify-between"><span>Efficiency</span><span className="font-semibold">15%</span></div>
                 </div>
-                <Button className="w-full mt-4 bg-[#1c5fa8] hover:bg-[#00539b]">Recalculate Winner</Button>
+                <Button className="w-full mt-4 bg-primary hover:bg-primary/90">Recalculate Winner</Button>
               </Card>
 
-              <Card className="p-5 bg-white border border-[#abb3b7]/40 shadow-sm" id="training">
+              <Card className="p-5 bg-card border border-border/40 shadow-sm" id="training">
                 <h3 className="text-lg font-semibold mb-3">Training Snapshot</h3>
                 <Table>
                   <TableHeader>
@@ -398,11 +398,11 @@ export function ProtocolPage() {
                                       <TooltipTrigger asChild>
                                         <button
                                           type="button"
-                                          className="h-8 w-4 rounded-sm bg-[#dbe5f0] overflow-hidden border border-[#b8c6d8]"
+                                          className="h-8 w-4 rounded-sm bg-background-info overflow-hidden border border-border-info"
                                           aria-label={`${p.name} ${formatSeed(run.seed)} F1_toxic ${formatScore(run.f1_toxic)}`}
                                         >
                                           <span
-                                            className="block w-full bg-[#1c5fa8]"
+                                            className="block w-full bg-primary"
                                             style={{ height: metricBarWidth(run.f1_toxic) }}
                                           />
                                         </button>
@@ -420,14 +420,14 @@ export function ProtocolPage() {
                                     </Tooltip>
                                   ))}
                                 </div>
-                                <div className="text-[11px] text-[#586064]">
+                                <div className="text-[11px] text-muted-foreground">
                                   n={seedSummary?.n_runs ?? seedRuns.length}
                                   {typeof seedSummary?.f1_toxic_mean === "number" && ` · μ=${seedSummary.f1_toxic_mean.toFixed(3)}`}
                                   {typeof seedSummary?.f1_toxic_std === "number" && ` · σ=${seedSummary.f1_toxic_std.toFixed(3)}`}
                                 </div>
                               </div>
                             ) : (
-                              <span className="text-xs text-[#586064]">No multi-seed data yet</span>
+                              <span className="text-xs text-muted-foreground">No multi-seed data yet</span>
                             )}
                           </TableCell>
                         </TableRow>
@@ -437,11 +437,11 @@ export function ProtocolPage() {
                 </Table>
               </Card>
 
-              <Card className="p-5 bg-[#f1f4f6] border border-[#abb3b7]/30">
-                <div className="text-xs uppercase tracking-wide text-[#586064] mb-2">System status</div>
-                <div className="text-2xl font-bold text-[#2b3437] mb-1">0.832</div>
-                <div className="text-sm text-[#586064]">Average metric snapshot</div>
-                <div className="mt-4 text-xs text-[#586064]">{data?.source_note || "Source artifacts loaded from local protocol outputs."}</div>
+              <Card className="p-5 bg-background-secondary border border-border/30">
+                <div className="text-xs uppercase tracking-wide text-muted-foreground mb-2">System status</div>
+                <div className="text-2xl font-bold text-foreground mb-1">0.832</div>
+                <div className="text-sm text-muted-foreground">Average metric snapshot</div>
+                <div className="mt-4 text-xs text-muted-foreground">{data?.source_note || "Source artifacts loaded from local protocol outputs."}</div>
               </Card>
             </div>
           </div>
@@ -449,7 +449,7 @@ export function ProtocolPage() {
           {(data?.warnings?.length ?? 0) > 0 && (
             <Card className="p-5">
               <h3 className="font-semibold mb-2">Warnings</h3>
-              <ul className="list-disc pl-5 space-y-1 text-sm text-gray-700">
+              <ul className="list-disc pl-5 space-y-1 text-sm text-foreground">
                 {data?.warnings?.map((w, idx) => <li key={idx}>{w}</li>)}
               </ul>
             </Card>

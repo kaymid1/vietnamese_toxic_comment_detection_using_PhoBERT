@@ -341,63 +341,60 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
   };
 
   return (
-    <div style={{ backgroundColor: "var(--viet-bg)" }} className="min-h-screen py-12 px-4 sm:px-6 lg:px-8">
+    <div style={{ backgroundColor: "var(--background)" }} className="min-h-screen py-12 px-4 sm:px-6 lg:px-8">
       <div className="max-w-6xl mx-auto">
         {/* Header */}
         <div className="mb-12 text-center">
-          <h1 className="text-4xl mb-4" style={{ color: "var(--viet-primary)" }}>
+          <h1 className="text-4xl mb-4" style={{ color: "var(--primary)" }}>
             Model & Hiệu Năng Hệ Thống
           </h1>
-          <p className="text-xl text-gray-600 max-w-3xl mx-auto">
+          <p className="text-xl text-muted-foreground max-w-3xl mx-auto">
             Tìm hiểu về mô hình PhoBERT và hiệu năng phát hiện nội dung độc hại tiếng Việt
           </p>
         </div>
 
         {/* Model Description */}
-        <Card className="bg-white p-8 mb-8 shadow-lg">
+        <Card className="bg-card p-8 mb-8 shadow-lg">
           <div className="flex items-start gap-4 mb-6">
-            <div
-              className="w-12 h-12 rounded-lg flex items-center justify-center flex-shrink-0"
-              style={{ backgroundColor: "rgba(0, 51, 102, 0.1)" }}
-            >
-              <Cpu className="w-6 h-6" style={{ color: "var(--viet-primary)" }} />
+            <div className="w-12 h-12 rounded-lg flex items-center justify-center flex-shrink-0 bg-background-info">
+              <Cpu className="w-6 h-6" style={{ color: "var(--primary)" }} />
             </div>
             <div className="flex-1">
-              <h2 className="text-2xl mb-3" style={{ color: "var(--viet-primary)" }}>
+              <h2 className="text-2xl mb-3" style={{ color: "var(--primary)" }}>
                 Về Mô Hình PhoBERT
               </h2>
-              <p className="text-gray-700 leading-relaxed mb-4">
+              <p className="text-foreground leading-relaxed mb-4">
                 VietToxic Detector sử dụng <strong>PhoBERT-base</strong>, một mô hình ngôn ngữ
                 tiên tiến được huấn luyện trước trên kho ngữ liệu tiếng Việt lớn. Mô hình này
                 được tinh chỉnh (fine-tuned) đặc biệt cho tác vụ phát hiện nội dung độc hại.
               </p>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div className="flex items-start gap-3">
-                  <CheckCircle className="w-5 h-5 mt-1 flex-shrink-0" style={{ color: "var(--viet-safe)" }} />
+                  <CheckCircle className="w-5 h-5 mt-1 flex-shrink-0" style={{ color: "var(--success)" }} />
                   <div>
                     <h4 className="mb-1">Tiền xử lý văn bản</h4>
-                    <p className="text-sm text-gray-600">Chuẩn hóa Unicode + khoảng trắng</p>
+                    <p className="text-sm text-muted-foreground">Chuẩn hóa Unicode + khoảng trắng</p>
                   </div>
                 </div>
                 <div className="flex items-start gap-3">
-                  <CheckCircle className="w-5 h-5 mt-1 flex-shrink-0" style={{ color: "var(--viet-safe)" }} />
+                  <CheckCircle className="w-5 h-5 mt-1 flex-shrink-0" style={{ color: "var(--success)" }} />
                   <div>
                     <h4 className="mb-1">Giữ nguyên chữ hoa</h4>
-                    <p className="text-sm text-gray-600">Không lowercase để giữ thông tin quan trọng</p>
+                    <p className="text-sm text-muted-foreground">Không lowercase để giữ thông tin quan trọng</p>
                   </div>
                 </div>
                 <div className="flex items-start gap-3">
-                  <Database className="w-5 h-5 mt-1 flex-shrink-0" style={{ color: "var(--viet-primary)" }} />
+                  <Database className="w-5 h-5 mt-1 flex-shrink-0" style={{ color: "var(--primary)" }} />
                   <div>
                     <h4 className="mb-1">Bộ dữ liệu</h4>
-                    <p className="text-sm text-gray-600">ViCTSD + feedback mới thu thập</p>
+                    <p className="text-sm text-muted-foreground">ViCTSD + feedback mới thu thập</p>
                   </div>
                 </div>
                 <div className="flex items-start gap-3">
-                  <TrendingUp className="w-5 h-5 mt-1 flex-shrink-0" style={{ color: "var(--viet-primary)" }} />
+                  <TrendingUp className="w-5 h-5 mt-1 flex-shrink-0" style={{ color: "var(--primary)" }} />
                   <div>
                     <h4 className="mb-1">Transfer Learning</h4>
-                    <p className="text-sm text-gray-600">Tận dụng kiến thức từ pre-training</p>
+                    <p className="text-sm text-muted-foreground">Tận dụng kiến thức từ pre-training</p>
                   </div>
                 </div>
               </div>
@@ -406,52 +403,52 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
         </Card>
 
         {/* Experiment Registry */}
-        <Card className="bg-white p-8 mb-8 shadow-lg">
+        <Card className="bg-card p-8 mb-8 shadow-lg">
           <div className="flex flex-wrap items-center justify-between gap-4 mb-6">
             <div>
-              <h2 className="text-2xl mb-1" style={{ color: "var(--viet-primary)" }}>
+              <h2 className="text-2xl mb-1" style={{ color: "var(--primary)" }}>
                 Model Registry
               </h2>
-              <p className="text-sm text-gray-600">Thống kê từ experiments/registry.json</p>
+              <p className="text-sm text-muted-foreground">Thống kê từ experiments/registry.json</p>
             </div>
             <div className="flex flex-wrap items-center gap-2">
-              <Badge className="bg-blue-100 text-blue-700">Last updated: {registry.last_updated ?? "--"}</Badge>
+              <Badge className="bg-background-info text-text-info">Last updated: {registry.last_updated ?? "--"}</Badge>
               <Button variant="outline" onClick={() => void fetchRegistry(true)}>
                 Refresh registry
               </Button>
             </div>
           </div>
-          {registryError && <p className="text-sm text-red-600 mb-4">{registryError}</p>}
+          {registryError && <p className="text-sm text-destructive mb-4">{registryError}</p>}
           {baselineRun && (
             <div className="border rounded-lg p-5 mb-6">
               <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
                 <div>
-                  <h3 className="text-lg" style={{ color: "var(--viet-primary)" }}>
+                  <h3 className="text-lg" style={{ color: "var(--primary)" }}>
                     Baseline: {baselineRun.model_name}
                   </h3>
-                  <p className="text-sm text-gray-600">Dataset: {baselineRun.dataset_version}</p>
+                  <p className="text-sm text-muted-foreground">Dataset: {baselineRun.dataset_version}</p>
                 </div>
-                <Badge className="bg-green-100 text-green-700">{baselineRun.created_at}</Badge>
+                <Badge className="bg-background-success text-text-success">{baselineRun.created_at}</Badge>
               </div>
               <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-                <Card className="bg-white border p-4">
-                  <p className="text-xs text-gray-500">F1</p>
-                  <p className="text-xl text-gray-800">{formatScore(baselineRun.metrics?.f1)}</p>
+                <Card className="bg-card border p-4">
+                  <p className="text-xs text-muted-foreground">F1</p>
+                  <p className="text-xl text-foreground">{formatScore(baselineRun.metrics?.f1)}</p>
                 </Card>
-                <Card className="bg-white border p-4">
-                  <p className="text-xs text-gray-500">Precision</p>
-                  <p className="text-xl text-gray-800">{formatScore(baselineRun.metrics?.precision)}</p>
+                <Card className="bg-card border p-4">
+                  <p className="text-xs text-muted-foreground">Precision</p>
+                  <p className="text-xl text-foreground">{formatScore(baselineRun.metrics?.precision)}</p>
                 </Card>
-                <Card className="bg-white border p-4">
-                  <p className="text-xs text-gray-500">Recall</p>
-                  <p className="text-xl text-gray-800">{formatScore(baselineRun.metrics?.recall)}</p>
+                <Card className="bg-card border p-4">
+                  <p className="text-xs text-muted-foreground">Recall</p>
+                  <p className="text-xl text-foreground">{formatScore(baselineRun.metrics?.recall)}</p>
                 </Card>
-                <Card className="bg-white border p-4">
-                  <p className="text-xs text-gray-500">Accuracy</p>
-                  <p className="text-xl text-gray-800">{formatScore(baselineRun.metrics?.accuracy)}</p>
+                <Card className="bg-card border p-4">
+                  <p className="text-xs text-muted-foreground">Accuracy</p>
+                  <p className="text-xl text-foreground">{formatScore(baselineRun.metrics?.accuracy)}</p>
                 </Card>
               </div>
-              <p className="text-sm text-gray-600 mt-3">Checkpoint: {baselineRun.checkpoint_path}</p>
+              <p className="text-sm text-muted-foreground mt-3">Checkpoint: {baselineRun.checkpoint_path}</p>
             </div>
           )}
 
@@ -484,7 +481,7 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
                 ))}
                 {!registry.runs.length && (
                   <TableRow>
-                    <TableCell colSpan={8} className="text-center text-sm text-gray-500">
+                    <TableCell colSpan={8} className="text-center text-sm text-muted-foreground">
                       Chưa có thí nghiệm nào
                     </TableCell>
                   </TableRow>
@@ -495,36 +492,33 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
         </Card>
 
         {/* Pipeline Demo */}
-        <Card className="bg-white p-8 mb-8 shadow-lg">
+        <Card className="bg-card p-8 mb-8 shadow-lg">
           <div className="flex items-start gap-4 mb-6">
-            <div
-              className="w-12 h-12 rounded-lg flex items-center justify-center flex-shrink-0"
-              style={{ backgroundColor: "rgba(0, 51, 102, 0.1)" }}
-            >
-              <FileText className="w-6 h-6" style={{ color: "var(--viet-primary)" }} />
+            <div className="w-12 h-12 rounded-lg flex items-center justify-center flex-shrink-0 bg-background-info">
+              <FileText className="w-6 h-6" style={{ color: "var(--primary)" }} />
             </div>
             <div className="flex-1">
-              <h2 className="text-2xl mb-2" style={{ color: "var(--viet-primary)" }}>
+              <h2 className="text-2xl mb-2" style={{ color: "var(--primary)" }}>
                 Pipeline Demo
               </h2>
-              <p className="text-sm text-gray-600">
+              <p className="text-sm text-muted-foreground">
                 Mô phỏng các bước tiền xử lý thực tế (chỉ hiển thị bước đã triển khai).
               </p>
             </div>
           </div>
 
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            <div className="border rounded-lg p-4 bg-gray-50">
-              <p className="text-xs text-gray-500 mb-2">Input (whitespace-visible)</p>
-              <p className="text-gray-800 text-sm font-mono whitespace-pre-wrap">{toVisibleWhitespace(demoInput)}</p>
+            <div className="border rounded-lg p-4 bg-background-secondary">
+              <p className="text-xs text-muted-foreground mb-2">Input (whitespace-visible)</p>
+              <p className="text-foreground text-sm font-mono whitespace-pre-wrap">{toVisibleWhitespace(demoInput)}</p>
               <div className="mt-4">
-                <p className="text-xs text-gray-500 mb-2">Output (whitespace-visible, sau {activeSteps.length} bước)</p>
-                <p className="text-gray-800 text-sm font-mono whitespace-pre-wrap">{toVisibleWhitespace(demoOutput)}</p>
+                <p className="text-xs text-muted-foreground mb-2">Output (whitespace-visible, sau {activeSteps.length} bước)</p>
+                <p className="text-foreground text-sm font-mono whitespace-pre-wrap">{toVisibleWhitespace(demoOutput)}</p>
               </div>
             </div>
 
             <div className="border rounded-lg p-4">
-              <p className="text-xs text-gray-500 mb-3">Các bước</p>
+              <p className="text-xs text-muted-foreground mb-3">Các bước</p>
               <div className="space-y-2">
                 {pipelineSteps.map((step, idx) => {
                   const isActive = step.active;
@@ -533,11 +527,11 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
                     <div
                       key={step.id}
                       className={`flex items-center justify-between rounded-lg border px-3 py-2 text-sm ${
-                        isActive ? "bg-white" : "bg-gray-50 text-gray-400"
-                      } ${isCurrent ? "border-blue-300" : "border-gray-200"}`}
+                        isActive ? "bg-card" : "bg-background-secondary text-muted-foreground"
+                      } ${isCurrent ? "border-border-info" : "border-border"}`}
                     >
                       <span>{step.label}</span>
-                      <Badge className={isActive ? "bg-green-100 text-green-700" : "bg-gray-200 text-gray-500"}>
+                      <Badge className={isActive ? "bg-background-success text-text-success" : "bg-muted text-muted-foreground"}>
                         {isActive ? "Active" : "Planned — not yet active"}
                       </Badge>
                     </div>
@@ -547,11 +541,11 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
             </div>
           </div>
 
-          <div className="mt-6 border rounded-lg p-4 bg-blue-50/40">
-            <h3 className="text-sm mb-3" style={{ color: "var(--viet-primary)" }}>
+          <div className="mt-6 border rounded-lg p-4 bg-background-info/40">
+            <h3 className="text-sm mb-3" style={{ color: "var(--primary)" }}>
               Lý do preprocessing hiện chỉ active 3 bước chính
             </h3>
-            <ul className="list-disc pl-5 space-y-2 text-sm text-gray-700">
+            <ul className="list-disc pl-5 space-y-2 text-sm text-foreground">
               <li>
                 <strong>PhoBERT là mô hình case-sensitive</strong>, nên không lowercase để giữ tín hiệu chữ hoa/chữ thường.
               </li>
@@ -572,64 +566,61 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
         </Card>
 
         {/* Performance Metrics */}
-        <Card className="bg-white p-8 mb-8 shadow-lg">
+        <Card className="bg-card p-8 mb-8 shadow-lg">
           <div className="flex items-start gap-4 mb-6">
-            <div
-              className="w-12 h-12 rounded-lg flex items-center justify-center flex-shrink-0"
-              style={{ backgroundColor: "rgba(0, 51, 102, 0.1)" }}
-            >
-              <LineChart className="w-6 h-6" style={{ color: "var(--viet-primary)" }} />
+            <div className="w-12 h-12 rounded-lg flex items-center justify-center flex-shrink-0 bg-background-info">
+              <LineChart className="w-6 h-6" style={{ color: "var(--primary)" }} />
             </div>
             <div className="flex-1">
-              <h2 className="text-2xl mb-3" style={{ color: "var(--viet-primary)" }}>
+              <h2 className="text-2xl mb-3" style={{ color: "var(--primary)" }}>
                 Hiệu Năng & Metrics
               </h2>
-              <p className="text-gray-700 mb-6">Đánh giá chất lượng mô hình theo registry</p>
+              <p className="text-foreground mb-6">Đánh giá chất lượng mô hình theo registry</p>
             </div>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
-            <div className="bg-gradient-to-br from-blue-50 to-blue-100 p-6 rounded-xl">
-              <h4 className="text-sm text-gray-600 mb-2">Macro F1-Score</h4>
+            <div className="bg-background-info p-6 rounded-xl">
+              <h4 className="text-sm text-muted-foreground mb-2">Macro F1-Score</h4>
               <div className="flex items-end gap-2">
-                <span className="text-4xl" style={{ color: "var(--viet-primary)" }}>
+                <span className="text-4xl" style={{ color: "var(--primary)" }}>
                   {formatScore(baselineRun?.metrics?.f1)}
                 </span>
-                <Badge className="mb-2" style={{ backgroundColor: "var(--viet-safe)" }}>
+                <Badge className="mb-2" style={{ backgroundColor: "var(--success)" }}>
                   Baseline
                 </Badge>
               </div>
-              <p className="text-sm text-gray-600 mt-2">Trung bình F1 của tất cả các lớp</p>
+              <p className="text-sm text-muted-foreground mt-2">Trung bình F1 của tất cả các lớp</p>
             </div>
 
-            <div className="bg-gradient-to-br from-red-50 to-red-100 p-6 rounded-xl">
-              <h4 className="text-sm text-gray-600 mb-2">Precision</h4>
+            <div className="bg-background-danger p-6 rounded-xl">
+              <h4 className="text-sm text-muted-foreground mb-2">Precision</h4>
               <div className="flex items-end gap-2">
-                <span className="text-4xl" style={{ color: "var(--viet-toxic)" }}>
+                <span className="text-4xl" style={{ color: "var(--destructive)" }}>
                   {formatScore(baselineRun?.metrics?.precision)}
                 </span>
-                <Badge className="mb-2 bg-orange-500">Baseline</Badge>
+                <Badge className="mb-2 bg-text-warning">Baseline</Badge>
               </div>
-              <p className="text-sm text-gray-600 mt-2">Độ chính xác (precision)</p>
+              <p className="text-sm text-muted-foreground mt-2">Độ chính xác (precision)</p>
             </div>
 
-            <div className="bg-gradient-to-br from-green-50 to-green-100 p-6 rounded-xl">
-              <h4 className="text-sm text-gray-600 mb-2">Recall</h4>
+            <div className="bg-background-success p-6 rounded-xl">
+              <h4 className="text-sm text-muted-foreground mb-2">Recall</h4>
               <div className="flex items-end gap-2">
-                <span className="text-4xl" style={{ color: "var(--viet-safe)" }}>
+                <span className="text-4xl" style={{ color: "var(--success)" }}>
                   {formatScore(baselineRun?.metrics?.recall)}
                 </span>
-                <Badge className="mb-2" style={{ backgroundColor: "var(--viet-safe)" }}>
+                <Badge className="mb-2" style={{ backgroundColor: "var(--success)" }}>
                   Baseline
                 </Badge>
               </div>
-              <p className="text-sm text-gray-600 mt-2">Độ bao phủ (recall)</p>
+              <p className="text-sm text-muted-foreground mt-2">Độ bao phủ (recall)</p>
             </div>
           </div>
 
           {/* Detailed Metrics Table */}
           <div className="mb-6">
-            <h3 className="text-xl mb-4" style={{ color: "var(--viet-primary)" }}>
+            <h3 className="text-xl mb-4" style={{ color: "var(--primary)" }}>
               Chi Tiết Metrics
             </h3>
             <div className="border rounded-lg overflow-hidden">
@@ -664,8 +655,8 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
         </Card>
 
         {/* Model Comparison */}
-        <Card className="bg-white p-8 mb-8 shadow-lg">
-          <h2 className="text-2xl mb-6" style={{ color: "var(--viet-primary)" }}>
+        <Card className="bg-card p-8 mb-8 shadow-lg">
+          <h2 className="text-2xl mb-6" style={{ color: "var(--primary)" }}>
             So Sánh Với Baseline Models
           </h2>
           <ResponsiveContainer width="100%" height={300}>
@@ -675,23 +666,23 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
               <YAxis domain={[0, 1]} />
               <Tooltip />
               <Legend />
-              <Bar dataKey="macroF1" fill="var(--viet-primary)" name="Macro F1" />
-              <Bar dataKey="toxicF1" fill="var(--viet-toxic)" name="Toxic Class F1" />
+              <Bar dataKey="macroF1" fill="var(--primary)" name="Macro F1" />
+              <Bar dataKey="toxicF1" fill="var(--destructive)" name="Toxic Class F1" />
             </BarChart>
           </ResponsiveContainer>
-          <p className="text-sm text-gray-600 mt-4 text-center">
+          <p className="text-sm text-muted-foreground mt-4 text-center">
             So sánh dựa trên registry hiện có.
           </p>
         </Card>
 
         {/* Evaluation Policy */}
-        <Card className="bg-white p-8 mb-8 shadow-lg">
+        <Card className="bg-card p-8 mb-8 shadow-lg">
           <div className="flex flex-wrap items-center justify-between gap-4">
             <div>
-              <h2 className="text-2xl mb-2" style={{ color: "var(--viet-primary)" }}>
+              <h2 className="text-2xl mb-2" style={{ color: "var(--primary)" }}>
                 Evaluation Policy
               </h2>
-              <p className="text-sm text-gray-600">Giải thích cách chia tập và đánh giá.</p>
+              <p className="text-sm text-muted-foreground">Giải thích cách chia tập và đánh giá.</p>
             </div>
             <Dialog>
               <DialogTrigger asChild>
@@ -704,7 +695,7 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
                     Thông tin được lấy từ config/eval_policy.json
                   </DialogDescription>
                 </DialogHeader>
-                <div className="space-y-4 text-sm text-gray-700">
+                <div className="space-y-4 text-sm text-foreground">
                   <div>
                     <p className="font-medium">Tỷ lệ chia tập</p>
                     <p>
@@ -735,8 +726,8 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
         </Card>
 
         {/* Training Visualization */}
-        <Card className="bg-white p-8 mb-8 shadow-lg">
-          <h2 className="text-2xl mb-6" style={{ color: "var(--viet-primary)" }}>
+        <Card className="bg-card p-8 mb-8 shadow-lg">
+          <h2 className="text-2xl mb-6" style={{ color: "var(--primary)" }}>
             Quá Trình Training & Fine-tuning
           </h2>
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
@@ -752,13 +743,13 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
                   <Line 
                     type="monotone" 
                     dataKey="loss" 
-                    stroke="var(--viet-toxic)" 
+                    stroke="var(--destructive)" 
                     strokeWidth={2}
                     name="Validation Loss"
                   />
                 </RechartsLine>
               </ResponsiveContainer>
-              <p className="text-sm text-gray-600 mt-2 text-center">
+              <p className="text-sm text-muted-foreground mt-2 text-center">
                 Loss giảm đều qua các epoch
               </p>
             </div>
@@ -775,13 +766,13 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
                   <Line 
                     type="monotone" 
                     dataKey="f1" 
-                    stroke="var(--viet-safe)" 
+                    stroke="var(--success)" 
                     strokeWidth={2}
                     name="Macro F1"
                   />
                 </RechartsLine>
               </ResponsiveContainer>
-              <p className="text-sm text-gray-600 mt-2 text-center">
+              <p className="text-sm text-muted-foreground mt-2 text-center">
                 F1 score cải thiện và ổn định sau 5 epochs
               </p>
             </div>
@@ -789,37 +780,37 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
         </Card>
 
         {/* Error Analysis */}
-        <Card className="bg-white p-8 mb-8 shadow-lg">
+        <Card className="bg-card p-8 mb-8 shadow-lg">
           <div className="flex flex-wrap items-center justify-between gap-4 mb-6">
             <div>
-              <h2 className="text-2xl mb-1" style={{ color: "var(--viet-primary)" }}>
+              <h2 className="text-2xl mb-1" style={{ color: "var(--primary)" }}>
                 Phân Tích Lỗi (Error Analysis)
               </h2>
-              <p className="text-sm text-gray-600">Tổng hợp từ data/processed/error_analysis.json</p>
+              <p className="text-sm text-muted-foreground">Tổng hợp từ data/processed/error_analysis.json</p>
             </div>
-            <Badge className="bg-blue-100 text-blue-700">Last updated: {errorLastUpdated ?? "--"}</Badge>
+            <Badge className="bg-background-info text-text-info">Last updated: {errorLastUpdated ?? "--"}</Badge>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
             <Card className="border p-5">
               <div className="flex items-center gap-2 mb-2">
-                <XCircle className="w-5 h-5" style={{ color: "var(--viet-toxic)" }} />
-                <h3 style={{ color: "var(--viet-primary)" }}>False Positives</h3>
+                <XCircle className="w-5 h-5" style={{ color: "var(--destructive)" }} />
+                <h3 style={{ color: "var(--primary)" }}>False Positives</h3>
               </div>
-              <p className="text-3xl" style={{ color: "var(--viet-primary)" }}>{errorStats.fp}</p>
+              <p className="text-3xl" style={{ color: "var(--primary)" }}>{errorStats.fp}</p>
             </Card>
             <Card className="border p-5">
               <div className="flex items-center gap-2 mb-2">
-                <XCircle className="w-5 h-5" style={{ color: "var(--viet-safe)" }} />
-                <h3 style={{ color: "var(--viet-primary)" }}>False Negatives</h3>
+                <XCircle className="w-5 h-5" style={{ color: "var(--success)" }} />
+                <h3 style={{ color: "var(--primary)" }}>False Negatives</h3>
               </div>
-              <p className="text-3xl" style={{ color: "var(--viet-primary)" }}>{errorStats.fn}</p>
+              <p className="text-3xl" style={{ color: "var(--primary)" }}>{errorStats.fn}</p>
             </Card>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
             <div>
-              <Label className="text-sm text-gray-600">Mismatch type</Label>
+              <Label className="text-sm text-muted-foreground">Mismatch type</Label>
               <select
                 className="mt-2 w-full border rounded-lg px-3 py-2 text-sm"
                 value={errorFilter}
@@ -831,7 +822,7 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
               </select>
             </div>
             <div>
-              <Label className="text-sm text-gray-600">Source dataset</Label>
+              <Label className="text-sm text-muted-foreground">Source dataset</Label>
               <select
                 className="mt-2 w-full border rounded-lg px-3 py-2 text-sm"
                 value={sourceFilter}
@@ -845,7 +836,7 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
               </select>
             </div>
             <div>
-              <Label className="text-sm text-gray-600">Subset tag</Label>
+              <Label className="text-sm text-muted-foreground">Subset tag</Label>
               <select
                 className="mt-2 w-full border rounded-lg px-3 py-2 text-sm"
                 value={subsetFilter}
@@ -878,7 +869,7 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
                     <TableCell className="max-w-[360px]">
                       <details>
                         <summary className="cursor-pointer truncate">{row.text}</summary>
-                        <p className="mt-2 text-sm text-gray-600">{row.text}</p>
+                        <p className="mt-2 text-sm text-muted-foreground">{row.text}</p>
                       </details>
                     </TableCell>
                     <TableCell className="text-right">{row.true_label}</TableCell>
@@ -890,7 +881,7 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
                 ))}
                 {!filteredErrors.length && (
                   <TableRow>
-                    <TableCell colSpan={6} className="text-center text-sm text-gray-500">
+                    <TableCell colSpan={6} className="text-center text-sm text-muted-foreground">
                       Chưa có lỗi để hiển thị
                     </TableCell>
                   </TableRow>
@@ -901,16 +892,16 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
         </Card>
 
         {/* Hard-case Candidates */}
-        <Card className="bg-white p-8 mb-8 shadow-lg">
+        <Card className="bg-card p-8 mb-8 shadow-lg">
           <div className="flex flex-wrap items-center justify-between gap-4 mb-6">
             <div>
-              <h2 className="text-2xl mb-1" style={{ color: "var(--viet-primary)" }}>
+              <h2 className="text-2xl mb-1" style={{ color: "var(--primary)" }}>
                 Phase 1 — Heuristic Candidates
               </h2>
-              <p className="text-sm text-gray-600">Hard-case subset scaffold</p>
+              <p className="text-sm text-muted-foreground">Hard-case subset scaffold</p>
             </div>
             <div className="flex flex-wrap items-center gap-3">
-              <Badge className="bg-blue-100 text-blue-700">Last updated: {hardCaseLastUpdated ?? "--"}</Badge>
+              <Badge className="bg-background-info text-text-info">Last updated: {hardCaseLastUpdated ?? "--"}</Badge>
               <Button variant="outline" onClick={downloadHardCases} disabled={!hardCases.length}>
                 <Download className="w-4 h-4 mr-2" />
                 Export for annotation
@@ -920,18 +911,18 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
             <Card className="border p-4">
-              <p className="text-sm text-gray-500">Candidate count</p>
-              <p className="text-2xl" style={{ color: "var(--viet-primary)" }}>{hardCases.length}</p>
+              <p className="text-sm text-muted-foreground">Candidate count</p>
+              <p className="text-2xl" style={{ color: "var(--primary)" }}>{hardCases.length}</p>
             </Card>
             <Card className="border p-4 md:col-span-2">
-              <p className="text-sm text-gray-500 mb-2">Breakdown by reason</p>
+              <p className="text-sm text-muted-foreground mb-2">Breakdown by reason</p>
               <div className="flex flex-wrap gap-2">
                 {Object.entries(hardCaseBreakdown).map(([reason, count]) => (
-                  <Badge key={reason} className="bg-blue-100 text-blue-700">
+                  <Badge key={reason} className="bg-background-info text-text-info">
                     {reason}: {count}
                   </Badge>
                 ))}
-                {!Object.keys(hardCaseBreakdown).length && <span className="text-sm text-gray-500">--</span>}
+                {!Object.keys(hardCaseBreakdown).length && <span className="text-sm text-muted-foreground">--</span>}
               </div>
             </Card>
           </div>
@@ -959,7 +950,7 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
                 ))}
                 {!hardCases.length && (
                   <TableRow>
-                    <TableCell colSpan={4} className="text-center text-sm text-gray-500">
+                    <TableCell colSpan={4} className="text-center text-sm text-muted-foreground">
                       Chưa có hard-case candidates
                     </TableCell>
                   </TableRow>
@@ -970,51 +961,48 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
         </Card>
 
         {/* MLOps & Reliability */}
-        <Card className="bg-white p-8 mb-8 shadow-lg">
-          <h2 className="text-2xl mb-6" style={{ color: "var(--viet-primary)" }}>
+        <Card className="bg-card p-8 mb-8 shadow-lg">
+          <h2 className="text-2xl mb-6" style={{ color: "var(--primary)" }}>
             MLOps & Độ Tin Cậy
           </h2>
 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
             <div className="border rounded-lg p-5">
-              <h4 className="mb-3" style={{ color: "var(--viet-primary)" }}>
+              <h4 className="mb-3" style={{ color: "var(--primary)" }}>
                 Model Versioning
               </h4>
-              <p className="text-sm text-gray-600 mb-3">
+              <p className="text-sm text-muted-foreground mb-3">
                 Tất cả các phiên bản mô hình được theo dõi và có thể rollback
               </p>
-              <Badge className="bg-blue-100 text-blue-700">v1.2.0 (Current)</Badge>
+              <Badge className="bg-background-info text-text-info">v1.2.0 (Current)</Badge>
             </div>
 
             <div className="border rounded-lg p-5">
-              <h4 className="mb-3" style={{ color: "var(--viet-primary)" }}>
+              <h4 className="mb-3" style={{ color: "var(--primary)" }}>
                 Experiment Tracking
               </h4>
-              <p className="text-sm text-gray-600 mb-3">
+              <p className="text-sm text-muted-foreground mb-3">
                 Sử dụng MLflow để theo dõi thí nghiệm và hyperparameters
               </p>
-              <Badge className="bg-green-100 text-green-700">Active</Badge>
+              <Badge className="bg-background-success text-text-success">Active</Badge>
             </div>
 
             <div className="border rounded-lg p-5">
-              <h4 className="mb-3" style={{ color: "var(--viet-primary)" }}>
+              <h4 className="mb-3" style={{ color: "var(--primary)" }}>
                 Monitoring
               </h4>
-              <p className="text-sm text-gray-600 mb-3">
+              <p className="text-sm text-muted-foreground mb-3">
                 Theo dõi performance và data drift trong production
               </p>
-              <Badge className="bg-purple-100 text-purple-700">Real-time</Badge>
+              <Badge className="bg-background-info text-text-info">Real-time</Badge>
             </div>
           </div>
 
-          <div className="border-l-4 p-5 rounded" style={{ 
-            borderLeftColor: "var(--viet-primary)",
-            backgroundColor: "rgba(0, 51, 102, 0.05)"
-          }}>
-            <h4 className="mb-2" style={{ color: "var(--viet-primary)" }}>
+          <div className="border-l-4 border-l-primary p-5 rounded bg-background-info/40">
+            <h4 className="mb-2" style={{ color: "var(--primary)" }}>
               ⚠️ Disclaimer - Lưu Ý Quan Trọng
             </h4>
-            <p className="text-gray-700">
+            <p className="text-foreground">
               Kết quả dự đoán từ mô hình AI mang tính <strong>hỗ trợ và tham khảo</strong>, 
               không thay thế được đánh giá và phán đoán của con người. Hệ thống có thể mắc lỗi 
               và không nên được sử dụng làm căn cứ duy nhất cho các quyết định quan trọng. 
@@ -1025,17 +1013,17 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
 
         {/* CTA */}
         <div className="text-center">
-          <div className="inline-block bg-white rounded-2xl shadow-lg p-8">
-            <h3 className="text-2xl mb-4" style={{ color: "var(--viet-primary)" }}>
+          <div className="inline-block bg-card rounded-2xl shadow-lg p-8">
+            <h3 className="text-2xl mb-4" style={{ color: "var(--primary)" }}>
               Sẵn Sàng Thử Nghiệm?
             </h3>
-            <p className="text-gray-600 mb-6 max-w-md">
+            <p className="text-muted-foreground mb-6 max-w-md">
               Phân tích nội dung web của bạn ngay với mô hình PhoBERT
             </p>
             <Button
               onClick={onTryNow}
               className="h-12 px-8"
-              style={{ backgroundColor: "var(--viet-primary)" }}
+              style={{ backgroundColor: "var(--primary)" }}
             >
               Thử Phân Tích URL Ngay
               <ArrowRight className="w-5 h-5 ml-2" />

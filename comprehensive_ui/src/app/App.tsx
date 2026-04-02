@@ -547,24 +547,24 @@ export default function App() {
 
       {fallbackPrompt && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4">
-          <div className="w-full max-w-2xl rounded-2xl border border-gray-200 bg-white p-5 shadow-xl">
+          <div className="w-full max-w-2xl rounded-2xl border border-border bg-card p-5 shadow-xl">
             <div className="mb-4">
-              <h3 className="text-lg font-semibold text-gray-900">Một số URL cần chuyển qua Selenium</h3>
-              <p className="mt-1 text-sm text-gray-600">Chọn theo từng URL: chuyển qua Selenium hoặc bỏ qua.</p>
+              <h3 className="text-lg font-semibold text-foreground">Một số URL cần chuyển qua Selenium</h3>
+              <p className="mt-1 text-sm text-muted-foreground">Chọn theo từng URL: chuyển qua Selenium hoặc bỏ qua.</p>
             </div>
 
             <div className="mb-3 flex flex-wrap gap-2">
               <button
                 type="button"
                 onClick={() => handleFallbackApplyAll("use_selenium")}
-                className="rounded-full border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs text-blue-700"
+                className="rounded-full border border-border-info bg-background-info px-3 py-1.5 text-xs text-text-info"
               >
                 Dùng Selenium cho tất cả
               </button>
               <button
                 type="button"
                 onClick={() => handleFallbackApplyAll("skip")}
-                className="rounded-full border border-amber-200 bg-amber-50 px-3 py-1.5 text-xs text-amber-800"
+                className="rounded-full border border-border-warning bg-background-warning px-3 py-1.5 text-xs text-text-warning"
               >
                 Skip tất cả
               </button>
@@ -574,17 +574,17 @@ export default function App() {
               {fallbackPrompt.items.map((item) => {
                 const value = fallbackPrompt.decisions[item.url_hash] || "use_selenium";
                 return (
-                  <div key={item.url_hash} className="rounded-lg border border-gray-200 p-3">
-                    <p className="break-all text-sm text-gray-800">{item.url}</p>
-                    <p className="mt-1 text-xs text-gray-500">Trafilatura text length: {item.trafilatura_text_len ?? 0}</p>
+                  <div key={item.url_hash} className="rounded-lg border border-border p-3">
+                    <p className="break-all text-sm text-foreground">{item.url}</p>
+                    <p className="mt-1 text-xs text-muted-foreground">Trafilatura text length: {item.trafilatura_text_len ?? 0}</p>
                     <div className="mt-2 flex gap-2">
                       <button
                         type="button"
                         onClick={() => handleFallbackDecisionChange(item.url_hash, "use_selenium")}
                         className={`rounded-full border px-3 py-1 text-xs ${
                           value === "use_selenium"
-                            ? "border-blue-500 bg-blue-600 text-white"
-                            : "border-gray-300 bg-white text-gray-700"
+                            ? "border-border-info bg-background-info text-text-info"
+                            : "border-border bg-card text-muted-foreground"
                         }`}
                       >
                         Dùng Selenium
@@ -594,8 +594,8 @@ export default function App() {
                         onClick={() => handleFallbackDecisionChange(item.url_hash, "skip")}
                         className={`rounded-full border px-3 py-1 text-xs ${
                           value === "skip"
-                            ? "border-amber-500 bg-amber-500 text-white"
-                            : "border-gray-300 bg-white text-gray-700"
+                            ? "border-border-warning bg-background-warning text-text-warning"
+                            : "border-border bg-card text-muted-foreground"
                         }`}
                       >
                         Skip URL này
@@ -610,14 +610,14 @@ export default function App() {
               <button
                 type="button"
                 onClick={handleFallbackCancel}
-                className="rounded-md border border-gray-300 px-4 py-2 text-sm text-gray-700"
+                className="rounded-md border border-border px-4 py-2 text-sm text-muted-foreground"
               >
                 Hủy
               </button>
               <button
                 type="button"
                 onClick={handleFallbackConfirm}
-                className="rounded-md bg-[var(--viet-primary)] px-4 py-2 text-sm text-white"
+                className="rounded-md bg-primary px-4 py-2 text-sm text-primary-foreground"
               >
                 Tiếp tục
               </button>

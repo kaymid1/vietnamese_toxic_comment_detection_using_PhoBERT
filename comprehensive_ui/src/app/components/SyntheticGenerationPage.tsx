@@ -357,24 +357,24 @@ export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps
   };
 
   return (
-    <div className="min-h-screen py-12 px-4 sm:px-6 lg:px-8" style={{ backgroundColor: "var(--viet-bg)" }}>
+    <div className="min-h-screen bg-background py-12 px-4 sm:px-6 lg:px-8">
       <div className="max-w-6xl mx-auto space-y-6">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <h1 className="text-3xl" style={{ color: "var(--viet-primary)" }}>
+            <h1 className="text-3xl text-primary">
               Synthetic Dataset Generation
             </h1>
-            <p className="text-sm text-gray-600">Sinh dữ liệu mới và review trước khi export.</p>
+            <p className="text-sm text-muted-foreground">Sinh dữ liệu mới và review trước khi export.</p>
           </div>
           <Button variant="outline" onClick={onBack}>
             Quay lại Dataset
           </Button>
         </div>
 
-        <Card className="bg-white p-6 shadow-lg">
+        <Card className="bg-card p-6 shadow-lg">
           <div className="grid grid-cols-1 md:grid-cols-5 gap-4 items-end">
             <div>
-              <Label className="text-sm text-gray-600">Domain</Label>
+              <Label className="text-sm text-muted-foreground">Domain</Label>
               <select
                 className="mt-2 w-full border rounded-lg px-3 py-2 text-sm"
                 value={domain}
@@ -386,7 +386,7 @@ export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps
               </select>
             </div>
             <div>
-              <Label className="text-sm text-gray-600">Style</Label>
+              <Label className="text-sm text-muted-foreground">Style</Label>
               <select
                 className="mt-2 w-full border rounded-lg px-3 py-2 text-sm"
                 value={style}
@@ -397,7 +397,7 @@ export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps
               </select>
             </div>
             <div>
-              <Label className="text-sm text-gray-600">Label</Label>
+              <Label className="text-sm text-muted-foreground">Label</Label>
               <select
                 className="mt-2 w-full border rounded-lg px-3 py-2 text-sm"
                 value={label}
@@ -408,7 +408,7 @@ export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps
               </select>
             </div>
             <div>
-              <Label className="text-sm text-gray-600">Count</Label>
+              <Label className="text-sm text-muted-foreground">Count</Label>
               <input
                 className="mt-2 w-full border rounded-lg px-3 py-2 text-sm"
                 type="number"
@@ -442,20 +442,20 @@ export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps
             <Button variant="outline" onClick={() => fetchPreview(1, pageSize)} disabled={loading}>
               {loading ? "Đang tải..." : "Refresh"}
             </Button>
-            {status && <span className="text-sm text-gray-600">{status}</span>}
+            {status && <span className="text-sm text-muted-foreground">{status}</span>}
           </div>
-          {error && <p className="mt-3 text-sm text-red-600">{error}</p>}
-          <p className="mt-2 text-xs text-gray-500">
+          {error && <p className="mt-3 text-sm text-destructive">{error}</p>}
+          <p className="mt-2 text-xs text-muted-foreground">
             {viewMode === "queue"
               ? "Queue chưa review: bấm Save review để ghi DB, sau đó các row này sẽ rời khỏi queue."
               : "DB đã review: dùng Accepted filter để chọn accepted/rejected và Export accepted để xuất JSONL."}
           </p>
         </Card>
 
-        <Card className="bg-white p-6 shadow-lg">
+        <Card className="bg-card p-6 shadow-lg">
           <div className="grid grid-cols-1 md:grid-cols-5 gap-4 items-end">
             <div>
-              <Label className="text-sm text-gray-600">Batch ID</Label>
+              <Label className="text-sm text-muted-foreground">Batch ID</Label>
               <input
                 className="mt-2 w-full border rounded-lg px-3 py-2 text-sm"
                 value={batchIdFilter}
@@ -467,7 +467,7 @@ export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps
               />
             </div>
             <div>
-              <Label className="text-sm text-gray-600">View mode</Label>
+              <Label className="text-sm text-muted-foreground">View mode</Label>
               <select
                 className="mt-2 w-full border rounded-lg px-3 py-2 text-sm"
                 value={viewMode}
@@ -485,7 +485,7 @@ export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps
               </select>
             </div>
             <div>
-              <Label className="text-sm text-gray-600">Page size</Label>
+              <Label className="text-sm text-muted-foreground">Page size</Label>
               <select
                 className="mt-2 w-full border rounded-lg px-3 py-2 text-sm"
                 value={pageSize}
@@ -502,7 +502,7 @@ export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps
               </select>
             </div>
             <div>
-              <Label className="text-sm text-gray-600">Accepted filter</Label>
+              <Label className="text-sm text-muted-foreground">Accepted filter</Label>
               <select
                 className="mt-2 w-full border rounded-lg px-3 py-2 text-sm"
                 value={acceptedFilter}
@@ -517,13 +517,13 @@ export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps
                 <option value="rejected">rejected</option>
               </select>
             </div>
-            <div className="text-sm text-gray-600">
+            <div className="text-sm text-muted-foreground">
               Accepted page: <strong>{acceptedCountCurrentPage}</strong> / {rows.length}
             </div>
           </div>
         </Card>
 
-        <Card className="bg-white p-6 shadow-lg">
+        <Card className="bg-card p-6 shadow-lg">
           <div className="grid grid-cols-1 md:grid-cols-4 gap-3 mb-4 text-sm">
             <div className="border rounded-lg p-3">Total generated: <strong>{stats?.total_generated ?? 0}</strong></div>
             <div className="border rounded-lg p-3">Accepted: <strong>{stats?.accepted ?? 0}</strong></div>
@@ -551,7 +551,7 @@ export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps
                   <TableRow
                     key={row.id}
                     onClick={(event) => handleRowToggle(event, row.id)}
-                    className="cursor-pointer hover:bg-slate-50"
+                    className="cursor-pointer hover:bg-background-secondary"
                   >
                     <TableCell>
                       <input
@@ -584,7 +584,7 @@ export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps
                     </TableCell>
                     <TableCell>
                       <select
-                        className={`border rounded-md px-2 py-1 text-sm font-medium ${nextLabel === 1 ? "bg-red-200 text-red-900 border-red-400" : "bg-green-200 text-green-900 border-green-400"}`}
+                        className={`border rounded-md px-2 py-1 text-sm font-medium ${nextLabel === 1 ? "bg-background-danger text-text-danger border-border-danger" : "bg-background-success text-text-success border-border-success"}`}
                         value={nextLabel}
                         onChange={(event) =>
                           setEditedLabelMap((prev) => ({
@@ -607,7 +607,7 @@ export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps
               })}
               {!rows.length && !loading && (
                 <TableRow>
-                  <TableCell colSpan={7} className="text-center text-sm text-gray-500">
+                  <TableCell colSpan={7} className="text-center text-sm text-muted-foreground">
                     Không có dữ liệu
                   </TableCell>
                 </TableRow>

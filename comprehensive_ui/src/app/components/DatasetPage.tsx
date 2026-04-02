@@ -330,24 +330,24 @@ export function DatasetPage() {
   };
 
   return (
-    <div className="min-h-screen py-12 px-4 sm:px-6 lg:px-8" style={{ backgroundColor: "var(--viet-bg)" }}>
+    <div className="min-h-screen bg-background py-12 px-4 sm:px-6 lg:px-8" >
       <div className="max-w-6xl mx-auto">
         <div className="mb-10 text-center">
-          <h1 className="text-4xl mb-3" style={{ color: "var(--viet-primary)" }}>
+          <h1 className="text-4xl mb-3 text-primary">
             Dataset Preview
           </h1>
-          <p className="text-lg text-gray-600">
+          <p className="text-lg text-muted-foreground">
             Preview dữ liệu huấn luyện (augmented + non-augmented) và feedback mới thu thập.
           </p>
         </div>
 
-        <Card className="bg-white p-6 mb-8 shadow-lg">
+        <Card className="bg-card p-6 mb-8 shadow-lg">
           <div className="flex flex-wrap items-start justify-between gap-4 mb-6">
             <div>
-              <h2 className="text-2xl" style={{ color: "var(--viet-primary)" }}>
+              <h2 className="text-2xl text-primary">
                 Dataset analysis (defense)
               </h2>
-              <p className="text-sm text-gray-600">Tổng hợp nhanh để bảo vệ: overview, so sánh, annotation và limitations.</p>
+              <p className="text-sm text-muted-foreground">Tổng hợp nhanh để bảo vệ: overview, so sánh, annotation và limitations.</p>
             </div>
           </div>
           <Tabs defaultValue="overview" className="mt-2">
@@ -370,12 +370,12 @@ export function DatasetPage() {
                   </div>
                   <div className="rounded-lg border bg-muted/30 p-4">
                     <p className="text-xs text-muted-foreground">Clean (non-toxic)</p>
-                    <p className="text-2xl font-semibold text-blue-700">{aggregatedStats.clean.toLocaleString()}</p>
+                    <p className="text-2xl font-semibold text-text-info">{aggregatedStats.clean.toLocaleString()}</p>
                     <p className="text-xs text-muted-foreground">{formatPercent(aggregatedStats.clean, aggregatedStats.total)} tổng dataset</p>
                   </div>
                   <div className="rounded-lg border bg-muted/30 p-4">
                     <p className="text-xs text-muted-foreground">Toxic</p>
-                    <p className="text-2xl font-semibold text-orange-600">{aggregatedStats.toxic.toLocaleString()}</p>
+                    <p className="text-2xl font-semibold text-text-warning">{aggregatedStats.toxic.toLocaleString()}</p>
                     <p className="text-xs text-muted-foreground">{formatPercent(aggregatedStats.toxic, aggregatedStats.total)} tổng dataset</p>
                   </div>
                   <div className="rounded-lg border bg-muted/30 p-4">
@@ -390,10 +390,10 @@ export function DatasetPage() {
                 <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">Đóng góp theo nguồn</p>
                 <div className="mt-3 flex flex-wrap gap-4 text-xs text-muted-foreground">
                   <span className="inline-flex items-center gap-2">
-                    <span className="h-3 w-3 rounded-sm bg-blue-600" />ViCTSD
+                    <span className="h-3 w-3 rounded-sm bg-text-info" />ViCTSD
                   </span>
                   <span className="inline-flex items-center gap-2">
-                    <span className="h-3 w-3 rounded-sm bg-orange-500" />UIT-ViHSD
+                    <span className="h-3 w-3 rounded-sm bg-text-warning" />UIT-ViHSD
                   </span>
                 </div>
 
@@ -402,8 +402,8 @@ export function DatasetPage() {
                     <div className="w-44 text-muted-foreground">ViCTSD</div>
                     <div className="flex-1 h-3 rounded bg-muted overflow-hidden">
                       <div className="flex h-full">
-                        <div className="bg-blue-600" style={{ width: formatPercent(sourceSummary.victsd.clean, sourceSummary.victsd.total) }} />
-                        <div className="bg-orange-500" style={{ width: formatPercent(sourceSummary.victsd.toxic, sourceSummary.victsd.total) }} />
+                        <div className="bg-text-info" style={{ width: formatPercent(sourceSummary.victsd.clean, sourceSummary.victsd.total) }} />
+                        <div className="bg-text-warning" style={{ width: formatPercent(sourceSummary.victsd.toxic, sourceSummary.victsd.total) }} />
                       </div>
                     </div>
                     <div className="w-20 text-right text-xs text-muted-foreground">{sourceSummary.victsd.total.toLocaleString()}</div>
@@ -412,14 +412,14 @@ export function DatasetPage() {
                     <div className="w-44 text-muted-foreground">UIT-ViHSD</div>
                     <div className="flex-1 h-3 rounded bg-muted overflow-hidden">
                       <div className="flex h-full">
-                        <div className="bg-orange-500" style={{ width: formatPercent(sourceSummary.vihsd.toxic, sourceSummary.vihsd.total) }} />
+                        <div className="bg-text-warning" style={{ width: formatPercent(sourceSummary.vihsd.toxic, sourceSummary.vihsd.total) }} />
                       </div>
                     </div>
                     <div className="w-20 text-right text-xs text-muted-foreground">{sourceSummary.vihsd.total.toLocaleString()}</div>
                   </div>
                 </div>
 
-                <div className="mt-4 rounded-lg border-l-4 border-l-green-600 bg-green-50 p-4 text-sm text-green-800">
+                <div className="mt-4 rounded-lg border-l-4 border-l-border-success bg-background-success p-4 text-sm text-text-success">
                   <strong>Kết quả:</strong> Dữ liệu được render động từ API dataset preview theo bộ lọc hiện tại, không còn hardcode số lượng.
                 </div>
               </div>
@@ -430,7 +430,7 @@ export function DatasetPage() {
                 <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">Đặc điểm từng dataset</p>
                 <div className="mt-3 grid grid-cols-1 lg:grid-cols-2 gap-4">
                   <Card className="border p-4 shadow-none">
-                    <span className="inline-flex rounded-md bg-blue-100 px-2 py-1 text-xs font-medium text-blue-700">ViCTSD</span>
+                    <span className="inline-flex rounded-md bg-background-info px-2 py-1 text-xs font-medium text-text-info">ViCTSD</span>
                     <h3 className="mt-3 text-sm font-semibold">UIT-ViCTSD (2021)</h3>
                     <div className="mt-3 space-y-2 text-sm">
                       <div className="flex justify-between gap-4"><span className="text-muted-foreground">Nguồn</span><span className="text-right">YouTube comments trên video tin tức VN</span></div>
@@ -440,15 +440,15 @@ export function DatasetPage() {
                       <div className="flex justify-between gap-4"><span className="text-muted-foreground">Toxic gốc</span><span className="text-right">~10.8% (heavily imbalanced)</span></div>
                       <div className="flex justify-between gap-4"><span className="text-muted-foreground">Độ dài text</span><span className="text-right">Dài hơn, có ngữ cảnh tranh luận</span></div>
                       <div className="flex justify-between gap-4"><span className="text-muted-foreground">Style</span><span className="text-right">Informal, comment phản hồi video</span></div>
-                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">Paper</span><a className="text-blue-700 hover:underline" href="https://arxiv.org/abs/2103.10069" target="_blank" rel="noreferrer">arXiv 2103.10069</a></div>
+                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">Paper</span><a className="text-text-info hover:underline" href="https://arxiv.org/abs/2103.10069" target="_blank" rel="noreferrer">arXiv 2103.10069</a></div>
                     </div>
-                    <div className="mt-4 rounded-lg border-l-4 border-l-blue-600 bg-blue-50 p-3 text-sm text-blue-900">
+                    <div className="mt-4 rounded-lg border-l-4 border-l-border-info bg-background-info p-3 text-sm text-text-info">
                       10 domains: chính trị, thể thao, giải trí, kinh tế, sức khỏe... — đa dạng chủ đề.
                     </div>
                   </Card>
 
                   <Card className="border p-4 shadow-none">
-                    <span className="inline-flex rounded-md bg-emerald-100 px-2 py-1 text-xs font-medium text-emerald-700">ViHSD</span>
+                    <span className="inline-flex rounded-md bg-background-success px-2 py-1 text-xs font-medium text-text-success">ViHSD</span>
                     <h3 className="mt-3 text-sm font-semibold">UIT-ViHSD (2021)</h3>
                     <div className="mt-3 space-y-2 text-sm">
                       <div className="flex justify-between gap-4"><span className="text-muted-foreground">Nguồn</span><span className="text-right">Facebook posts + comments</span></div>
@@ -458,9 +458,9 @@ export function DatasetPage() {
                       <div className="flex justify-between gap-4"><span className="text-muted-foreground">Samples dùng</span><span className="text-right">2,260 OFFENSIVE samples</span></div>
                       <div className="flex justify-between gap-4"><span className="text-muted-foreground">Độ dài text</span><span className="text-right">Ngắn hơn, nhiều viết tắt, emoji</span></div>
                       <div className="flex justify-between gap-4"><span className="text-muted-foreground">Style</span><span className="text-right">Informal, status/comment Facebook</span></div>
-                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">Paper</span><a className="text-emerald-700 hover:underline" href="https://arxiv.org/abs/2103.11528" target="_blank" rel="noreferrer">arXiv 2103.11528</a></div>
+                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">Paper</span><a className="text-text-success hover:underline" href="https://arxiv.org/abs/2103.11528" target="_blank" rel="noreferrer">arXiv 2103.11528</a></div>
                     </div>
-                    <div className="mt-4 rounded-lg border-l-4 border-l-blue-600 bg-blue-50 p-3 text-sm text-blue-900">
+                    <div className="mt-4 rounded-lg border-l-4 border-l-border-info bg-background-info p-3 text-sm text-text-info">
                       Comments chứa nhiều teencode, viết tắt (M.n, mik, Dm), slang — cần xử lý tiền xử lý riêng.
                     </div>
                   </Card>
@@ -470,13 +470,13 @@ export function DatasetPage() {
               <div>
                 <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">Điểm tương đồng — lý do merge được</p>
                 <div className="mt-3 grid grid-cols-1 md:grid-cols-3 gap-3">
-                  <div className="rounded-lg border-l-4 border-l-green-600 bg-green-50 p-4 text-sm text-green-900">
+                  <div className="rounded-lg border-l-4 border-l-border-success bg-background-success p-4 text-sm text-text-success">
                     <strong>Cùng domain</strong><br />Cả hai đều là social media informal Vietnamese text — domain shift nhỏ.
                   </div>
-                  <div className="rounded-lg border-l-4 border-l-green-600 bg-green-50 p-4 text-sm text-green-900">
+                  <div className="rounded-lg border-l-4 border-l-border-success bg-background-success p-4 text-sm text-text-success">
                     <strong>Cùng nguồn gốc</strong><br />Cả hai do UIT NLP Group xây dựng với quy trình annotation chuẩn.
                   </div>
-                  <div className="rounded-lg border-l-4 border-l-green-600 bg-green-50 p-4 text-sm text-green-900">
+                  <div className="rounded-lg border-l-4 border-l-border-success bg-background-success p-4 text-sm text-text-success">
                     <strong>Ngữ nghĩa gần nhau</strong><br />OFFENSIVE ≈ Toxic về mức độ xúc phạm, phù hợp mapping 1-1.
                   </div>
                 </div>
@@ -492,7 +492,7 @@ export function DatasetPage() {
                       <div className="flex justify-between gap-4"><span className="text-muted-foreground">Hate (label=2)</span><span className="font-medium">N/A (không có trong merged binary set)</span></div>
                       <div className="flex justify-between gap-4"><span className="text-muted-foreground">Clean (label=0)</span><span className="font-medium">0.1285</span></div>
                     </div>
-                    <div className="mt-4 rounded-lg border-l-4 border-l-green-600 bg-green-50 p-3 text-sm text-green-900">
+                    <div className="mt-4 rounded-lg border-l-4 border-l-border-success bg-background-success p-3 text-sm text-text-success">
                       Khoảng cách điểm rất rõ giữa Offensive và Clean (0.8726 vs 0.1285), cho thấy mapping OFFENSIVE → Toxic có tính nhất quán thực nghiệm. Theo rule mean &gt; 0.6, quyết định merge là hợp lý.
                     </div>
                   </Card>
@@ -513,7 +513,7 @@ export function DatasetPage() {
 
               <div>
                 <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">Điểm khác biệt — thừa nhận</p>
-                <div className="mt-3 rounded-lg border-l-4 border-l-yellow-500 bg-yellow-50 p-4 text-sm text-yellow-900">
+                <div className="mt-3 rounded-lg border-l-4 border-l-border-warning bg-background-warning p-4 text-sm text-text-warning">
                   <strong>74.9% toxic samples đến từ ViHSD OFFENSIVE</strong> (2,260/3,019). Model đang học toxic từ nguồn nào nhiều hơn? → ViCTSD cung cấp label schema và negative examples; ViHSD cung cấp positive examples để cân bằng class — cả hai cùng định hình decision boundary.
                 </div>
               </div>
@@ -539,27 +539,27 @@ export function DatasetPage() {
                 <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">Tại sao OFFENSIVE → Toxic (không dùng HATE)?</p>
                 <div className="mt-3 grid grid-cols-1 lg:grid-cols-2 gap-4">
                   <Card className="border p-4 shadow-none">
-                    <span className="inline-flex rounded-md bg-emerald-100 px-2 py-1 text-xs font-medium text-emerald-700">OFFENSIVE → Toxic ✓</span>
+                    <span className="inline-flex rounded-md bg-background-success px-2 py-1 text-xs font-medium text-text-success">OFFENSIVE → Toxic ✓</span>
                     <div className="mt-3 space-y-2 text-sm">
                       <div className="flex justify-between gap-4"><span className="text-muted-foreground">Định nghĩa</span><span className="text-right">Ngôn ngữ xúc phạm cá nhân, thô tục</span></div>
                       <div className="flex justify-between gap-4"><span className="text-muted-foreground">Overlap</span><span className="text-right">Cao với Toxic trong ViCTSD</span></div>
                       <div className="flex justify-between gap-4"><span className="text-muted-foreground">Annotation boundary</span><span className="text-right">Tương đối rõ ràng, consistent</span></div>
                       <div className="flex justify-between gap-4"><span className="text-muted-foreground">Label noise khi merge</span><span className="text-right">Thấp</span></div>
                     </div>
-                    <div className="mt-4 rounded-lg border-l-4 border-l-green-600 bg-green-50 p-3 text-sm text-green-900">
+                    <div className="mt-4 rounded-lg border-l-4 border-l-border-success bg-background-success p-3 text-sm text-text-success">
                       Phù hợp để bổ sung positive examples cho bài toán toxic detection.
                     </div>
                   </Card>
 
                   <Card className="border p-4 shadow-none">
-                    <span className="inline-flex rounded-md bg-red-100 px-2 py-1 text-xs font-medium text-red-700">HATE → Loại ✗</span>
+                    <span className="inline-flex rounded-md bg-background-danger px-2 py-1 text-xs font-medium text-text-danger">HATE → Loại ✗</span>
                     <div className="mt-3 space-y-2 text-sm">
                       <div className="flex justify-between gap-4"><span className="text-muted-foreground">Định nghĩa</span><span className="text-right">Kích động thù địch nhắm nhóm người</span></div>
                       <div className="flex justify-between gap-4"><span className="text-muted-foreground">Đặc điểm</span><span className="text-right">Nhắm ethnicity, religion, gender...</span></div>
                       <div className="flex justify-between gap-4"><span className="text-muted-foreground">Annotation boundary</span><span className="text-right">Khác guideline so với ViCTSD</span></div>
                       <div className="flex justify-between gap-4"><span className="text-muted-foreground">Label noise khi merge</span><span className="text-right">Cao — concept khác nhau</span></div>
                     </div>
-                    <div className="mt-4 rounded-lg border-l-4 border-l-red-600 bg-red-50 p-3 text-sm text-red-900">
+                    <div className="mt-4 rounded-lg border-l-4 border-l-border-danger bg-background-danger p-3 text-sm text-text-danger">
                       Thêm HATE gây label noise: annotator ViCTSD không train theo tiêu chí này.
                     </div>
                   </Card>
@@ -571,7 +571,7 @@ export function DatasetPage() {
                 <div className="mt-3 space-y-4 text-sm">
                   <div>
                     <div className="flex items-start gap-2 font-medium">
-                      <span className="inline-flex h-5 w-5 items-center justify-center rounded-md bg-indigo-100 text-xs text-indigo-700">Q</span>
+                      <span className="inline-flex h-5 w-5 items-center justify-center rounded-md bg-background-info text-xs text-text-info">Q</span>
                       Annotation boundary giữa OFFENSIVE và Toxic có consistent không?
                     </div>
                     <p className="mt-2 pl-7 text-muted-foreground">
@@ -580,7 +580,7 @@ export function DatasetPage() {
                   </div>
                   <div>
                     <div className="flex items-start gap-2 font-medium">
-                      <span className="inline-flex h-5 w-5 items-center justify-center rounded-md bg-indigo-100 text-xs text-indigo-700">Q</span>
+                      <span className="inline-flex h-5 w-5 items-center justify-center rounded-md bg-background-info text-xs text-text-info">Q</span>
                       Vì sao không merge CLEAN của ViHSD vào Non-toxic?
                     </div>
                     <p className="mt-2 pl-7 text-muted-foreground">
@@ -596,42 +596,42 @@ export function DatasetPage() {
                 <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">Limitations của dataset — chủ động nêu trước hội đồng</p>
                 <div className="mt-3 space-y-4 text-sm">
                   <div className="flex gap-3 border-b pb-4">
-                    <div className="h-8 w-8 rounded-full bg-yellow-100 text-yellow-900 flex items-center justify-center text-xs font-semibold">L1</div>
+                    <div className="h-8 w-8 rounded-full bg-background-warning text-text-warning flex items-center justify-center text-xs font-semibold">L1</div>
                     <div>
                       <p className="font-medium">Annotation guideline không hoàn toàn identical</p>
                       <p className="text-muted-foreground">ViCTSD và ViHSD được xây dựng bởi hai nhóm khác nhau với guideline riêng. OFFENSIVE trong ViHSD và Toxic trong ViCTSD overlap về ngữ nghĩa nhưng ranh giới không được định nghĩa thống nhất. Dẫn đến một lượng nhỏ label noise trong merged dataset.</p>
                     </div>
                   </div>
                   <div className="flex gap-3 border-b pb-4">
-                    <div className="h-8 w-8 rounded-full bg-yellow-100 text-yellow-900 flex items-center justify-center text-xs font-semibold">L2</div>
+                    <div className="h-8 w-8 rounded-full bg-background-warning text-text-warning flex items-center justify-center text-xs font-semibold">L2</div>
                     <div>
                       <p className="font-medium">74.9% toxic samples đến từ ViHSD</p>
                       <p className="text-muted-foreground">Model học toxic chủ yếu từ Facebook data (ViHSD OFFENSIVE: 2,260/3,019 toxic samples). Điều này có thể khiến model nhạy hơn với style toxic của Facebook so với YouTube.</p>
                     </div>
                   </div>
                   <div className="flex gap-3 border-b pb-4">
-                    <div className="h-8 w-8 rounded-full bg-red-100 text-red-700 flex items-center justify-center text-xs font-semibold">L3</div>
+                    <div className="h-8 w-8 rounded-full bg-background-danger text-text-danger flex items-center justify-center text-xs font-semibold">L3</div>
                     <div>
                       <p className="font-medium">Toàn bộ dataset là social media text — bias với formal domain</p>
                       <p className="text-muted-foreground">Cả ViCTSD (YouTube) và ViHSD (Facebook) đều là informal text. Model không có negative examples từ formal domain (báo chí, văn bản hành chính) → false positive cao khi inference trên news website. Đây là vấn đề cốt lõi dẫn đến việc phải implement domain-aware thresholding.</p>
                     </div>
                   </div>
                   <div className="flex gap-3 border-b pb-4">
-                    <div className="h-8 w-8 rounded-full bg-red-100 text-red-700 flex items-center justify-center text-xs font-semibold">L4</div>
+                    <div className="h-8 w-8 rounded-full bg-background-danger text-text-danger flex items-center justify-center text-xs font-semibold">L4</div>
                     <div>
                       <p className="font-medium">Imbalance vẫn còn (2.1:1)</p>
                       <p className="text-muted-foreground">Sau khi merge, ratio Clean:Toxic là 2.1:1 — cải thiện đáng kể từ 8.2:1 nhưng vẫn chưa balanced hoàn toàn. Model vẫn có xu hướng predict Non-toxic nhiều hơn, đặc biệt với các trường hợp borderline.</p>
                     </div>
                   </div>
                   <div className="flex gap-3">
-                    <div className="h-8 w-8 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-xs font-semibold">L5</div>
+                    <div className="h-8 w-8 rounded-full bg-background-info text-text-info flex items-center justify-center text-xs font-semibold">L5</div>
                     <div>
                       <p className="font-medium">Temporal &amp; domain coverage hạn chế</p>
                       <p className="text-muted-foreground">Cả hai dataset được thu thập trước 2021 — slang, cách viết tắt, và hình thức toxic mới (teencodes mới, emoji-based toxicity) có thể chưa được cover. New_collected (9 samples) quá nhỏ để bù đắp.</p>
                     </div>
                   </div>
                 </div>
-                <div className="mt-4 rounded-lg border-l-4 border-l-blue-600 bg-blue-50 p-4 text-sm text-blue-900">
+                <div className="mt-4 rounded-lg border-l-4 border-l-border-info bg-background-info p-4 text-sm text-text-info">
                   <strong>Mẹo bảo vệ:</strong> Chủ động nêu L3 và L4 trước — đây là những limitation bạn đã nhận ra và đã có giải pháp (domain-aware thresholding). Hội đồng sẽ đánh giá cao việc bạn không né tránh mà đối mặt trực tiếp với limitation của mình.
                 </div>
               </div>
@@ -655,10 +655,10 @@ export function DatasetPage() {
           </Tabs>
         </Card>
 
-        <Card className="bg-white p-6 mb-8 shadow-lg">
+        <Card className="bg-card p-6 mb-8 shadow-lg">
           <div className="grid grid-cols-1 md:grid-cols-4 gap-4 items-end">
             <div>
-              <Label className="text-sm text-gray-600">Source</Label>
+              <Label className="text-sm text-muted-foreground">Source</Label>
               <select
                 className="mt-2 w-full border rounded-lg px-3 py-2 text-sm"
                 value={sourceFilter}
@@ -672,7 +672,7 @@ export function DatasetPage() {
               </select>
             </div>
             <div>
-              <Label className="text-sm text-gray-600">Label</Label>
+              <Label className="text-sm text-muted-foreground">Label</Label>
               <select
                 className="mt-2 w-full border rounded-lg px-3 py-2 text-sm"
                 value={labelFilter}
@@ -684,7 +684,7 @@ export function DatasetPage() {
               </select>
             </div>
             <div>
-              <Label className="text-sm text-gray-600">Split</Label>
+              <Label className="text-sm text-muted-foreground">Split</Label>
               <select
                 className="mt-2 w-full border rounded-lg px-3 py-2 text-sm"
                 value={splitFilter}
@@ -698,7 +698,7 @@ export function DatasetPage() {
               </select>
             </div>
             <div>
-              <Label className="text-sm text-gray-600">Page size</Label>
+              <Label className="text-sm text-muted-foreground">Page size</Label>
               <select
                 className="mt-2 w-full border rounded-lg px-3 py-2 text-sm"
                 value={pageSize}
@@ -727,33 +727,33 @@ export function DatasetPage() {
             >
               {deleteLoading ? "Đang xoá..." : `Xoá feedback (${selectedFeedback.length})`}
             </Button>
-            {exportStatus && <span className="text-sm text-gray-600">{exportStatus}</span>}
-            {deleteStatus && <span className="text-sm text-gray-600">{deleteStatus}</span>}
+            {exportStatus && <span className="text-sm text-muted-foreground">{exportStatus}</span>}
+            {deleteStatus && <span className="text-sm text-muted-foreground">{deleteStatus}</span>}
           </div>
 
-          {error && <p className="mt-3 text-sm text-red-600">{error}</p>}
+          {error && <p className="mt-3 text-sm text-destructive">{error}</p>}
         </Card>
 
-        <Card className="bg-white p-6 mb-8 shadow-lg">
+        <Card className="bg-card p-6 mb-8 shadow-lg">
           <div className="flex flex-wrap items-center justify-between gap-4 mb-6">
             <div>
-              <h2 className="text-2xl" style={{ color: "var(--viet-primary)" }}>
+              <h2 className="text-2xl text-primary">
                 Dataset Overview
               </h2>
-              <p className="text-sm text-gray-600">
+              <p className="text-sm text-muted-foreground">
                 Thống kê theo bộ lọc hiện tại.
               </p>
             </div>
             <div className="flex flex-wrap gap-2">
-              <Badge className="bg-blue-100 text-blue-700">Merged datasets: {aggregatedStats.sources.length}</Badge>
-              <Badge className={imbalanceStatus?.isImbalanced ? "bg-red-100 text-red-700" : "bg-green-100 text-green-700"}>
+              <Badge className="bg-background-info text-text-info">Merged datasets: {aggregatedStats.sources.length}</Badge>
+              <Badge className={imbalanceStatus?.isImbalanced ? "bg-background-danger text-text-danger" : "bg-background-success text-text-success"}>
                 {imbalanceStatus?.isImbalanced ? "Imbalanced" : "Balanced"}
               </Badge>
             </div>
           </div>
 
           {imbalanceStatus?.isImbalanced && (
-            <div className="mb-6 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+            <div className="mb-6 rounded-lg border border-border-danger bg-background-danger px-4 py-3 text-sm text-text-danger">
               Lớp {imbalanceStatus.dominant} chiếm {formatPercent(
                 imbalanceStatus.dominant === "clean" ? aggregatedStats.clean : aggregatedStats.toxic,
                 aggregatedStats.total,
@@ -762,25 +762,25 @@ export function DatasetPage() {
           )}
 
           <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
-            <Card className="bg-white p-4 border">
-              <p className="text-sm text-gray-500">Tổng mẫu</p>
-              <p className="text-2xl" style={{ color: "var(--viet-primary)" }}>{aggregatedStats.total}</p>
+            <Card className="bg-card p-4 border">
+              <p className="text-sm text-muted-foreground">Tổng mẫu</p>
+              <p className="text-2xl text-primary">{aggregatedStats.total}</p>
             </Card>
-            <Card className="bg-white p-4 border">
-              <p className="text-sm text-gray-500">Clean</p>
-              <p className="text-xl text-gray-800">
+            <Card className="bg-card p-4 border">
+              <p className="text-sm text-muted-foreground">Clean</p>
+              <p className="text-xl text-foreground">
                 {aggregatedStats.clean} ({formatPercent(aggregatedStats.clean, aggregatedStats.total)})
               </p>
             </Card>
-            <Card className="bg-white p-4 border">
-              <p className="text-sm text-gray-500">Toxic</p>
-              <p className="text-xl text-gray-800">
+            <Card className="bg-card p-4 border">
+              <p className="text-sm text-muted-foreground">Toxic</p>
+              <p className="text-xl text-foreground">
                 {aggregatedStats.toxic} ({formatPercent(aggregatedStats.toxic, aggregatedStats.total)})
               </p>
             </Card>
-            <Card className="bg-white p-4 border">
-              <p className="text-sm text-gray-500">Trang</p>
-              <p className="text-sm text-gray-700 mt-2">
+            <Card className="bg-card p-4 border">
+              <p className="text-sm text-muted-foreground">Trang</p>
+              <p className="text-sm text-foreground mt-2">
                 {page} / {totalPages}
               </p>
             </Card>
@@ -812,7 +812,7 @@ export function DatasetPage() {
                   })}
                   {!aggregatedStats.sources.length && (
                     <TableRow>
-                      <TableCell colSpan={4} className="text-center text-sm text-gray-500">
+                      <TableCell colSpan={4} className="text-center text-sm text-muted-foreground">
                         --
                       </TableCell>
                     </TableRow>
@@ -860,7 +860,7 @@ export function DatasetPage() {
                   </TableRow>
                   {!aggregatedStats.sources.length && (
                     <TableRow>
-                      <TableCell colSpan={4} className="text-center text-sm text-gray-500">
+                      <TableCell colSpan={4} className="text-center text-sm text-muted-foreground">
                         --
                       </TableCell>
                     </TableRow>
@@ -871,7 +871,7 @@ export function DatasetPage() {
           </div>
         </Card>
 
-        <Card className="bg-white p-6 shadow-lg">
+        <Card className="bg-card p-6 shadow-lg">
           <Table>
             <TableHeader>
               <TableRow>
@@ -914,7 +914,7 @@ export function DatasetPage() {
               })}
               {!rows.length && !loading && (
                 <TableRow>
-                  <TableCell colSpan={7} className="text-center text-sm text-gray-500">
+                  <TableCell colSpan={7} className="text-center text-sm text-muted-foreground">
                     Không có dữ liệu
                   </TableCell>
                 </TableRow>

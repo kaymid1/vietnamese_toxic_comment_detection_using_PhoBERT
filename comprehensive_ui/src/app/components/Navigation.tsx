@@ -22,21 +22,11 @@ export function Navigation({ currentPage, onNavigate, theme, onToggleTheme }: Na
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="flex justify-between items-center h-16">
           {/* Logo */}
-          <div
-            className="flex items-center gap-2 cursor-pointer"
-            onClick={() => onNavigate("home")}
-          >
-            <div className="w-10 h-10 rounded-lg flex items-center justify-center"
-              style={{ backgroundColor: "var(--viet-primary)" }}
-            >
-              <Shield className="w-6 h-6 text-white" />
+          <div className="flex cursor-pointer items-center gap-2" onClick={() => onNavigate("home")}>
+            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary">
+              <Shield className="h-6 w-6 text-primary-foreground" />
             </div>
-            <span
-              className="text-xl tracking-tight"
-              style={{ color: "var(--viet-primary)" }}
-            >
-              VietToxic Detector
-            </span>
+            <span className="text-xl tracking-tight text-primary">VietToxic Detector</span>
           </div>
 
           <div className="flex items-center gap-3">
@@ -50,9 +40,8 @@ export function Navigation({ currentPage, onNavigate, theme, onToggleTheme }: Na
                     currentPage === item.id ? "font-medium" : "text-foreground/80 hover:bg-accent"
                   }`}
                   style={{
-                    color: currentPage === item.id ? "var(--viet-primary)" : undefined,
-                    backgroundColor:
-                      currentPage === item.id ? "color-mix(in srgb, var(--viet-primary) 10%, transparent)" : "transparent",
+                    color: currentPage === item.id ? "var(--primary)" : undefined,
+                    backgroundColor: currentPage === item.id ? "color-mix(in srgb, var(--primary) 14%, transparent)" : "transparent",
                   }}
                 >
                   {item.name}

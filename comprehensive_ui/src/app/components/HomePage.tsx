@@ -121,16 +121,14 @@ export function HomePage({
   };
 
   return (
-    <div style={{ backgroundColor: "var(--viet-bg)" }} className="min-h-screen px-4 py-16 sm:px-6 lg:px-8">
+    <div className="min-h-screen bg-background px-4 py-16 sm:px-6 lg:px-8">
       <div className="mx-auto w-full max-w-5xl">
         <div className="mb-8 text-center">
-          <h1 className="text-4xl tracking-tight" style={{ color: "var(--viet-primary)" }}>
-            VietToxic Detector
-          </h1>
-          <p className="mt-3 text-gray-600">Phân tích URL với bố cục gọn, tập trung vào thao tác chính.</p>
+          <h1 className="text-4xl tracking-tight text-primary">VietToxic Detector</h1>
+          <p className="mt-3 text-muted-foreground">Phân tích URL với bố cục gọn, tập trung vào thao tác chính.</p>
         </div>
 
-        <div className="rounded-[28px] border border-gray-300 bg-white p-6 shadow-sm sm:p-8">
+        <div className="rounded-[28px] border border-border bg-card p-6 shadow-sm sm:p-8">
           <Textarea
             placeholder="Dán URL vào đây (mỗi dòng một URL)&#10;https://example.com/article-1"
             className="min-h-[220px] resize-none border-0 bg-transparent px-0 text-lg shadow-none focus-visible:ring-0"
@@ -139,11 +137,11 @@ export function HomePage({
             disabled={isProcessing}
           />
 
-          <div className="mt-4 flex flex-col gap-3 border-t border-gray-200 pt-4 sm:flex-row sm:items-center sm:justify-between">
+          <div className="mt-4 flex flex-col gap-3 border-t border-border pt-4 sm:flex-row sm:items-center sm:justify-between">
             <div className="flex flex-wrap items-center gap-2">
-              <span className="text-sm text-gray-500">Model</span>
+              <span className="text-sm text-muted-foreground">Model</span>
               <select
-                className="h-9 rounded-full border border-gray-300 bg-white px-3 text-sm"
+                className="h-9 rounded-full border border-border bg-card px-3 text-sm text-foreground"
                 value={primaryModel}
                 onChange={handlePrimarySelectChange}
                 disabled={isProcessing || modelsLoading || availableModels.length === 0}
@@ -163,8 +161,8 @@ export function HomePage({
                 disabled={isProcessing || modelsLoading || !primaryModel || compareCandidates.length === 0}
                 className={`h-9 rounded-full border px-3 text-sm transition ${
                   compareEnabled
-                    ? "border-[var(--viet-primary)] bg-blue-50 text-[var(--viet-primary)]"
-                    : "border-gray-300 bg-white text-gray-600"
+                    ? "border-primary bg-accent text-primary"
+                    : "border-border bg-card text-muted-foreground"
                 } disabled:opacity-50`}
               >
                 Compare
@@ -172,7 +170,7 @@ export function HomePage({
 
               {compareEnabled && (
                 <select
-                  className="h-9 rounded-full border border-gray-300 bg-white px-3 text-sm"
+                  className="h-9 rounded-full border border-border bg-card px-3 text-sm text-foreground"
                   value={compareModel}
                   onChange={handleCompareSelectChange}
                   disabled={isProcessing || modelsLoading || compareCandidates.length === 0}
@@ -190,12 +188,6 @@ export function HomePage({
               onClick={handleAnalyze}
               disabled={isProcessing || !urlInput.trim() || modelsLoading || selectedModels.length === 0}
               className="h-10 rounded-full px-5"
-              style={{
-                backgroundColor:
-                  isProcessing || !urlInput.trim() || modelsLoading || selectedModels.length === 0
-                    ? "#94a3b8"
-                    : "var(--viet-primary)",
-              }}
             >
               {isProcessing ? (
                 <span className="flex items-center gap-2">
@@ -222,8 +214,8 @@ export function HomePage({
             </Button>
           </div>
 
-          {modelsError && <p className="mt-4 text-sm text-red-700">Không thể tải model: {modelsError}</p>}
-          {errorMessage && <p className="mt-2 text-sm text-red-700">{errorMessage}</p>}
+          {modelsError && <p className="mt-4 text-sm text-destructive">Không thể tải model: {modelsError}</p>}
+          {errorMessage && <p className="mt-2 text-sm text-destructive">{errorMessage}</p>}
         </div>
       </div>
     </div>

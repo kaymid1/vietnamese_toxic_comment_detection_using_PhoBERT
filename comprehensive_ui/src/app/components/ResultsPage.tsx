@@ -81,10 +81,10 @@ const formatThreshold = (value?: number | null) => {
 };
 
 const getSeverityClasses = (score: number | null) => {
-  if (score === null) return "bg-gray-100 text-gray-700 border-gray-300";
-  if (score < 35) return "bg-green-100 text-green-700 border-green-300";
-  if (score < 70) return "bg-yellow-100 text-yellow-800 border-yellow-300";
-  return "bg-red-100 text-red-700 border-red-300";
+  if (score === null) return "bg-muted text-muted-foreground border-border";
+  if (score < 35) return "bg-background-success text-text-success border-border-success";
+  if (score < 70) return "bg-background-warning text-text-warning border-border-warning";
+  return "bg-background-danger text-text-danger border-border-danger";
 };
 
 export function ResultsPage({
@@ -100,24 +100,22 @@ export function ResultsPage({
   onScanAgain,
 }: ResultsPageProps) {
   return (
-    <div style={{ backgroundColor: "var(--viet-bg)" }} className="min-h-screen py-12 px-4 sm:px-6 lg:px-8">
+    <div className="min-h-screen bg-background py-12 px-4 sm:px-6 lg:px-8">
       <div className="max-w-6xl mx-auto">
         <div className="mb-8">
-          <h1 className="text-4xl mb-3" style={{ color: "var(--viet-primary)" }}>
-            Kết Quả Phân Tích
-          </h1>
-          <p className="text-gray-600">Phân tích hoàn tất cho {results.length} URL</p>
-          {jobId && <p className="text-sm text-gray-500 mt-2">Job ID: {jobId}</p>}
+          <h1 className="text-4xl mb-3 text-primary">Kết Quả Phân Tích</h1>
+          <p className="text-muted-foreground">Phân tích hoàn tất cho {results.length} URL</p>
+          {jobId && <p className="text-sm text-muted-foreground mt-2">Job ID: {jobId}</p>}
           {modelId && (
-            <p className="text-sm text-gray-500">
-              Model đang xem: <span className="font-medium text-gray-700">{modelId}</span>
+            <p className="text-sm text-muted-foreground">
+              Model đang xem: <span className="font-medium text-foreground">{modelId}</span>
             </p>
           )}
           {compareModelNames && compareModelNames.length > 1 && onSelectResultModel && (
             <div className="mt-3 max-w-sm">
-              <label className="block text-xs text-gray-500 mb-1">Chuyển model kết quả</label>
+              <label className="block text-xs text-muted-foreground mb-1">Chuyển model kết quả</label>
               <select
-                className="w-full h-10 rounded-md border border-gray-300 px-3 text-sm bg-white"
+                className="w-full h-10 rounded-md border border-border px-3 text-sm bg-card text-foreground"
                 value={activeResultModel ?? ""}
                 onChange={(e) => onSelectResultModel(e.target.value)}
               >
@@ -154,26 +152,24 @@ export function ResultsPage({
           const topSegments = [...segments].sort((a, b) => b.score - a.score).slice(0, 3);
 
           return (
-            <Card key={result.url_hash ?? result.url ?? index} className="bg-white p-8 mb-6 shadow-lg">
-              <div className="mb-6 pb-6 border-b border-gray-200">
+            <Card key={result.url_hash ?? result.url ?? index} className="bg-card p-8 mb-6 shadow-lg">
+              <div className="mb-6 pb-6 border-b border-border">
                 <div className="flex items-start justify-between gap-4">
                   <div className="flex-1">
-                    <h2 className="text-2xl mb-2" style={{ color: "var(--viet-primary)" }}>
-                      Phân tích URL
-                    </h2>
-                    <div className="flex items-center gap-2 text-gray-600">
+                    <h2 className="text-2xl mb-2 text-primary">Phân tích URL</h2>
+                    <div className="flex items-center gap-2 text-muted-foreground">
                       <span className="text-sm font-medium">{domain}</span>
-                      <a href={result.url} target="_blank" rel="noreferrer">
+                      <a href={result.url} target="_blank" rel="noreferrer" className="text-muted-foreground hover:text-primary">
                         <ExternalLink className="w-4 h-4" />
                       </a>
                     </div>
-                    <p className="text-sm text-gray-500 mt-1 break-all">{result.url}</p>
+                    <p className="text-sm text-muted-foreground mt-1 break-all">{result.url}</p>
                     {result.status === "ok" && (
-                      <div className="mt-2 text-xs text-gray-500 space-y-1">
+                      <div className="mt-2 text-xs text-muted-foreground space-y-1">
                         <p>HTML tag: {(result.html_tags && result.html_tags[0]) || "unknown"}</p>
                         <p>OG: {(result.og_types && result.og_types.length > 0) ? result.og_types.join(", ") : "--"}</p>
                         <p>
-                          Ngưỡng dùng: <span className="font-medium text-gray-700">{formatThreshold(result.seg_threshold_used)}</span>
+                          Ngưỡng dùng: <span className="font-medium text-foreground">{formatThreshold(result.seg_threshold_used)}</span>
                         </p>
                       </div>
                     )}
@@ -182,13 +178,13 @@ export function ResultsPage({
               </div>
 
               {result.status === "error" && (
-                <div className="mb-8 p-4 rounded-lg border border-red-200 bg-red-50 text-sm text-red-700">
+                <div className="mb-8 p-4 rounded-lg border border-border-danger bg-background-danger text-sm text-text-danger">
                   {result.error || "Không thể phân tích URL này."}
                 </div>
               )}
 
               {result.status === "skipped" && (
-                <div className="mb-8 p-4 rounded-lg border border-amber-200 bg-amber-50 text-sm text-amber-800">
+                <div className="mb-8 p-4 rounded-lg border border-border-warning bg-background-warning text-sm text-text-warning">
                   URL này đã được bỏ qua theo lựa chọn của bạn (không chuyển qua Selenium).
                 </div>
               )}
@@ -197,32 +193,25 @@ export function ResultsPage({
                 <>
                   <div className="mb-8">
                     <div className="flex items-center justify-between mb-3">
-                      <h3 className="text-xl" style={{ color: "var(--viet-primary)" }}>
-                        Điểm Độc Hại Tổng Thể
-                      </h3>
-                      <span
-                        className="text-3xl"
-                        style={{ color: isToxic ? "var(--viet-toxic)" : "var(--viet-safe)" }}
-                      >
+                      <h3 className="text-xl text-primary">Điểm Độc Hại Tổng Thể</h3>
+                      <span className={`text-3xl ${isToxic ? "text-text-danger" : "text-text-success"}`}>
                         {overallPercent !== null ? `${overallPercent}%` : "--"}
                       </span>
                     </div>
-                    <div className="flex flex-wrap gap-4 text-xs text-gray-500">
+                    <div className="flex flex-wrap gap-4 text-xs text-muted-foreground">
                       <span>Ngưỡng page: {formatThreshold(thresholds?.page_threshold)}</span>
                       <span>Ngưỡng segment hiệu lực: {formatThreshold(effectiveSegThreshold)}</span>
                     </div>
-                    <Progress value={overallPercent ?? 0} className="h-4" style={{ backgroundColor: "#e5e7eb" }} />
+                    <Progress value={overallPercent ?? 0} className="h-4" />
                     <div className="flex justify-between mt-2 text-sm">
-                      <span style={{ color: "var(--viet-safe)" }}>An Toàn</span>
-                      <span style={{ color: "var(--viet-toxic)" }}>Độc Hại</span>
+                      <span className="text-text-success">An Toàn</span>
+                      <span className="text-text-danger">Độc Hại</span>
                     </div>
                   </div>
 
                   <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 mb-8">
                     <div>
-                      <h3 className="mb-4" style={{ color: "var(--viet-primary)" }}>
-                        Phân Bố Nội Dung
-                      </h3>
+                      <h3 className="mb-4 text-primary">Phân Bố Nội Dung</h3>
                       <ResponsiveContainer width="100%" height={250}>
                         <PieChart>
                           <Pie
@@ -237,8 +226,8 @@ export function ResultsPage({
                             outerRadius={80}
                             dataKey="value"
                           >
-                            <Cell fill="var(--viet-toxic)" />
-                            <Cell fill="var(--viet-safe)" />
+                            <Cell fill="var(--color-text-danger)" />
+                            <Cell fill="var(--color-text-success)" />
                           </Pie>
                           <RechartTooltip />
                           <Legend />
@@ -247,25 +236,19 @@ export function ResultsPage({
                     </div>
 
                     <div className="space-y-4">
-                      <h3 className="mb-4" style={{ color: "var(--viet-primary)" }}>
-                        Thống Kê Chi Tiết
-                      </h3>
-                      <div className="bg-gray-50 p-4 rounded-lg">
+                      <h3 className="mb-4 text-primary">Thống Kê Chi Tiết</h3>
+                      <div className="bg-background-secondary p-4 rounded-lg border border-border">
                         <div className="flex justify-between items-center mb-2">
-                          <span className="text-gray-600">Tổng đoạn văn phân tích:</span>
+                          <span className="text-muted-foreground">Tổng đoạn văn phân tích:</span>
                           <span className="text-xl">{segments.length}</span>
                         </div>
                         <div className="flex justify-between items-center mb-2">
-                          <span className="text-gray-600">Đoạn độc hại phát hiện:</span>
-                          <span className="text-xl" style={{ color: "var(--viet-toxic)" }}>
-                            {toxicCount}
-                          </span>
+                          <span className="text-muted-foreground">Đoạn độc hại phát hiện:</span>
+                          <span className="text-xl text-text-danger">{toxicCount}</span>
                         </div>
                         <div className="flex justify-between items-center">
-                          <span className="text-gray-600">Đoạn an toàn:</span>
-                          <span className="text-xl" style={{ color: "var(--viet-safe)" }}>
-                            {safeCount}
-                          </span>
+                          <span className="text-muted-foreground">Đoạn an toàn:</span>
+                          <span className="text-xl text-text-success">{safeCount}</span>
                         </div>
                       </div>
                     </div>
@@ -273,9 +256,7 @@ export function ResultsPage({
 
                   {topSegments.length > 0 && (
                     <div className="mb-8">
-                      <h3 className="text-xl mb-4" style={{ color: "var(--viet-primary)" }}>
-                        Đoạn có rủi ro cao nhất (Top 3)
-                      </h3>
+                      <h3 className="text-xl mb-4 text-primary">Đoạn có rủi ro cao nhất (Top 3)</h3>
                       <div className="space-y-3">
                         {topSegments.map((segment, idx) => {
                           const segmentIsToxic =
@@ -286,23 +267,23 @@ export function ResultsPage({
                           const fullText = segment.text || segment.text_preview;
 
                           return (
-                            <div key={segment.segment_id || idx} className="p-4 rounded-lg border border-gray-200 bg-white">
+                            <div key={segment.segment_id || idx} className="p-4 rounded-lg border border-border bg-card">
                               <div className="flex items-start justify-between gap-4 mb-2">
                                 <div className="flex items-center gap-3">
-                                  <span className="text-sm font-medium text-gray-600">#{idx + 1}</span>
-                                  <span className="text-sm font-semibold" style={{ color: "var(--viet-primary)" }}>
-                                    {percent}%
-                                  </span>
+                                  <span className="text-sm font-medium text-muted-foreground">#{idx + 1}</span>
+                                  <span className="text-sm font-semibold text-primary">{percent}%</span>
                                 </div>
                                 <span
-                                  className={`text-xs px-2 py-1 rounded-full ${
-                                    segmentIsToxic ? "bg-red-100 text-red-700" : "bg-yellow-100 text-yellow-800"
+                                  className={`text-xs px-2 py-1 rounded-full border ${
+                                    segmentIsToxic
+                                      ? "bg-background-danger text-text-danger border-border-danger"
+                                      : "bg-background-warning text-text-warning border-border-warning"
                                   }`}
                                 >
                                   {segmentIsToxic ? "Độc hại (>= ngưỡng)" : "Rủi ro (chưa vượt ngưỡng)"}
                                 </span>
                               </div>
-                              <details className="text-sm text-gray-700">
+                              <details className="text-sm text-foreground">
                                 <summary className="cursor-pointer">{segment.text_preview}</summary>
                                 <p className="mt-2 whitespace-pre-wrap">{fullText}</p>
                               </details>
@@ -315,23 +296,20 @@ export function ResultsPage({
 
                   <div
                     className={`p-6 rounded-lg border-l-4 ${
-                      isToxic ? "bg-red-50 border-red-500" : "bg-green-50 border-green-500"
+                      isToxic ? "bg-background-danger border-border-danger" : "bg-background-success border-border-success"
                     }`}
                   >
                     <div className="flex items-start gap-3">
                       {isToxic ? (
-                        <AlertTriangle className="w-6 h-6 mt-1 flex-shrink-0" style={{ color: "var(--viet-toxic)" }} />
+                        <AlertTriangle className="w-6 h-6 mt-1 flex-shrink-0 text-text-danger" />
                       ) : (
-                        <CheckCircle className="w-6 h-6 mt-1 flex-shrink-0" style={{ color: "var(--viet-safe)" }} />
+                        <CheckCircle className="w-6 h-6 mt-1 flex-shrink-0 text-text-success" />
                       )}
                       <div>
-                        <h4
-                          className="mb-2"
-                          style={{ color: isToxic ? "var(--viet-toxic)" : "var(--viet-safe)" }}
-                        >
+                        <h4 className={`mb-2 ${isToxic ? "text-text-danger" : "text-text-success"}`}>
                           {isToxic ? "⚠️ Cảnh Báo Nội Dung" : "✅ Nội Dung An Toàn"}
                         </h4>
-                        <p className="text-gray-700">
+                        <p className="text-foreground">
                           {isToxic
                             ? "Nội dung có thể chứa yếu tố độc hại. Khuyến nghị đọc cẩn trọng và tránh lan truyền."
                             : "Nội dung tương đối an toàn cho người đọc. Tuy nhiên, vẫn nên duy trì suy nghĩ phản biện."}
@@ -341,32 +319,28 @@ export function ResultsPage({
                   </div>
 
                   <div className="mt-8">
-                    <h3 className="text-xl mb-4" style={{ color: "var(--viet-primary)" }}>
-                      Video Phát Hiện
-                    </h3>
-                    {videos.length === 0 && <p className="text-sm text-gray-500">Không phát hiện video.</p>}
+                    <h3 className="text-xl mb-4 text-primary">Video Phát Hiện</h3>
+                    {videos.length === 0 && <p className="text-sm text-muted-foreground">Không phát hiện video.</p>}
                     <div className="space-y-4">
                       {videos.map((video, vIdx) => (
-                        <div key={`${video.video_id || vIdx}`} className="p-4 rounded-lg border border-gray-200 bg-white">
-                          <p className="text-sm text-gray-600">
+                        <div key={`${video.video_id || vIdx}`} className="p-4 rounded-lg border border-border bg-card">
+                          <p className="text-sm text-muted-foreground">
                             {video.platform || "video"} {video.video_id ? `• ${video.video_id}` : ""}
                           </p>
-                          <p className="text-base font-semibold mt-1" style={{ color: "var(--viet-primary)" }}>
-                            {video.title || "Untitled"}
-                          </p>
-                          {video.video_url && <p className="text-xs text-gray-500 break-all mt-1">{video.video_url}</p>}
-                          {video.error && <p className="text-xs text-red-600 mt-2">Lỗi video: {video.error}</p>}
-                          <div className="mt-2 text-xs text-gray-600">
+                          <p className="text-base font-semibold mt-1 text-primary">{video.title || "Untitled"}</p>
+                          {video.video_url && <p className="text-xs text-muted-foreground break-all mt-1">{video.video_url}</p>}
+                          {video.error && <p className="text-xs text-destructive mt-2">Lỗi video: {video.error}</p>}
+                          <div className="mt-2 text-xs text-muted-foreground">
                             {video.channel && <span>Kênh: {video.channel} </span>}
                             {video.upload_date && <span>• Ngày: {video.upload_date} </span>}
                             {typeof video.duration === "number" && <span>• {Math.round(video.duration)}s </span>}
                           </div>
                           {video.transcript && video.transcript.length > 0 && (
-                            <details className="mt-3 text-sm text-gray-700">
+                            <details className="mt-3 text-sm text-foreground">
                               <summary className="cursor-pointer">Xem transcript ({video.transcript.length} dòng)</summary>
                               <div className="mt-2 space-y-1">
                                 {video.transcript.slice(0, 5).map((seg, sIdx) => (
-                                  <p key={sIdx} className="text-xs text-gray-700">
+                                  <p key={sIdx} className="text-xs text-foreground">
                                     {seg.text}
                                   </p>
                                 ))}
@@ -384,10 +358,8 @@ export function ResultsPage({
         })}
 
         {scanHistory && scanHistory.length > 0 && onLoadHistoryItem && (
-          <div className="mt-10 rounded-xl border border-gray-200 bg-white p-5">
-            <h3 className="mb-3 text-lg" style={{ color: "var(--viet-primary)" }}>
-              URL đã quét gần đây
-            </h3>
+          <div className="mt-10 rounded-xl border border-border bg-card p-5">
+            <h3 className="mb-3 text-lg text-primary">URL đã quét gần đây</h3>
             <div className="space-y-2 max-h-72 overflow-y-auto">
               {scanHistory.map((item) => {
                 const score =
@@ -399,12 +371,12 @@ export function ResultsPage({
                     key={item.id}
                     type="button"
                     onClick={() => onLoadHistoryItem(item)}
-                    className="w-full rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-left hover:bg-gray-100"
+                    className="w-full rounded-lg border border-border bg-background-secondary px-3 py-2 text-left hover:bg-muted"
                   >
                     <div className="flex items-center justify-between gap-3">
                       <div className="min-w-0">
-                        <p className="truncate text-sm font-medium text-gray-800">{item.result.url}</p>
-                        <p className="text-xs text-gray-500">
+                        <p className="truncate text-sm font-medium text-foreground">{item.result.url}</p>
+                        <p className="text-xs text-muted-foreground">
                           {item.modelId || "unknown model"} • {new Date(item.savedAt).toLocaleString()}
                         </p>
                       </div>
@@ -422,15 +394,11 @@ export function ResultsPage({
         )}
 
         <div className="flex flex-col sm:flex-row gap-4 justify-center mt-8">
-          <Button onClick={onScanAgain} className="h-12 px-8" style={{ backgroundColor: "var(--viet-primary)" }}>
+          <Button onClick={onScanAgain} className="h-12 px-8">
             <RotateCcw className="w-5 h-5 mr-2" />
             Quét URL Khác
           </Button>
-          <Button
-            variant="outline"
-            className="h-12 px-8 border-2"
-            style={{ borderColor: "var(--viet-primary)", color: "var(--viet-primary)" }}
-          >
+          <Button variant="outline" className="h-12 px-8 border-2 border-primary text-primary hover:bg-accent">
             <Download className="w-5 h-5 mr-2" />
             Xuất Báo Cáo (PDF)
           </Button>
