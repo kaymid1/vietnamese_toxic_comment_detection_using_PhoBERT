@@ -11,6 +11,7 @@ import {
   TableRow,
 } from "@/app/components/ui/table";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/app/components/ui/tooltip";
+import { useI18n } from "@/app/i18n/context";
 
 interface SplitStats {
   total?: number;
@@ -116,6 +117,7 @@ const SIDEBAR_ITEMS = [
 ] as const;
 
 export function ProtocolPage() {
+  const { t } = useI18n();
   const [data, setData] = useState<ProtocolSummaryResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -132,7 +134,7 @@ export function ProtocolPage() {
       }
       setData(payload);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Không thể tải protocol summary");
+      setError(err instanceof Error ? err.message : t("protocol.cannotLoadSummary"));
     } finally {
       setLoading(false);
     }
@@ -140,7 +142,7 @@ export function ProtocolPage() {
 
   useEffect(() => {
     void fetchSummary();
-  }, []);
+  }, [t]);
 
   useEffect(() => {
     const sections = SIDEBAR_ITEMS
@@ -196,7 +198,7 @@ export function ProtocolPage() {
   if (loading) {
     return (
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-10">
-        <Card className="p-6">Đang tải protocol dashboard...</Card>
+        <Card className="p-6">{t("protocol.loadingDashboard")}</Card>
       </div>
     );
   }
@@ -204,8 +206,8 @@ export function ProtocolPage() {
   if (error) {
     return (
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-10 space-y-4">
-        <Card className="p-6 text-text-danger">Lỗi tải dữ liệu Protocol: {error}</Card>
-        <Button onClick={() => void fetchSummary()}>Thử lại</Button>
+        <Card className="p-6 text-text-danger">{t("protocol.loadErrorPrefix")} {error}</Card>
+        <Button onClick={() => void fetchSummary()}>{t("protocol.retry")}</Button>
       </div>
     );
   }

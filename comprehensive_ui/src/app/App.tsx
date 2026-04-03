@@ -1,6 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Navigation } from "@/app/components/Navigation";
 import { HomePage } from "@/app/components/HomePage";
+import { I18nContext, createTranslator } from "@/app/i18n/context";
+import type { Language } from "@/app/i18n/messages";
 import { ResultsPage } from "@/app/components/ResultsPage";
 import { DatasetPage } from "@/app/components/DatasetPage";
 import { SyntheticGenerationPage } from "@/app/components/SyntheticGenerationPage";
@@ -99,6 +101,7 @@ interface ScanHistoryItem {
 const RAW_API_BASE = import.meta.env.VITE_API_BASE_URL?.trim() ?? "";
 const SCAN_HISTORY_KEY = "viettoxic:scan-history";
 const THEME_KEY = "viettoxic:theme";
+const LANGUAGE_KEY = "viettoxic:language";
 const MAX_SCAN_HISTORY = 120;
 const API_BASE = RAW_API_BASE.replace(/\/+$/, "");
 
@@ -195,6 +198,7 @@ export default function App() {
   const [modelsError, setModelsError] = useState<string | null>(null);
   const [analysisProgress, setAnalysisProgress] = useState<number | null>(null);
   const [theme, setTheme] = useState<"light" | "dark">("light");
+  const [language, setLanguage] = useState<Language>("vi");
   const [fallbackPrompt, setFallbackPrompt] = useState<{
     items: PendingFallbackUrl[];
     decisions: Record<string, "use_selenium" | "skip">;
@@ -217,9 +221,22 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    const storedLanguage = window.localStorage.getItem(LANGUAGE_KEY);
+    if (storedLanguage === "vi" || storedLanguage === "en") {
+      setLanguage(storedLanguage);
+    }
+  }, []);
+
+  useEffect(() => {
     document.documentElement.classList.toggle("dark", theme === "dark");
     window.localStorage.setItem(THEME_KEY, theme);
   }, [theme]);
+
+  useEffect(() => {
+    window.localStorage.setItem(LANGUAGE_KEY, language);
+  }, [language]);
+
+  const t = useMemo(() => createTranslator(language), [language]);
 
   useEffect(() => {
     let isMounted = true;
@@ -260,7 +277,7 @@ export default function App() {
         setSelectedModels(selected.length > 0 ? selected : fallback);
       } catch (error) {
         if (!isMounted) return;
-        const message = error instanceof Error ? error.message : "Không thể tải danh sách model";
+        const message = error instanceof Error ? error.message : t("app.cannotLoadModels");
         setModelsError(message);
         setAvailableModels([]);
         setSelectedModels([]);
@@ -276,7 +293,7 @@ export default function App() {
     return () => {
       isMounted = false;
     };
-  }, []);
+  }, [t]);
 
   const handleNavigate = (page: string) => {
     setCurrentPage(page);
@@ -284,6 +301,10 @@ export default function App() {
 
   const handleToggleTheme = () => {
     setTheme((prev) => (prev === "light" ? "dark" : "light"));
+  };
+
+  const handleSetLanguage = (nextLanguage: Language) => {
+    setLanguage(nextLanguage);
   };
 
   const appendHistory = (entries: ScanHistoryItem[]) => {
@@ -387,7 +408,7 @@ export default function App() {
         if (data.flow_state === "awaiting_user_choice" && data.pending_fallback_urls && data.pending_fallback_urls.length > 0) {
           const fallbackDecisions = await askFallbackDecisions(data.pending_fallback_urls);
           if (!fallbackDecisions) {
-            throw new Error("Bạn đã hủy thao tác chuyển qua Selenium.");
+            throw new Error(t("app.canceledSelenium"));
           }
           data = await parseJsonResponse<AnalyzeCompareResponse>(
             await fetch(buildApiUrl("/api/analyze_compare"), {
@@ -444,7 +465,7 @@ export default function App() {
       if (data.flow_state === "awaiting_user_choice" && data.pending_fallback_urls && data.pending_fallback_urls.length > 0) {
         const fallbackDecisions = await askFallbackDecisions(data.pending_fallback_urls);
           if (!fallbackDecisions) {
-            throw new Error("Bạn đã hủy thao tác chuyển qua Selenium.");
+            throw new Error(t("app.canceledSelenium"));
           }
         data = await parseJsonResponse<AnalyzeResponse>(
           await fetch(buildApiUrl("/api/analyze"), {
@@ -475,7 +496,7 @@ export default function App() {
       );
       setCurrentPage("results");
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Unknown error";
+      const message = error instanceof Error ? error.message : t("app.unknownError");
       setErrorMessage(message);
     } finally {
       setAnalysisProgress(null);
@@ -517,12 +538,15 @@ export default function App() {
 
   return (
     <div className="min-h-screen">
-      <Navigation
-        currentPage={currentPage}
-        onNavigate={handleNavigate}
-        theme={theme}
-        onToggleTheme={handleToggleTheme}
-      />
+      <I18nContext.Provider value={{ language, setLanguage: handleSetLanguage, t }}>
+        <Navigation
+          currentPage={currentPage}
+          onNavigate={handleNavigate}
+          theme={theme}
+          onToggleTheme={handleToggleTheme}
+          language={language}
+          onSetLanguage={handleSetLanguage}
+        />
 
       {currentPage === "home" && (
         <HomePage
@@ -549,8 +573,8 @@ export default function App() {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4">
           <div className="w-full max-w-2xl rounded-2xl border border-border bg-card p-5 shadow-xl">
             <div className="mb-4">
-              <h3 className="text-lg font-semibold text-foreground">Một số URL cần chuyển qua Selenium</h3>
-              <p className="mt-1 text-sm text-muted-foreground">Chọn theo từng URL: chuyển qua Selenium hoặc bỏ qua.</p>
+              <h3 className="text-lg font-semibold text-foreground">{t("app.fallbackTitle")}</h3>
+              <p className="mt-1 text-sm text-muted-foreground">{t("app.fallbackSubtitle")}</p>
             </div>
 
             <div className="mb-3 flex flex-wrap gap-2">
@@ -559,14 +583,14 @@ export default function App() {
                 onClick={() => handleFallbackApplyAll("use_selenium")}
                 className="rounded-full border border-border-info bg-background-info px-3 py-1.5 text-xs text-text-info"
               >
-                Dùng Selenium cho tất cả
+                {t("app.useSeleniumAll")}
               </button>
               <button
                 type="button"
                 onClick={() => handleFallbackApplyAll("skip")}
                 className="rounded-full border border-border-warning bg-background-warning px-3 py-1.5 text-xs text-text-warning"
               >
-                Skip tất cả
+                {t("app.skipAll")}
               </button>
             </div>
 
@@ -576,7 +600,7 @@ export default function App() {
                 return (
                   <div key={item.url_hash} className="rounded-lg border border-border p-3">
                     <p className="break-all text-sm text-foreground">{item.url}</p>
-                    <p className="mt-1 text-xs text-muted-foreground">Trafilatura text length: {item.trafilatura_text_len ?? 0}</p>
+                    <p className="mt-1 text-xs text-muted-foreground">{t("app.trafilaturaLength", { length: item.trafilatura_text_len ?? 0 })}</p>
                     <div className="mt-2 flex gap-2">
                       <button
                         type="button"
@@ -587,7 +611,7 @@ export default function App() {
                             : "border-border bg-card text-muted-foreground"
                         }`}
                       >
-                        Dùng Selenium
+                        {t("app.useSelenium")}
                       </button>
                       <button
                         type="button"
@@ -598,7 +622,7 @@ export default function App() {
                             : "border-border bg-card text-muted-foreground"
                         }`}
                       >
-                        Skip URL này
+                        {t("app.skipThisUrl")}
                       </button>
                     </div>
                   </div>
@@ -612,14 +636,14 @@ export default function App() {
                 onClick={handleFallbackCancel}
                 className="rounded-md border border-border px-4 py-2 text-sm text-muted-foreground"
               >
-                Hủy
+                {t("app.cancel")}
               </button>
               <button
                 type="button"
                 onClick={handleFallbackConfirm}
                 className="rounded-md bg-primary px-4 py-2 text-sm text-primary-foreground"
               >
-                Tiếp tục
+                {t("app.continue")}
               </button>
             </div>
           </div>
@@ -652,6 +676,7 @@ export default function App() {
       {currentPage === "model" && <ModelPage onTryNow={handleTryNow} />}
 
       {currentPage === "contact" && <ContactPage />}
+      </I18nContext.Provider>
     </div>
   );
 }

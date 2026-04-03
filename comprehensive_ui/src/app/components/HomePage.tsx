@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type ChangeEvent } from "react";
 import { Button } from "@/app/components/ui/button";
 import { Textarea } from "@/app/components/ui/textarea";
+import { useI18n } from "@/app/i18n/context";
 
 interface HomePageProps {
   onAnalyze: (urls: string[], modelNames: string[]) => Promise<void>;
@@ -25,6 +26,7 @@ export function HomePage({
   onClearError,
   analysisProgress,
 }: HomePageProps) {
+  const { t } = useI18n();
   const [urlInput, setUrlInput] = useState("");
   const [isProcessing, setIsProcessing] = useState(false);
   const [uiProgress, setUiProgress] = useState(0);
@@ -125,12 +127,12 @@ export function HomePage({
       <div className="mx-auto w-full max-w-5xl">
         <div className="mb-8 text-center">
           <h1 className="text-4xl tracking-tight text-primary">VietToxic Detector</h1>
-          <p className="mt-3 text-muted-foreground">Phân tích URL với bố cục gọn, tập trung vào thao tác chính.</p>
+          <p className="mt-3 text-muted-foreground">{t("home.subtitle")}</p>
         </div>
 
         <div className="rounded-[28px] border border-border bg-card p-6 shadow-sm sm:p-8">
           <Textarea
-            placeholder="Dán URL vào đây (mỗi dòng một URL)&#10;https://example.com/article-1"
+            placeholder={t("home.placeholder")}
             className="min-h-[220px] resize-none border-0 bg-transparent px-0 text-lg shadow-none focus-visible:ring-0"
             value={urlInput}
             onChange={handleUrlInputChange}
@@ -139,15 +141,15 @@ export function HomePage({
 
           <div className="mt-4 flex flex-col gap-3 border-t border-border pt-4 sm:flex-row sm:items-center sm:justify-between">
             <div className="flex flex-wrap items-center gap-2">
-              <span className="text-sm text-muted-foreground">Model</span>
+              <span className="text-sm text-muted-foreground">{t("home.model")}</span>
               <select
                 className="h-9 rounded-full border border-border bg-card px-3 text-sm text-foreground"
                 value={primaryModel}
                 onChange={handlePrimarySelectChange}
                 disabled={isProcessing || modelsLoading || availableModels.length === 0}
               >
-                {modelsLoading && <option value="">Đang tải...</option>}
-                {!modelsLoading && availableModels.length === 0 && <option value="">Không có model</option>}
+                {modelsLoading && <option value="">{t("home.loading")}</option>}
+                {!modelsLoading && availableModels.length === 0 && <option value="">{t("home.noModels")}</option>}
                 {availableModels.map((model) => (
                   <option key={model} value={model}>
                     {model}
@@ -165,7 +167,7 @@ export function HomePage({
                     : "border-border bg-card text-muted-foreground"
                 } disabled:opacity-50`}
               >
-                Compare
+                {t("home.compare")}
               </button>
 
               {compareEnabled && (
@@ -206,15 +208,15 @@ export function HomePage({
                       transform="rotate(-90 8 8)"
                     />
                   </svg>
-                  <span>Đang xử lý {progressPercent}%</span>
+                  <span>{t("home.processing", { percent: progressPercent })}</span>
                 </span>
               ) : (
-                "Quét nội dung"
+                t("home.scan")
               )}
             </Button>
           </div>
 
-          {modelsError && <p className="mt-4 text-sm text-destructive">Không thể tải model: {modelsError}</p>}
+          {modelsError && <p className="mt-4 text-sm text-destructive">{t("home.cannotLoadModel", { error: modelsError })}</p>}
           {errorMessage && <p className="mt-2 text-sm text-destructive">{errorMessage}</p>}
         </div>
       </div>

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type MouseEvent, type ChangeEvent } from "react";
+import { useEffect, useMemo, useState, type MouseEvent } from "react";
 import { Button } from "@/app/components/ui/button";
 import { Card } from "@/app/components/ui/card";
 import { Label } from "@/app/components/ui/label";
@@ -10,6 +10,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/app/components/ui/table";
+import { useI18n } from "@/app/i18n/context";
 
 interface SyntheticRow {
   id: number;
@@ -72,6 +73,7 @@ const buildApiUrl = (path: string) => {
 };
 
 export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps) {
+  const { t } = useI18n();
   const [domain, setDomain] = useState<"education" | "news" | "politic">("education");
   const [style, setStyle] = useState<"formal" | "informal">("formal");
   const [label, setLabel] = useState<0 | 1>(1);
@@ -140,7 +142,7 @@ export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps
       setEditedTextMap(nextEditedText);
       setEditedLabelMap(nextEditedLabel);
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Không thể tải synthetic dataset";
+      const message = err instanceof Error ? err.message : t("synthetic.loadingDataset");
       setError(message);
     } finally {
       setLoading(false);
@@ -176,10 +178,10 @@ export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps
       setViewMode("queue");
       setAcceptedFilter("all");
       setPage(1);
-      setStatus(`Đã sinh ${data.generated_count}/${data.requested_count} mẫu. Batch: ${data.batch_id}. Length: ${bucketText}`);
+      setStatus(t("synthetic.generatedStatus", { generated: data.generated_count, requested: data.requested_count, batch: data.batch_id, bucket: bucketText }));
       await fetchPreview(1, pageSize);
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Sinh dữ liệu thất bại";
+      const message = err instanceof Error ? err.message : t("synthetic.generateFailed");
       setError(message);
     } finally {
       setGenerateLoading(false);
@@ -196,13 +198,13 @@ export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps
     const text = editedTextMap[rowId] ?? rows.find((row) => row.id === rowId)?.text ?? "";
     try {
       if (!navigator?.clipboard?.writeText) {
-        throw new Error("Clipboard API không khả dụng");
+        throw new Error(t("synthetic.clipboardUnavailable"));
       }
       await navigator.clipboard.writeText(text);
-      setStatus(`Đã copy text của mẫu #${rowId}.`);
+      setStatus(t("synthetic.copiedRow", { id: rowId }));
       setError(null);
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Copy thất bại";
+      const message = err instanceof Error ? err.message : t("synthetic.copyFailed");
       setError(message);
     }
   };
@@ -210,17 +212,17 @@ export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps
   const handlePasteRowText = async (rowId: number) => {
     try {
       if (!navigator?.clipboard?.readText) {
-        throw new Error("Clipboard API không khả dụng");
+        throw new Error(t("synthetic.clipboardUnavailable"));
       }
       const pasted = await navigator.clipboard.readText();
       setEditedTextMap((prev) => ({
         ...prev,
         [rowId]: pasted,
       }));
-      setStatus(`Đã paste text vào mẫu #${rowId}.`);
+      setStatus(t("synthetic.pastedRow", { id: rowId }));
       setError(null);
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Paste thất bại";
+      const message = err instanceof Error ? err.message : t("synthetic.pasteFailed");
       setError(message);
     }
   };
@@ -268,7 +270,7 @@ export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps
       .map(({ id, is_accepted, text, label }) => ({ id, is_accepted, text, label }));
 
     if (!updates.length) {
-      setStatus("Không có thay đổi để lưu.");
+      setStatus(t("synthetic.noChanges"));
       return;
     }
 
@@ -285,10 +287,10 @@ export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps
       if (!response.ok) {
         throw new Error(JSON.stringify(data));
       }
-      setStatus(`Đã cập nhật ${data.updated} mẫu review. Queue đã được làm mới.`);
+      setStatus(t("synthetic.savedReview", { count: data.updated }));
       await fetchPreview(page, pageSize);
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Lưu review thất bại";
+      const message = err instanceof Error ? err.message : t("synthetic.saveFailed");
       setError(message);
     } finally {
       setSaveLoading(false);
@@ -311,9 +313,9 @@ export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps
       if (!response.ok) {
         throw new Error(JSON.stringify(data));
       }
-      setStatus(`Đã export ${data.count} mẫu vào ${data.path}`);
+      setStatus(t("synthetic.exportDone", { count: data.count, path: data.path }));
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Export thất bại";
+      const message = err instanceof Error ? err.message : t("synthetic.exportFailed");
       setError(message);
     }
   };
@@ -324,11 +326,11 @@ export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps
       .map((row) => row.id);
 
     if (!selectedIds.length) {
-      setStatus("Chưa chọn row nào để xoá.");
+      setStatus(t("synthetic.noRowsToDelete"));
       return;
     }
 
-    const confirmed = window.confirm(`Xoá vĩnh viễn ${selectedIds.length} row đã chọn?`);
+    const confirmed = window.confirm(t("synthetic.confirmDelete", { count: selectedIds.length }));
     if (!confirmed) {
       return;
     }
@@ -346,10 +348,10 @@ export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps
       if (!response.ok) {
         throw new Error(JSON.stringify(data));
       }
-      setStatus(`Đã xoá ${data.deleted} row khỏi DB.`);
+      setStatus(t("synthetic.deletedRows", { count: data.deleted }));
       await fetchPreview(page, pageSize);
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Xoá thất bại";
+      const message = err instanceof Error ? err.message : t("synthetic.deleteFailed");
       setError(message);
     } finally {
       setDeleteLoading(false);
@@ -362,53 +364,53 @@ export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <h1 className="text-3xl text-primary">
-              Synthetic Dataset Generation
+              {t("synthetic.title")}
             </h1>
-            <p className="text-sm text-muted-foreground">Sinh dữ liệu mới và review trước khi export.</p>
+            <p className="text-sm text-muted-foreground">{t("synthetic.subtitle")}</p>
           </div>
           <Button variant="outline" onClick={onBack}>
-            Quay lại Dataset
+            {t("synthetic.back")}
           </Button>
         </div>
 
         <Card className="bg-card p-6 shadow-lg">
           <div className="grid grid-cols-1 md:grid-cols-5 gap-4 items-end">
             <div>
-              <Label className="text-sm text-muted-foreground">Domain</Label>
+              <Label className="text-sm text-muted-foreground">{t("synthetic.domain")}</Label>
               <select
                 className="mt-2 w-full border rounded-lg px-3 py-2 text-sm"
                 value={domain}
                 onChange={(event) => setDomain(event.target.value as "education" | "news" | "politic")}
               >
-                <option value="education">education</option>
-                <option value="news">news</option>
-                <option value="politic">politic</option>
+                <option value="education">{t("synthetic.domainEducation")}</option>
+                <option value="news">{t("synthetic.domainNews")}</option>
+                <option value="politic">{t("synthetic.domainPolitic")}</option>
               </select>
             </div>
             <div>
-              <Label className="text-sm text-muted-foreground">Style</Label>
+              <Label className="text-sm text-muted-foreground">{t("synthetic.style")}</Label>
               <select
                 className="mt-2 w-full border rounded-lg px-3 py-2 text-sm"
                 value={style}
                 onChange={(event) => setStyle(event.target.value as "formal" | "informal")}
               >
-                <option value="formal">formal</option>
-                <option value="informal">informal</option>
+                <option value="formal">{t("synthetic.styleFormal")}</option>
+                <option value="informal">{t("synthetic.styleInformal")}</option>
               </select>
             </div>
             <div>
-              <Label className="text-sm text-muted-foreground">Label</Label>
+              <Label className="text-sm text-muted-foreground">{t("synthetic.label")}</Label>
               <select
                 className="mt-2 w-full border rounded-lg px-3 py-2 text-sm"
                 value={label}
                 onChange={(event) => setLabel(Number(event.target.value) as 0 | 1)}
               >
-                <option value={1}>1 - toxic</option>
-                <option value={0}>0 - clean</option>
+                <option value={1}>{t("synthetic.labelToxic")}</option>
+                <option value={0}>{t("synthetic.labelClean")}</option>
               </select>
             </div>
             <div>
-              <Label className="text-sm text-muted-foreground">Count</Label>
+              <Label className="text-sm text-muted-foreground">{t("synthetic.count")}</Label>
               <input
                 className="mt-2 w-full border rounded-lg px-3 py-2 text-sm"
                 type="number"
@@ -419,43 +421,41 @@ export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps
               />
             </div>
             <Button onClick={handleGenerate} disabled={generateLoading}>
-              {generateLoading ? "Đang sinh..." : "Generate"}
+              {generateLoading ? t("synthetic.generating") : t("synthetic.generate")}
             </Button>
           </div>
 
           <div className="mt-4 flex flex-wrap gap-3 items-center">
             <Button variant="outline" onClick={handleAcceptAll} disabled={!rows.length}>
-              Select all (page)
+              {t("synthetic.selectAllPage")}
             </Button>
             <Button variant="outline" onClick={handleUnselectAll} disabled={!rows.length}>
-              Unselect all (page)
+              {t("synthetic.unselectAllPage")}
             </Button>
             <Button variant="outline" onClick={handleSaveReview} disabled={saveLoading || !rows.length}>
-              {saveLoading ? "Đang lưu..." : "Save review"}
+              {saveLoading ? t("synthetic.saving") : t("synthetic.saveReview")}
             </Button>
             <Button variant="outline" onClick={handleExport} disabled={viewMode !== "reviewed"}>
-              Export accepted
+              {t("synthetic.exportAccepted")}
             </Button>
             <Button variant="destructive" onClick={handleDeleteSelected} disabled={!hasAnySelected || deleteLoading}>
-              {deleteLoading ? "Đang xoá..." : "Delete selected"}
+              {deleteLoading ? t("synthetic.deleting") : t("synthetic.deleteSelected")}
             </Button>
             <Button variant="outline" onClick={() => fetchPreview(1, pageSize)} disabled={loading}>
-              {loading ? "Đang tải..." : "Refresh"}
+              {loading ? t("synthetic.processing") : t("synthetic.refresh")}
             </Button>
             {status && <span className="text-sm text-muted-foreground">{status}</span>}
           </div>
           {error && <p className="mt-3 text-sm text-destructive">{error}</p>}
           <p className="mt-2 text-xs text-muted-foreground">
-            {viewMode === "queue"
-              ? "Queue chưa review: bấm Save review để ghi DB, sau đó các row này sẽ rời khỏi queue."
-              : "DB đã review: dùng Accepted filter để chọn accepted/rejected và Export accepted để xuất JSONL."}
+            {viewMode === "queue" ? t("synthetic.queueHint") : t("synthetic.reviewedHint")}
           </p>
         </Card>
 
         <Card className="bg-card p-6 shadow-lg">
           <div className="grid grid-cols-1 md:grid-cols-5 gap-4 items-end">
             <div>
-              <Label className="text-sm text-muted-foreground">Batch ID</Label>
+              <Label className="text-sm text-muted-foreground">{t("synthetic.batchId")}</Label>
               <input
                 className="mt-2 w-full border rounded-lg px-3 py-2 text-sm"
                 value={batchIdFilter}
@@ -463,11 +463,11 @@ export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps
                   setBatchIdFilter(event.target.value);
                   setPage(1);
                 }}
-                placeholder="Lọc theo batch"
+                placeholder={t("synthetic.filterByBatch")}
               />
             </div>
             <div>
-              <Label className="text-sm text-muted-foreground">View mode</Label>
+              <Label className="text-sm text-muted-foreground">{t("synthetic.viewMode")}</Label>
               <select
                 className="mt-2 w-full border rounded-lg px-3 py-2 text-sm"
                 value={viewMode}
@@ -480,12 +480,12 @@ export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps
                   setPage(1);
                 }}
               >
-                <option value="queue">Queue chưa review</option>
-                <option value="reviewed">DB đã review</option>
+                <option value="queue">{t("synthetic.queueUnreviewed")}</option>
+                <option value="reviewed">{t("synthetic.dbReviewed")}</option>
               </select>
             </div>
             <div>
-              <Label className="text-sm text-muted-foreground">Page size</Label>
+              <Label className="text-sm text-muted-foreground">{t("synthetic.pageSize")}</Label>
               <select
                 className="mt-2 w-full border rounded-lg px-3 py-2 text-sm"
                 value={pageSize}
@@ -502,7 +502,7 @@ export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps
               </select>
             </div>
             <div>
-              <Label className="text-sm text-muted-foreground">Accepted filter</Label>
+              <Label className="text-sm text-muted-foreground">{t("synthetic.acceptedFilter")}</Label>
               <select
                 className="mt-2 w-full border rounded-lg px-3 py-2 text-sm"
                 value={acceptedFilter}
@@ -512,35 +512,35 @@ export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps
                 }}
                 disabled={viewMode !== "reviewed"}
               >
-                <option value="all">all</option>
-                <option value="accepted">accepted</option>
-                <option value="rejected">rejected</option>
+                <option value="all">{t("synthetic.filterAll")}</option>
+                <option value="accepted">{t("synthetic.filterAccepted")}</option>
+                <option value="rejected">{t("synthetic.filterRejected")}</option>
               </select>
             </div>
             <div className="text-sm text-muted-foreground">
-              Accepted page: <strong>{acceptedCountCurrentPage}</strong> / {rows.length}
+              {t("synthetic.acceptedPage", { count: acceptedCountCurrentPage, total: rows.length })}
             </div>
           </div>
         </Card>
 
         <Card className="bg-card p-6 shadow-lg">
           <div className="grid grid-cols-1 md:grid-cols-4 gap-3 mb-4 text-sm">
-            <div className="border rounded-lg p-3">Total generated: <strong>{stats?.total_generated ?? 0}</strong></div>
-            <div className="border rounded-lg p-3">Accepted: <strong>{stats?.accepted ?? 0}</strong></div>
-            <div className="border rounded-lg p-3">Rejected: <strong>{stats?.rejected ?? 0}</strong></div>
-            <div className="border rounded-lg p-3">Acceptance rate: <strong>{((stats?.acceptance_rate ?? 0) * 100).toFixed(1)}%</strong></div>
+            <div className="border rounded-lg p-3">{t("synthetic.totalGenerated")}: <strong>{stats?.total_generated ?? 0}</strong></div>
+            <div className="border rounded-lg p-3">{t("synthetic.accepted")}: <strong>{stats?.accepted ?? 0}</strong></div>
+            <div className="border rounded-lg p-3">{t("synthetic.rejected")}: <strong>{stats?.rejected ?? 0}</strong></div>
+            <div className="border rounded-lg p-3">{t("synthetic.acceptanceRate")}: <strong>{((stats?.acceptance_rate ?? 0) * 100).toFixed(1)}%</strong></div>
           </div>
 
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>Accept</TableHead>
-                <TableHead>Text (editable)</TableHead>
-                <TableHead>Actions</TableHead>
-                <TableHead>Label</TableHead>
-                <TableHead>Domain</TableHead>
-                <TableHead>Style</TableHead>
-                <TableHead>Batch</TableHead>
+                <TableHead>{t("synthetic.tableAccept")}</TableHead>
+                <TableHead>{t("synthetic.tableTextEditable")}</TableHead>
+                <TableHead>{t("synthetic.tableActions")}</TableHead>
+                <TableHead>{t("synthetic.tableLabel")}</TableHead>
+                <TableHead>{t("synthetic.tableDomain")}</TableHead>
+                <TableHead>{t("synthetic.tableStyle")}</TableHead>
+                <TableHead>{t("synthetic.tableBatch")}</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -550,7 +550,7 @@ export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps
                 return (
                   <TableRow
                     key={row.id}
-                    onClick={(event) => handleRowToggle(event, row.id)}
+                    onClick={(event: MouseEvent<HTMLTableRowElement>) => handleRowToggle(event, row.id)}
                     className="cursor-pointer hover:bg-background-secondary"
                   >
                     <TableCell>
@@ -575,10 +575,10 @@ export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps
                     <TableCell>
                       <div className="flex flex-col gap-2">
                         <Button variant="outline" size="sm" onClick={() => void handleCopyRowText(row.id)}>
-                          Copy
+                          {t("synthetic.copy")}
                         </Button>
                         <Button variant="outline" size="sm" onClick={() => void handlePasteRowText(row.id)}>
-                          Paste
+                          {t("synthetic.paste")}
                         </Button>
                       </div>
                     </TableCell>
@@ -593,8 +593,8 @@ export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps
                           }))
                         }
                       >
-                        <option value={1}>toxic</option>
-                        <option value={0}>clean</option>
+                        <option value={1}>{t("synthetic.toxic")}</option>
+                        <option value={0}>{t("synthetic.clean")}</option>
                       </select>
                     </TableCell>
                     <TableCell>{row.domain}</TableCell>
@@ -608,7 +608,7 @@ export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps
               {!rows.length && !loading && (
                 <TableRow>
                   <TableCell colSpan={7} className="text-center text-sm text-muted-foreground">
-                    Không có dữ liệu
+                    {t("synthetic.noData")}
                   </TableCell>
                 </TableRow>
               )}
@@ -617,17 +617,17 @@ export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps
 
           <div className="mt-4 flex items-center justify-between text-sm">
             <Button variant="outline" onClick={() => setPage((prev) => Math.max(1, prev - 1))} disabled={page <= 1}>
-              Previous
+              {t("synthetic.previous")}
             </Button>
             <span>
-              Page {page} / {totalPages}
+              {t("synthetic.pageOf", { page, total: totalPages })}
             </span>
             <Button
               variant="outline"
               onClick={() => setPage((prev) => Math.min(totalPages, prev + 1))}
               disabled={page >= totalPages}
             >
-              Next
+              {t("synthetic.next")}
             </Button>
           </div>
         </Card>

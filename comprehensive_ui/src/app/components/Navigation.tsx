@@ -1,20 +1,25 @@
 import { Moon, Shield, Sun } from "lucide-react";
+import type { Language } from "@/app/i18n/messages";
+import { useI18n } from "@/app/i18n/context";
 
 interface NavigationProps {
   currentPage: string;
   onNavigate: (page: string) => void;
   theme: "light" | "dark";
   onToggleTheme: () => void;
+  language: Language;
+  onSetLanguage: (language: Language) => void;
 }
 
-export function Navigation({ currentPage, onNavigate, theme, onToggleTheme }: NavigationProps) {
+export function Navigation({ currentPage, onNavigate, theme, onToggleTheme, language, onSetLanguage }: NavigationProps) {
+  const { t } = useI18n();
   const navItems = [
-    { name: "Home", id: "home" },
-    { name: "Results", id: "results" },
-    { name: "Dataset", id: "dataset" },
-    { name: "Protocol", id: "protocol" },
-    { name: "Model & Performance", id: "model" },
-    { name: "Contact", id: "contact" },
+    { name: t("nav.home"), id: "home" },
+    { name: t("nav.results"), id: "results" },
+    { name: t("nav.dataset"), id: "dataset" },
+    { name: t("nav.protocol"), id: "protocol" },
+    { name: t("nav.model"), id: "model" },
+    { name: t("nav.contact"), id: "contact" },
   ];
 
   return (
@@ -30,7 +35,6 @@ export function Navigation({ currentPage, onNavigate, theme, onToggleTheme }: Na
           </div>
 
           <div className="flex items-center gap-3">
-            {/* Navigation Items */}
             <div className="hidden md:flex items-center gap-8">
               {navItems.map((item) => (
                 <button
@@ -49,11 +53,32 @@ export function Navigation({ currentPage, onNavigate, theme, onToggleTheme }: Na
               ))}
             </div>
 
+            <div className="inline-flex items-center gap-1 rounded-full border border-border bg-muted/70 p-1" aria-label={t("nav.language")}>
+              <button
+                type="button"
+                onClick={() => onSetLanguage("vi")}
+                className={`rounded-full px-2 py-1 text-xs transition-colors ${
+                  language === "vi" ? "bg-primary text-primary-foreground" : "text-foreground/80 hover:bg-accent"
+                }`}
+              >
+                VN
+              </button>
+              <button
+                type="button"
+                onClick={() => onSetLanguage("en")}
+                className={`rounded-full px-2 py-1 text-xs transition-colors ${
+                  language === "en" ? "bg-primary text-primary-foreground" : "text-foreground/80 hover:bg-accent"
+                }`}
+              >
+                EN
+              </button>
+            </div>
+
             <button
               type="button"
               onClick={onToggleTheme}
-              aria-label={theme === "dark" ? "Chuyển sang giao diện sáng" : "Chuyển sang giao diện tối"}
-              title={theme === "dark" ? "Light mode" : "Dark mode"}
+              aria-label={theme === "dark" ? t("nav.themeToLight") : t("nav.themeToDark")}
+              title={theme === "dark" ? t("nav.lightMode") : t("nav.darkMode")}
               className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-border bg-muted/70 text-foreground/80 transition-colors hover:bg-accent"
             >
               {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
