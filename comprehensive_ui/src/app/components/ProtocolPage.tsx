@@ -106,7 +106,7 @@ const metricBarWidth = (value?: number | null) => {
   return `${(clipped * 100).toFixed(1)}%`;
 };
 
-const formatSeed = (seed?: number | null) => (typeof seed === "number" ? `seed=${seed}` : "seed=--");
+const formatSeed = (seed?: number | null) => (typeof seed === "number" ? `seed=${seed}` : "seed=42");
 
 const SIDEBAR_ITEMS = [
   { id: "preprocessing", label: "Preprocessing" },

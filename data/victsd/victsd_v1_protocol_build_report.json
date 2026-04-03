@@ -1,8 +1,8 @@
 {
   "config": {
-    "victsd_dir": "/Users/mac/git/Thesis/data/processed/victsd_v1",
-    "vihsd_dir": "/Users/mac/git/Thesis/data/raw/vihsd",
-    "output_root": "/Users/mac/git/Thesis/data/victsd",
+    "victsd_dir": "data/processed/victsd_v1",
+    "vihsd_dir": "data/raw/vihsd",
+    "output_root": "data/victsd",
     "dataset_prefix": "victsd_v1",
     "seed": 42,
     "b_toxic_min": 0.3,
@@ -11,60 +11,18 @@
       "train": 0.7,
       "validation": 0.2,
       "test": 0.1
-    }
-  },
-  "warnings": [],
-  "protocols": {
-    "a": {
-      "files": {
-        "train": "/Users/mac/git/Thesis/data/victsd/protocol_a/victsd_v1_protocol_a_train_augmented.jsonl",
-        "validation": "/Users/mac/git/Thesis/data/victsd/protocol_a/victsd_v1_protocol_a_validation_augmented.jsonl",
-        "test": "/Users/mac/git/Thesis/data/victsd/protocol_a/victsd_v1_protocol_a_test_augmented.jsonl"
-      },
-      "stats": {
-        "train": {
-          "total": 7000,
-          "toxic": 759,
-          "clean": 6241,
-          "toxic_ratio": 0.10842857142857143,
-          "sources": {
-            "ViCTSD": 7000
-          },
-          "source_splits": {
-            "ViCTSD:train": 7000
-          }
-        },
-        "validation": {
-          "total": 2000,
-          "toxic": 232,
-          "clean": 1768,
-          "toxic_ratio": 0.116,
-          "sources": {
-            "ViCTSD": 2000
-          },
-          "source_splits": {
-            "ViCTSD:validation": 2000
-          }
-        },
-        "test": {
-          "total": 1000,
-          "toxic": 110,
-          "clean": 890,
-          "toxic_ratio": 0.11,
-          "sources": {
-            "ViCTSD": 1000
-          },
-          "source_splits": {
-            "ViCTSD:test": 1000
-          }
-        }
-      },
-      "overlap_exact": {
-        "train_validation": 16,
-        "train_test": 8,
-        "validation_test": 4
-      }
     },
+    "protocols": [
+      "a"
+    ],
+    "protocol_a_mode": "leakage_safe"
+  },
+  "warnings": [
+    "Partial rebuild executed for protocols=['a']; untouched protocol report entries were preserved from existing report.",
+    "Partial rebuild executed for protocols=['a']; untouched protocol report entries were preserved from existing report.",
+    "Partial rebuild executed for protocols=['a']; untouched protocol report entries were preserved from existing report."
+  ],
+  "protocols": {
     "b": {
       "files": {
         "train": "/Users/mac/git/Thesis/data/victsd/protocol_b/victsd_v1_protocol_b_train_augmented.jsonl",
@@ -191,6 +149,63 @@
         }
       },
       "pool_size_after_global_dedup": 12097,
+      "overlap_exact": {
+        "train_validation": 0,
+        "train_test": 0,
+        "validation_test": 0
+      }
+    },
+    "a": {
+      "mode": "leakage_safe",
+      "leakage_filter": {
+        "removed_train_rows": 42,
+        "removed_train_unique_keys": 21,
+        "removed_validation_rows": 10,
+        "removed_validation_unique_keys": 4
+      },
+      "files": {
+        "train": "data/victsd/protocol_a/victsd_v1_protocol_a_train_augmented.jsonl",
+        "validation": "data/victsd/protocol_a/victsd_v1_protocol_a_validation_augmented.jsonl",
+        "test": "data/victsd/protocol_a/victsd_v1_protocol_a_test_augmented.jsonl"
+      },
+      "stats": {
+        "train": {
+          "total": 6958,
+          "toxic": 757,
+          "clean": 6201,
+          "toxic_ratio": 0.10879563092842771,
+          "sources": {
+            "ViCTSD": 6958
+          },
+          "source_splits": {
+            "ViCTSD:train": 6958
+          }
+        },
+        "validation": {
+          "total": 1990,
+          "toxic": 232,
+          "clean": 1758,
+          "toxic_ratio": 0.11658291457286432,
+          "sources": {
+            "ViCTSD": 1990
+          },
+          "source_splits": {
+            "ViCTSD:validation": 1990
+          }
+        },
+        "test": {
+          "total": 1000,
+          "toxic": 110,
+          "clean": 890,
+          "toxic_ratio": 0.11,
+          "sources": {
+            "ViCTSD": 1000
+          },
+          "source_splits": {
+            "ViCTSD:test": 1000
+          }
+        }
+      },
       "overlap_exact": {
         "train_validation": 0,
         "train_test": 0,

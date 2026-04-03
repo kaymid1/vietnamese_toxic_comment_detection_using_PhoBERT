@@ -21,6 +21,7 @@ import {
   TableRow,
 } from "@/app/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/app/components/ui/tabs";
+import { useI18n } from "@/app/i18n/context";
 
 interface DatasetRow {
   text: string;
@@ -64,15 +65,15 @@ const buildApiUrl = (path: string) => {
   return API_BASE ? `${API_BASE}${path}` : path;
 };
 
-const labelText = (label: number) => (label === 1 ? "toxic" : "clean");
+const labelText = (label: number, t: (key: string) => string) => (label === 1 ? t("dataset.filters.toxic") : t("dataset.filters.clean"));
 
-const sourceLabel = (source: string) => {
+const sourceLabel = (source: string, t: (key: string) => string) => {
   const normalized = source.trim().toLowerCase();
   const map: Record<string, string> = {
-    all: "Tất cả nguồn",
+    all: t("dataset.filters.allSources"),
     victsd_augmented: "ViCTSD",
     "uit-vihsd_augmented": "UIT-ViHSD",
-    unknown: "Không xác định",
+    unknown: t("dataset.common.unknown"),
   };
   return map[normalized] || source.replaceAll("_", " ");
 };
@@ -109,6 +110,7 @@ const formatPercent = (value: number, total: number) => {
 };
 
 export function DatasetPage() {
+  const { t } = useI18n();
   const [rows, setRows] = useState<DatasetRow[]>([]);
   const [stats, setStats] = useState<DatasetStats | null>(null);
   const [page, setPage] = useState(1);
@@ -209,7 +211,7 @@ export function DatasetPage() {
       setTotalRows(data.total || 0);
       setSelectedFeedback([]);
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Không thể tải dataset";
+      const message = err instanceof Error ? err.message : t("dataset.status.cannotLoadDataset");
       setError(message);
     } finally {
       setLoading(false);
@@ -242,9 +244,9 @@ export function DatasetPage() {
       if (!response.ok) {
         throw new Error(JSON.stringify(data));
       }
-      setExportStatus(`Đã xuất ${data.count} dòng vào ${data.path}`);
+      setExportStatus(t("dataset.status.exportedRowsToPath", { count: data.count, path: data.path }));
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Xuất dữ liệu thất bại";
+      const message = err instanceof Error ? err.message : t("dataset.status.exportFailed");
       setExportStatus(message);
     }
   };
@@ -257,7 +259,7 @@ export function DatasetPage() {
 
   const handleDeleteFeedback = async () => {
     if (!selectedFeedback.length) return;
-    const confirmed = window.confirm(`Xoá ${selectedFeedback.length} feedback đã chọn?`);
+    const confirmed = window.confirm(t("dataset.status.confirmDeleteFeedback", { count: selectedFeedback.length }));
     if (!confirmed) return;
     setDeleteLoading(true);
     setDeleteStatus(null);
@@ -271,11 +273,11 @@ export function DatasetPage() {
       if (!response.ok) {
         throw new Error(JSON.stringify(data));
       }
-      setDeleteStatus(`Đã xoá ${data.deleted} feedback.`);
+      setDeleteStatus(t("dataset.status.deletedFeedbackCount", { count: data.deleted }));
       setSelectedFeedback([]);
       await fetchPreview(page, pageSize);
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Xoá feedback thất bại";
+      const message = err instanceof Error ? err.message : t("dataset.status.deleteFeedbackFailed");
       setDeleteStatus(message);
     } finally {
       setDeleteLoading(false);
@@ -334,10 +336,10 @@ export function DatasetPage() {
       <div className="max-w-6xl mx-auto">
         <div className="mb-10 text-center">
           <h1 className="text-4xl mb-3 text-primary">
-            Dataset Preview
+            {t("dataset.hero.title")}
           </h1>
           <p className="text-lg text-muted-foreground">
-            Preview dữ liệu huấn luyện (augmented + non-augmented) và feedback mới thu thập.
+            {t("dataset.hero.subtitle")}
           </p>
         </div>
 
@@ -345,61 +347,61 @@ export function DatasetPage() {
           <div className="flex flex-wrap items-start justify-between gap-4 mb-6">
             <div>
               <h2 className="text-2xl text-primary">
-                Dataset analysis (defense)
+                {t("dataset.analysis.title")}
               </h2>
-              <p className="text-sm text-muted-foreground">Tổng hợp nhanh để bảo vệ: overview, so sánh, annotation và limitations.</p>
+              <p className="text-sm text-muted-foreground">{t("dataset.analysis.subtitle")}</p>
             </div>
           </div>
           <Tabs defaultValue="overview" className="mt-2">
             <TabsList className="w-full flex flex-wrap justify-start gap-2">
-              <TabsTrigger value="overview">Tổng quan dataset</TabsTrigger>
-              <TabsTrigger value="compare">So sánh chi tiết</TabsTrigger>
-              <TabsTrigger value="annotation">Annotation &amp; merge</TabsTrigger>
-              <TabsTrigger value="limitation">Limitations</TabsTrigger>
-              <TabsTrigger value="definition">Toxicity definition</TabsTrigger>
+              <TabsTrigger value="overview">{t("dataset.tabs.overview")}</TabsTrigger>
+              <TabsTrigger value="compare">{t("dataset.tabs.compare")}</TabsTrigger>
+              <TabsTrigger value="annotation">{t("dataset.tabs.annotation")}</TabsTrigger>
+              <TabsTrigger value="limitation">{t("dataset.tabs.limitation")}</TabsTrigger>
+              <TabsTrigger value="definition">{t("dataset.tabs.definition")}</TabsTrigger>
             </TabsList>
 
             <TabsContent value="overview" className="mt-4 space-y-6">
               <div>
-                <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">Phân phối sau khi merge</p>
+                <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">{t("dataset.overview.distributionAfterMerge")}</p>
                 <div className="mt-3 grid grid-cols-1 md:grid-cols-4 gap-3">
                   <div className="rounded-lg border bg-muted/30 p-4">
-                    <p className="text-xs text-muted-foreground">Tổng samples</p>
+                    <p className="text-xs text-muted-foreground">{t("dataset.overview.totalSamples")}</p>
                     <p className="text-2xl font-semibold">{aggregatedStats.total.toLocaleString()}</p>
-                    <p className="text-xs text-muted-foreground">ViCTSD + UIT-ViHSD</p>
+                    <p className="text-xs text-muted-foreground">{t("dataset.overview.sourcesSummary")}</p>
                   </div>
                   <div className="rounded-lg border bg-muted/30 p-4">
-                    <p className="text-xs text-muted-foreground">Clean (non-toxic)</p>
+                    <p className="text-xs text-muted-foreground">{t("dataset.overview.cleanNonToxic")}</p>
                     <p className="text-2xl font-semibold text-text-info">{aggregatedStats.clean.toLocaleString()}</p>
-                    <p className="text-xs text-muted-foreground">{formatPercent(aggregatedStats.clean, aggregatedStats.total)} tổng dataset</p>
+                    <p className="text-xs text-muted-foreground">{t("dataset.overview.percentOfDataset", { percent: formatPercent(aggregatedStats.clean, aggregatedStats.total) })}</p>
                   </div>
                   <div className="rounded-lg border bg-muted/30 p-4">
-                    <p className="text-xs text-muted-foreground">Toxic</p>
+                    <p className="text-xs text-muted-foreground">{t("dataset.filters.toxic")}</p>
                     <p className="text-2xl font-semibold text-text-warning">{aggregatedStats.toxic.toLocaleString()}</p>
-                    <p className="text-xs text-muted-foreground">{formatPercent(aggregatedStats.toxic, aggregatedStats.total)} tổng dataset</p>
+                    <p className="text-xs text-muted-foreground">{t("dataset.overview.percentOfDataset", { percent: formatPercent(aggregatedStats.toxic, aggregatedStats.total) })}</p>
                   </div>
                   <div className="rounded-lg border bg-muted/30 p-4">
-                    <p className="text-xs text-muted-foreground">Imbalance ratio</p>
+                    <p className="text-xs text-muted-foreground">{t("dataset.overview.imbalanceRatio")}</p>
                     <p className="text-2xl font-semibold">{imbalanceRatioText}</p>
-                    <p className="text-xs text-muted-foreground">Clean:Toxic theo dữ liệu hiện tại</p>
+                    <p className="text-xs text-muted-foreground">{t("dataset.overview.cleanToxicCurrent")}</p>
                   </div>
                 </div>
               </div>
 
               <div>
-                <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">Đóng góp theo nguồn</p>
+                <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">{t("dataset.overview.contributionBySource")}</p>
                 <div className="mt-3 flex flex-wrap gap-4 text-xs text-muted-foreground">
                   <span className="inline-flex items-center gap-2">
-                    <span className="h-3 w-3 rounded-sm bg-text-info" />ViCTSD
+                    <span className="h-3 w-3 rounded-sm bg-text-info" />{t("dataset.compare.victsdBadge")}
                   </span>
                   <span className="inline-flex items-center gap-2">
-                    <span className="h-3 w-3 rounded-sm bg-text-warning" />UIT-ViHSD
+                    <span className="h-3 w-3 rounded-sm bg-text-warning" />{t("dataset.compare.vihsdBadge")}
                   </span>
                 </div>
 
                 <div className="mt-4 space-y-3 text-sm">
                   <div className="flex items-center gap-3">
-                    <div className="w-44 text-muted-foreground">ViCTSD</div>
+                    <div className="w-44 text-muted-foreground">{t("dataset.compare.victsdBadge")}</div>
                     <div className="flex-1 h-3 rounded bg-muted overflow-hidden">
                       <div className="flex h-full">
                         <div className="bg-text-info" style={{ width: formatPercent(sourceSummary.victsd.clean, sourceSummary.victsd.total) }} />
@@ -409,7 +411,7 @@ export function DatasetPage() {
                     <div className="w-20 text-right text-xs text-muted-foreground">{sourceSummary.victsd.total.toLocaleString()}</div>
                   </div>
                   <div className="flex items-center gap-3">
-                    <div className="w-44 text-muted-foreground">UIT-ViHSD</div>
+                    <div className="w-44 text-muted-foreground">{t("dataset.compare.vihsdBadge")}</div>
                     <div className="flex-1 h-3 rounded bg-muted overflow-hidden">
                       <div className="flex h-full">
                         <div className="bg-text-warning" style={{ width: formatPercent(sourceSummary.vihsd.toxic, sourceSummary.vihsd.total) }} />
@@ -420,171 +422,171 @@ export function DatasetPage() {
                 </div>
 
                 <div className="mt-4 rounded-lg border-l-4 border-l-border-success bg-background-success p-4 text-sm text-text-success">
-                  <strong>Kết quả:</strong> Dữ liệu được render động từ API dataset preview theo bộ lọc hiện tại, không còn hardcode số lượng.
+                  <strong>{t("dataset.overview.resultLabel")}</strong> {t("dataset.overview.dynamicRenderNote")}
                 </div>
               </div>
             </TabsContent>
 
             <TabsContent value="compare" className="mt-4 space-y-6">
               <div>
-                <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">Đặc điểm từng dataset</p>
+                <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">{t("dataset.compare.datasetCharacteristics")}</p>
                 <div className="mt-3 grid grid-cols-1 lg:grid-cols-2 gap-4">
                   <Card className="border p-4 shadow-none">
-                    <span className="inline-flex rounded-md bg-background-info px-2 py-1 text-xs font-medium text-text-info">ViCTSD</span>
-                    <h3 className="mt-3 text-sm font-semibold">UIT-ViCTSD (2021)</h3>
+                    <span className="inline-flex rounded-md bg-background-info px-2 py-1 text-xs font-medium text-text-info">{t("dataset.compare.victsdBadge")}</span>
+                    <h3 className="mt-3 text-sm font-semibold">{t("dataset.compare.victsdTitle")}</h3>
                     <div className="mt-3 space-y-2 text-sm">
-                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">Nguồn</span><span className="text-right">YouTube comments trên video tin tức VN</span></div>
-                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">Kích thước gốc</span><span className="text-right">10,000 comments</span></div>
-                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">Label schema</span><span className="text-right">Toxic / Constructive / Neutral</span></div>
-                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">Binarize thành</span><span className="text-right">Toxic vs Non-toxic</span></div>
-                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">Toxic gốc</span><span className="text-right">~10.8% (heavily imbalanced)</span></div>
-                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">Độ dài text</span><span className="text-right">Dài hơn, có ngữ cảnh tranh luận</span></div>
-                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">Style</span><span className="text-right">Informal, comment phản hồi video</span></div>
-                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">Paper</span><a className="text-text-info hover:underline" href="https://arxiv.org/abs/2103.10069" target="_blank" rel="noreferrer">arXiv 2103.10069</a></div>
+                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.compare.fields.source")}</span><span className="text-right">{t("dataset.compare.victsd.source")}</span></div>
+                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.compare.fields.originalSize")}</span><span className="text-right">{t("dataset.compare.victsd.originalSize")}</span></div>
+                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.compare.fields.labelSchema")}</span><span className="text-right">{t("dataset.compare.victsd.labelSchema")}</span></div>
+                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.compare.fields.binarizedTo")}</span><span className="text-right">{t("dataset.compare.victsd.binarizedTo")}</span></div>
+                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.compare.fields.originalToxic")}</span><span className="text-right">{t("dataset.compare.victsd.originalToxic")}</span></div>
+                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.compare.fields.textLength")}</span><span className="text-right">{t("dataset.compare.victsd.textLength")}</span></div>
+                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.compare.fields.style")}</span><span className="text-right">{t("dataset.compare.victsd.style")}</span></div>
+                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.compare.fields.paper")}</span><a className="text-text-info hover:underline" href="https://arxiv.org/abs/2103.10069" target="_blank" rel="noreferrer">arXiv 2103.10069</a></div>
                     </div>
                     <div className="mt-4 rounded-lg border-l-4 border-l-border-info bg-background-info p-3 text-sm text-text-info">
-                      10 domains: chính trị, thể thao, giải trí, kinh tế, sức khỏe... — đa dạng chủ đề.
+                      {t("dataset.compare.victsd.note")}
                     </div>
                   </Card>
 
                   <Card className="border p-4 shadow-none">
-                    <span className="inline-flex rounded-md bg-background-success px-2 py-1 text-xs font-medium text-text-success">ViHSD</span>
-                    <h3 className="mt-3 text-sm font-semibold">UIT-ViHSD (2021)</h3>
+                    <span className="inline-flex rounded-md bg-background-success px-2 py-1 text-xs font-medium text-text-success">{t("dataset.compare.vihsdBadge")}</span>
+                    <h3 className="mt-3 text-sm font-semibold">{t("dataset.compare.vihsdTitle")}</h3>
                     <div className="mt-3 space-y-2 text-sm">
-                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">Nguồn</span><span className="text-right">Facebook posts + comments</span></div>
-                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">Kích thước gốc</span><span className="text-right">33,400 comments</span></div>
-                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">Label schema</span><span className="text-right">CLEAN / OFFENSIVE / HATE</span></div>
-                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">Bạn lấy</span><span className="text-right">Chỉ OFFENSIVE → map sang Toxic</span></div>
-                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">Samples dùng</span><span className="text-right">2,260 OFFENSIVE samples</span></div>
-                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">Độ dài text</span><span className="text-right">Ngắn hơn, nhiều viết tắt, emoji</span></div>
-                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">Style</span><span className="text-right">Informal, status/comment Facebook</span></div>
-                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">Paper</span><a className="text-text-success hover:underline" href="https://arxiv.org/abs/2103.11528" target="_blank" rel="noreferrer">arXiv 2103.11528</a></div>
+                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.compare.fields.source")}</span><span className="text-right">{t("dataset.compare.vihsd.source")}</span></div>
+                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.compare.fields.originalSize")}</span><span className="text-right">{t("dataset.compare.vihsd.originalSize")}</span></div>
+                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.compare.fields.labelSchema")}</span><span className="text-right">{t("dataset.compare.vihsd.labelSchema")}</span></div>
+                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.compare.fields.take")}</span><span className="text-right">{t("dataset.compare.vihsd.take")}</span></div>
+                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.compare.fields.samplesUsed")}</span><span className="text-right">{t("dataset.compare.vihsd.samplesUsed")}</span></div>
+                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.compare.fields.textLength")}</span><span className="text-right">{t("dataset.compare.vihsd.textLength")}</span></div>
+                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.compare.fields.style")}</span><span className="text-right">{t("dataset.compare.vihsd.style")}</span></div>
+                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.compare.fields.paper")}</span><a className="text-text-success hover:underline" href="https://arxiv.org/abs/2103.11528" target="_blank" rel="noreferrer">arXiv 2103.11528</a></div>
                     </div>
                     <div className="mt-4 rounded-lg border-l-4 border-l-border-info bg-background-info p-3 text-sm text-text-info">
-                      Comments chứa nhiều teencode, viết tắt (M.n, mik, Dm), slang — cần xử lý tiền xử lý riêng.
+                      {t("dataset.compare.vihsd.note")}
                     </div>
                   </Card>
                 </div>
               </div>
 
               <div>
-                <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">Điểm tương đồng — lý do merge được</p>
+                <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">{t("dataset.compare.similaritiesReason")}</p>
                 <div className="mt-3 grid grid-cols-1 md:grid-cols-3 gap-3">
                   <div className="rounded-lg border-l-4 border-l-border-success bg-background-success p-4 text-sm text-text-success">
-                    <strong>Cùng domain</strong><br />Cả hai đều là social media informal Vietnamese text — domain shift nhỏ.
+                    <strong>{t("dataset.compare.similarity1Title")}</strong><br />{t("dataset.compare.similarity1Desc")}
                   </div>
                   <div className="rounded-lg border-l-4 border-l-border-success bg-background-success p-4 text-sm text-text-success">
-                    <strong>Cùng nguồn gốc</strong><br />Cả hai do UIT NLP Group xây dựng với quy trình annotation chuẩn.
+                    <strong>{t("dataset.compare.similarity2Title")}</strong><br />{t("dataset.compare.similarity2Desc")}
                   </div>
                   <div className="rounded-lg border-l-4 border-l-border-success bg-background-success p-4 text-sm text-text-success">
-                    <strong>Ngữ nghĩa gần nhau</strong><br />OFFENSIVE ≈ Toxic về mức độ xúc phạm, phù hợp mapping 1-1.
+                    <strong>{t("dataset.compare.similarity3Title")}</strong><br />{t("dataset.compare.similarity3Desc")}
                   </div>
                 </div>
               </div>
 
               <div>
-                <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">Empirical evidence từ inter-dataset scoring</p>
+                <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">{t("dataset.compare.empiricalEvidence")}</p>
                 <div className="mt-3 grid grid-cols-1 lg:grid-cols-2 gap-4">
                   <Card className="border p-4 shadow-none">
-                    <p className="text-sm font-semibold">Mean toxic_score (ViCTSD-trained model)</p>
+                    <p className="text-sm font-semibold">{t("dataset.compare.evidenceScoreTitle")}</p>
                     <div className="mt-3 space-y-2 text-sm">
-                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">Offensive (label=1)</span><span className="font-medium">0.8726</span></div>
-                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">Hate (label=2)</span><span className="font-medium">N/A (không có trong merged binary set)</span></div>
-                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">Clean (label=0)</span><span className="font-medium">0.1285</span></div>
+                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.compare.evidenceOffensive")}</span><span className="font-medium">0.8726</span></div>
+                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.compare.evidenceHate")}</span><span className="font-medium">{t("dataset.compare.evidenceHateValue")}</span></div>
+                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.compare.evidenceClean")}</span><span className="font-medium">0.1285</span></div>
                     </div>
                     <div className="mt-4 rounded-lg border-l-4 border-l-border-success bg-background-success p-3 text-sm text-text-success">
-                      Khoảng cách điểm rất rõ giữa Offensive và Clean (0.8726 vs 0.1285), cho thấy mapping OFFENSIVE → Toxic có tính nhất quán thực nghiệm. Theo rule mean &gt; 0.6, quyết định merge là hợp lý.
+                      {t("dataset.compare.evidenceConclusion")}
                     </div>
                   </Card>
 
                   <Card className="border p-4 shadow-none">
-                    <p className="text-sm font-semibold">Distribution toxic_score</p>
+                    <p className="text-sm font-semibold">{t("dataset.compare.distributionTitle")}</p>
                     <img
                       src="/src/assets/images/distribution_vihsd_toxic.png"
-                      alt="Distribution of toxic scores for clean, offensive, and hate groups"
+                      alt={t("dataset.compare.distributionAlt")}
                       className="mt-3 w-full rounded-lg border"
                     />
                     <p className="mt-3 text-sm text-muted-foreground">
-                      Phân phối cho thấy cụm Offensive tập trung ở vùng điểm cao, còn Clean tập trung ở vùng thấp. Điều này củng cố thêm cơ sở empirical để merge ViHSD Offensive vào lớp Toxic.
+                      {t("dataset.compare.distributionDesc")}
                     </p>
                   </Card>
                 </div>
               </div>
 
               <div>
-                <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">Điểm khác biệt — thừa nhận</p>
+                <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">{t("dataset.compare.differencesAcknowledged")}</p>
                 <div className="mt-3 rounded-lg border-l-4 border-l-border-warning bg-background-warning p-4 text-sm text-text-warning">
-                  <strong>74.9% toxic samples đến từ ViHSD OFFENSIVE</strong> (2,260/3,019). Model đang học toxic từ nguồn nào nhiều hơn? → ViCTSD cung cấp label schema và negative examples; ViHSD cung cấp positive examples để cân bằng class — cả hai cùng định hình decision boundary.
+                  <strong>{t("dataset.compare.toxicShareTitle")}</strong> {t("dataset.compare.toxicShareDesc")}
                 </div>
               </div>
             </TabsContent>
 
             <TabsContent value="annotation" className="mt-4 space-y-6">
               <div>
-                <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">Annotation consistency là gì? (mock)</p>
+                <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">{t("dataset.annotation.consistencyMock")}</p>
                 <div className="mt-3 rounded-lg border bg-muted/30 p-4 text-sm">
                   <p className="leading-7">
-                    <strong>Annotation consistency</strong> = mức độ đồng thuận giữa các annotator khi label cùng một câu text. Đo bằng <strong>Cohen&apos;s Kappa (κ)</strong> hoặc <strong>Fleiss&apos; Kappa</strong>.
+                    <strong>{t("dataset.annotation.consistencyTitle")}</strong> {t("dataset.annotation.consistencyDesc")}
                   </p>
                   <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-2 text-sm text-muted-foreground">
-                    <div>κ = 0.0–0.2 → Gần như ngẫu nhiên</div>
-                    <div>κ = 0.2–0.4 → Yếu</div>
-                    <div>κ = 0.4–0.6 → Trung bình (acceptable)</div>
-                    <div>κ = 0.6–0.8 → Tốt</div>
+                    <div>{t("dataset.annotation.kappa1")}</div>
+                    <div>{t("dataset.annotation.kappa2")}</div>
+                    <div>{t("dataset.annotation.kappa3")}</div>
+                    <div>{t("dataset.annotation.kappa4")}</div>
                   </div>
                 </div>
               </div>
 
               <div>
-                <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">Tại sao OFFENSIVE → Toxic (không dùng HATE)?</p>
+                <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">{t("dataset.annotation.whyOffensiveToToxic")}</p>
                 <div className="mt-3 grid grid-cols-1 lg:grid-cols-2 gap-4">
                   <Card className="border p-4 shadow-none">
-                    <span className="inline-flex rounded-md bg-background-success px-2 py-1 text-xs font-medium text-text-success">OFFENSIVE → Toxic ✓</span>
+                    <span className="inline-flex rounded-md bg-background-success px-2 py-1 text-xs font-medium text-text-success">{t("dataset.annotation.offensiveBadge")}</span>
                     <div className="mt-3 space-y-2 text-sm">
-                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">Định nghĩa</span><span className="text-right">Ngôn ngữ xúc phạm cá nhân, thô tục</span></div>
-                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">Overlap</span><span className="text-right">Cao với Toxic trong ViCTSD</span></div>
-                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">Annotation boundary</span><span className="text-right">Tương đối rõ ràng, consistent</span></div>
-                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">Label noise khi merge</span><span className="text-right">Thấp</span></div>
+                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.annotation.fields.definition")}</span><span className="text-right">{t("dataset.annotation.offensive.definition")}</span></div>
+                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.annotation.fields.overlap")}</span><span className="text-right">{t("dataset.annotation.offensive.overlap")}</span></div>
+                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.annotation.fields.annotationBoundary")}</span><span className="text-right">{t("dataset.annotation.offensive.annotationBoundary")}</span></div>
+                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.annotation.fields.labelNoise")}</span><span className="text-right">{t("dataset.annotation.offensive.labelNoise")}</span></div>
                     </div>
                     <div className="mt-4 rounded-lg border-l-4 border-l-border-success bg-background-success p-3 text-sm text-text-success">
-                      Phù hợp để bổ sung positive examples cho bài toán toxic detection.
+                      {t("dataset.annotation.offensive.note")}
                     </div>
                   </Card>
 
                   <Card className="border p-4 shadow-none">
-                    <span className="inline-flex rounded-md bg-background-danger px-2 py-1 text-xs font-medium text-text-danger">HATE → Loại ✗</span>
+                    <span className="inline-flex rounded-md bg-background-danger px-2 py-1 text-xs font-medium text-text-danger">{t("dataset.annotation.hateBadge")}</span>
                     <div className="mt-3 space-y-2 text-sm">
-                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">Định nghĩa</span><span className="text-right">Kích động thù địch nhắm nhóm người</span></div>
-                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">Đặc điểm</span><span className="text-right">Nhắm ethnicity, religion, gender...</span></div>
-                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">Annotation boundary</span><span className="text-right">Khác guideline so với ViCTSD</span></div>
-                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">Label noise khi merge</span><span className="text-right">Cao — concept khác nhau</span></div>
+                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.annotation.fields.definition")}</span><span className="text-right">{t("dataset.annotation.hate.definition")}</span></div>
+                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.annotation.fields.characteristics")}</span><span className="text-right">{t("dataset.annotation.hate.characteristics")}</span></div>
+                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.annotation.fields.annotationBoundary")}</span><span className="text-right">{t("dataset.annotation.hate.annotationBoundary")}</span></div>
+                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.annotation.fields.labelNoise")}</span><span className="text-right">{t("dataset.annotation.hate.labelNoise")}</span></div>
                     </div>
                     <div className="mt-4 rounded-lg border-l-4 border-l-border-danger bg-background-danger p-3 text-sm text-text-danger">
-                      Thêm HATE gây label noise: annotator ViCTSD không train theo tiêu chí này.
+                      {t("dataset.annotation.hate.note")}
                     </div>
                   </Card>
                 </div>
               </div>
 
               <div>
-                <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">Câu hỏi thường gặp</p>
+                <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">{t("dataset.annotation.faq")}</p>
                 <div className="mt-3 space-y-4 text-sm">
                   <div>
                     <div className="flex items-start gap-2 font-medium">
                       <span className="inline-flex h-5 w-5 items-center justify-center rounded-md bg-background-info text-xs text-text-info">Q</span>
-                      Annotation boundary giữa OFFENSIVE và Toxic có consistent không?
+                      {t("dataset.annotation.q1")}
                     </div>
                     <p className="mt-2 pl-7 text-muted-foreground">
-                      Không hoàn toàn identical — đây là limitation được thừa nhận. Tuy nhiên cả hai đều do UIT NLP Group xây dựng, cùng hướng đến toxic/offensive content trên social media VN. Semantic overlap đủ cao để merge có ý nghĩa. Rủi ro label noise nhỏ được chấp nhận đổi lại việc cải thiện class balance đáng kể từ 8.2:1 xuống 2.1:1.
+                      {t("dataset.annotation.a1")}
                     </p>
                   </div>
                   <div>
                     <div className="flex items-start gap-2 font-medium">
                       <span className="inline-flex h-5 w-5 items-center justify-center rounded-md bg-background-info text-xs text-text-info">Q</span>
-                      Vì sao không merge CLEAN của ViHSD vào Non-toxic?
+                      {t("dataset.annotation.q2")}
                     </div>
                     <p className="mt-2 pl-7 text-muted-foreground">
-                      ViCTSD đã có đủ non-toxic samples (6,241 samples — 89.2%). Thêm CLEAN từ ViHSD sẽ khiến imbalance tệ hơn theo hướng ngược lại. Mục tiêu là cân bằng class, không phải tối đa hóa data.
+                      {t("dataset.annotation.a2")}
                     </p>
                   </div>
                 </div>
@@ -593,61 +595,60 @@ export function DatasetPage() {
 
             <TabsContent value="limitation" className="mt-4 space-y-6">
               <div>
-                <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">Limitations của dataset — chủ động nêu trước hội đồng</p>
+                <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">{t("dataset.limitation.title")}</p>
                 <div className="mt-3 space-y-4 text-sm">
                   <div className="flex gap-3 border-b pb-4">
                     <div className="h-8 w-8 rounded-full bg-background-warning text-text-warning flex items-center justify-center text-xs font-semibold">L1</div>
                     <div>
-                      <p className="font-medium">Annotation guideline không hoàn toàn identical</p>
-                      <p className="text-muted-foreground">ViCTSD và ViHSD được xây dựng bởi hai nhóm khác nhau với guideline riêng. OFFENSIVE trong ViHSD và Toxic trong ViCTSD overlap về ngữ nghĩa nhưng ranh giới không được định nghĩa thống nhất. Dẫn đến một lượng nhỏ label noise trong merged dataset.</p>
+                      <p className="font-medium">{t("dataset.limitation.l1Title")}</p>
+                      <p className="text-muted-foreground">{t("dataset.limitation.l1Desc")}</p>
                     </div>
                   </div>
                   <div className="flex gap-3 border-b pb-4">
                     <div className="h-8 w-8 rounded-full bg-background-warning text-text-warning flex items-center justify-center text-xs font-semibold">L2</div>
                     <div>
-                      <p className="font-medium">74.9% toxic samples đến từ ViHSD</p>
-                      <p className="text-muted-foreground">Model học toxic chủ yếu từ Facebook data (ViHSD OFFENSIVE: 2,260/3,019 toxic samples). Điều này có thể khiến model nhạy hơn với style toxic của Facebook so với YouTube.</p>
+                      <p className="font-medium">{t("dataset.limitation.l2Title")}</p>
+                      <p className="text-muted-foreground">{t("dataset.limitation.l2Desc")}</p>
                     </div>
                   </div>
                   <div className="flex gap-3 border-b pb-4">
                     <div className="h-8 w-8 rounded-full bg-background-danger text-text-danger flex items-center justify-center text-xs font-semibold">L3</div>
                     <div>
-                      <p className="font-medium">Toàn bộ dataset là social media text — bias với formal domain</p>
-                      <p className="text-muted-foreground">Cả ViCTSD (YouTube) và ViHSD (Facebook) đều là informal text. Model không có negative examples từ formal domain (báo chí, văn bản hành chính) → false positive cao khi inference trên news website. Đây là vấn đề cốt lõi dẫn đến việc phải implement domain-aware thresholding.</p>
+                      <p className="font-medium">{t("dataset.limitation.l3Title")}</p>
+                      <p className="text-muted-foreground">{t("dataset.limitation.l3Desc")}</p>
                     </div>
                   </div>
                   <div className="flex gap-3 border-b pb-4">
                     <div className="h-8 w-8 rounded-full bg-background-danger text-text-danger flex items-center justify-center text-xs font-semibold">L4</div>
                     <div>
-                      <p className="font-medium">Imbalance vẫn còn (2.1:1)</p>
-                      <p className="text-muted-foreground">Sau khi merge, ratio Clean:Toxic là 2.1:1 — cải thiện đáng kể từ 8.2:1 nhưng vẫn chưa balanced hoàn toàn. Model vẫn có xu hướng predict Non-toxic nhiều hơn, đặc biệt với các trường hợp borderline.</p>
+                      <p className="font-medium">{t("dataset.limitation.l4Title")}</p>
+                      <p className="text-muted-foreground">{t("dataset.limitation.l4Desc")}</p>
                     </div>
                   </div>
                   <div className="flex gap-3">
                     <div className="h-8 w-8 rounded-full bg-background-info text-text-info flex items-center justify-center text-xs font-semibold">L5</div>
                     <div>
-                      <p className="font-medium">Temporal &amp; domain coverage hạn chế</p>
-                      <p className="text-muted-foreground">Cả hai dataset được thu thập trước 2021 — slang, cách viết tắt, và hình thức toxic mới (teencodes mới, emoji-based toxicity) có thể chưa được cover. New_collected (9 samples) quá nhỏ để bù đắp.</p>
+                      <p className="font-medium">{t("dataset.limitation.l5Title")}</p>
+                      <p className="text-muted-foreground">{t("dataset.limitation.l5Desc")}</p>
                     </div>
                   </div>
                 </div>
                 <div className="mt-4 rounded-lg border-l-4 border-l-border-info bg-background-info p-4 text-sm text-text-info">
-                  <strong>Mẹo bảo vệ:</strong> Chủ động nêu L3 và L4 trước — đây là những limitation bạn đã nhận ra và đã có giải pháp (domain-aware thresholding). Hội đồng sẽ đánh giá cao việc bạn không né tránh mà đối mặt trực tiếp với limitation của mình.
+                  <strong>{t("dataset.limitation.tipTitle")}</strong> {t("dataset.limitation.tipDesc")}
                 </div>
               </div>
             </TabsContent>
 
             <TabsContent value="definition" className="mt-4 space-y-6">
               <div>
-                <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">Cách định nghĩa nhãn toxic trong nghiên cứu</p>
+                <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">{t("dataset.definition.title")}</p>
                 <div className="mt-3 text-sm text-muted-foreground space-y-3">
                   <p>
-                    Trong nghiên cứu này, “toxic” được định nghĩa theo nhãn <strong>Toxicity</strong> gốc của ViCTSD. Label nhị phân được giữ nguyên:
-                    <strong> 0 = non-toxic/clean</strong>, <strong>1 = toxic</strong>.
+                    {t("dataset.definition.p1Prefix")}<strong>{t("dataset.definition.p1Label")}</strong>{t("dataset.definition.p1Mid")}
+                    <strong>{t("dataset.definition.p1Clean")}</strong>, <strong>{t("dataset.definition.p1Toxic")}</strong>.
                   </p>
                   <p>
-                    Không gộp thêm các mức độ khác hay tiêu chí <strong>Constructiveness</strong> để đảm bảo tính nhất quán với annotation guideline
-                    gốc của dataset và tránh thay đổi semantics nhãn trong quá trình tiền xử lý.
+                    {t("dataset.definition.p2Prefix")}<strong>{t("dataset.definition.p2Constructiveness")}</strong>{t("dataset.definition.p2Suffix")}
                   </p>
                 </div>
               </div>
@@ -658,7 +659,7 @@ export function DatasetPage() {
         <Card className="bg-card p-6 mb-8 shadow-lg">
           <div className="grid grid-cols-1 md:grid-cols-4 gap-4 items-end">
             <div>
-              <Label className="text-sm text-muted-foreground">Source</Label>
+              <Label className="text-sm text-muted-foreground">{t("dataset.filters.source")}</Label>
               <select
                 className="mt-2 w-full border rounded-lg px-3 py-2 text-sm"
                 value={sourceFilter}
@@ -666,39 +667,39 @@ export function DatasetPage() {
               >
                 {availableSources.map((source) => (
                   <option key={source} value={source}>
-                    {sourceLabel(source)}
+                    {sourceLabel(source, t)}
                   </option>
                 ))}
               </select>
             </div>
             <div>
-              <Label className="text-sm text-muted-foreground">Label</Label>
+              <Label className="text-sm text-muted-foreground">{t("dataset.filters.label")}</Label>
               <select
                 className="mt-2 w-full border rounded-lg px-3 py-2 text-sm"
                 value={labelFilter}
                 onChange={(event) => setLabelFilter(event.target.value)}
               >
-                <option value="all">all</option>
-                <option value="clean">clean</option>
-                <option value="toxic">toxic</option>
+                <option value="all">{t("dataset.filters.all")}</option>
+                <option value="clean">{t("dataset.filters.clean")}</option>
+                <option value="toxic">{t("dataset.filters.toxic")}</option>
               </select>
             </div>
             <div>
-              <Label className="text-sm text-muted-foreground">Split</Label>
+              <Label className="text-sm text-muted-foreground">{t("dataset.filters.split")}</Label>
               <select
                 className="mt-2 w-full border rounded-lg px-3 py-2 text-sm"
                 value={splitFilter}
                 onChange={(event) => setSplitFilter(event.target.value)}
               >
-                <option value="all">all</option>
-                <option value="train">train</option>
-                <option value="validation">validation</option>
-                <option value="test">test</option>
-                <option value="feedback">feedback</option>
+                <option value="all">{t("dataset.filters.all")}</option>
+                <option value="train">{t("dataset.filters.train")}</option>
+                <option value="validation">{t("dataset.filters.validation")}</option>
+                <option value="test">{t("dataset.filters.test")}</option>
+                <option value="feedback">{t("dataset.filters.feedback")}</option>
               </select>
             </div>
             <div>
-              <Label className="text-sm text-muted-foreground">Page size</Label>
+              <Label className="text-sm text-muted-foreground">{t("dataset.filters.pageSize")}</Label>
               <select
                 className="mt-2 w-full border rounded-lg px-3 py-2 text-sm"
                 value={pageSize}
@@ -715,17 +716,19 @@ export function DatasetPage() {
 
           <div className="mt-4 flex flex-wrap gap-3 items-center">
             <Button onClick={() => fetchPreview(1, pageSize)} disabled={loading}>
-              {loading ? "Đang tải..." : "Refresh"}
+              {loading ? t("dataset.status.loading") : t("dataset.actions.refresh")}
             </Button>
             <Button variant="outline" onClick={handleExport}>
-              Export JSONL
+              {t("dataset.actions.exportJsonl")}
             </Button>
             <Button
               variant="destructive"
               onClick={handleDeleteFeedback}
               disabled={!selectedFeedback.length || deleteLoading}
             >
-              {deleteLoading ? "Đang xoá..." : `Xoá feedback (${selectedFeedback.length})`}
+              {deleteLoading
+                ? t("dataset.status.deleting")
+                : t("dataset.actions.deleteFeedbackCount", { count: selectedFeedback.length })}
             </Button>
             {exportStatus && <span className="text-sm text-muted-foreground">{exportStatus}</span>}
             {deleteStatus && <span className="text-sm text-muted-foreground">{deleteStatus}</span>}
@@ -738,48 +741,51 @@ export function DatasetPage() {
           <div className="flex flex-wrap items-center justify-between gap-4 mb-6">
             <div>
               <h2 className="text-2xl text-primary">
-                Dataset Overview
+                {t("dataset.overview.title")}
               </h2>
               <p className="text-sm text-muted-foreground">
-                Thống kê theo bộ lọc hiện tại.
+                {t("dataset.overview.currentFilterStats")}
               </p>
             </div>
             <div className="flex flex-wrap gap-2">
-              <Badge className="bg-background-info text-text-info">Merged datasets: {aggregatedStats.sources.length}</Badge>
+              <Badge className="bg-background-info text-text-info">{t("dataset.overview.mergedDatasets", { count: aggregatedStats.sources.length })}</Badge>
               <Badge className={imbalanceStatus?.isImbalanced ? "bg-background-danger text-text-danger" : "bg-background-success text-text-success"}>
-                {imbalanceStatus?.isImbalanced ? "Imbalanced" : "Balanced"}
+                {imbalanceStatus?.isImbalanced ? t("dataset.overview.imbalanced") : t("dataset.overview.balanced")}
               </Badge>
             </div>
           </div>
 
           {imbalanceStatus?.isImbalanced && (
             <div className="mb-6 rounded-lg border border-border-danger bg-background-danger px-4 py-3 text-sm text-text-danger">
-              Lớp {imbalanceStatus.dominant} chiếm {formatPercent(
-                imbalanceStatus.dominant === "clean" ? aggregatedStats.clean : aggregatedStats.toxic,
-                aggregatedStats.total,
-              )} tổng mẫu. Cân nhắc tăng dữ liệu cho lớp còn lại.
+              {t("dataset.overview.dominantClassWarning", {
+                label: imbalanceStatus.dominant === "clean" ? t("dataset.filters.clean") : t("dataset.filters.toxic"),
+                percent: formatPercent(
+                  imbalanceStatus.dominant === "clean" ? aggregatedStats.clean : aggregatedStats.toxic,
+                  aggregatedStats.total,
+                ),
+              })}
             </div>
           )}
 
           <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
             <Card className="bg-card p-4 border">
-              <p className="text-sm text-muted-foreground">Tổng mẫu</p>
+              <p className="text-sm text-muted-foreground">{t("dataset.overview.totalSamples")}</p>
               <p className="text-2xl text-primary">{aggregatedStats.total}</p>
             </Card>
             <Card className="bg-card p-4 border">
-              <p className="text-sm text-muted-foreground">Clean</p>
+              <p className="text-sm text-muted-foreground">{t("dataset.filters.clean")}</p>
               <p className="text-xl text-foreground">
                 {aggregatedStats.clean} ({formatPercent(aggregatedStats.clean, aggregatedStats.total)})
               </p>
             </Card>
             <Card className="bg-card p-4 border">
-              <p className="text-sm text-muted-foreground">Toxic</p>
+              <p className="text-sm text-muted-foreground">{t("dataset.filters.toxic")}</p>
               <p className="text-xl text-foreground">
                 {aggregatedStats.toxic} ({formatPercent(aggregatedStats.toxic, aggregatedStats.total)})
               </p>
             </Card>
             <Card className="bg-card p-4 border">
-              <p className="text-sm text-muted-foreground">Trang</p>
+              <p className="text-sm text-muted-foreground">{t("dataset.overview.page")}</p>
               <p className="text-sm text-foreground mt-2">
                 {page} / {totalPages}
               </p>
@@ -791,10 +797,10 @@ export function DatasetPage() {
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead>Source</TableHead>
-                    <TableHead className="text-right">Clean</TableHead>
-                    <TableHead className="text-right">Toxic</TableHead>
-                    <TableHead className="text-right">Total</TableHead>
+                    <TableHead>{t("dataset.filters.source")}</TableHead>
+                    <TableHead className="text-right">{t("dataset.filters.clean")}</TableHead>
+                    <TableHead className="text-right">{t("dataset.filters.toxic")}</TableHead>
+                    <TableHead className="text-right">{t("dataset.common.total")}</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -825,10 +831,10 @@ export function DatasetPage() {
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead>Cross-tab</TableHead>
-                    <TableHead className="text-right">Clean</TableHead>
-                    <TableHead className="text-right">Toxic</TableHead>
-                    <TableHead className="text-right">Total</TableHead>
+                    <TableHead>{t("dataset.overview.crossTab")}</TableHead>
+                    <TableHead className="text-right">{t("dataset.filters.clean")}</TableHead>
+                    <TableHead className="text-right">{t("dataset.filters.toxic")}</TableHead>
+                    <TableHead className="text-right">{t("dataset.common.total")}</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -849,7 +855,7 @@ export function DatasetPage() {
                     );
                   })}
                   <TableRow>
-                    <TableCell className="font-medium">Total</TableCell>
+                    <TableCell className="font-medium">{t("dataset.common.total")}</TableCell>
                     <TableCell className="text-right font-medium">
                       {aggregatedStats.clean} ({formatPercent(aggregatedStats.clean, aggregatedStats.total)})
                     </TableCell>
@@ -875,13 +881,13 @@ export function DatasetPage() {
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>Chọn</TableHead>
-                <TableHead>Text</TableHead>
-                <TableHead>Label</TableHead>
-                <TableHead>Source</TableHead>
-                <TableHead>Split</TableHead>
-                <TableHead>Augmented</TableHead>
-                <TableHead>Created</TableHead>
+                <TableHead>{t("dataset.table.select")}</TableHead>
+                <TableHead>{t("dataset.table.text")}</TableHead>
+                <TableHead>{t("dataset.filters.label")}</TableHead>
+                <TableHead>{t("dataset.filters.source")}</TableHead>
+                <TableHead>{t("dataset.filters.split")}</TableHead>
+                <TableHead>{t("dataset.table.augmented")}</TableHead>
+                <TableHead>{t("dataset.table.created")}</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -898,24 +904,24 @@ export function DatasetPage() {
                           onChange={() => toggleFeedbackSelection(feedbackId)}
                         />
                       ) : (
-                        "--"
+                        t("dataset.common.na")
                       )}
                     </TableCell>
                     <TableCell className="max-w-[360px] truncate" title={row.text}>
                       {row.text}
                     </TableCell>
-                    <TableCell>{labelText(row.label)}</TableCell>
-                    <TableCell>{row.meta?.source ?? "--"}</TableCell>
-                    <TableCell>{row.meta?.split ?? "--"}</TableCell>
-                    <TableCell>{row.meta?.is_augmented ? "yes" : "no"}</TableCell>
-                    <TableCell>{row.meta?.created_at ?? "--"}</TableCell>
+                    <TableCell>{labelText(row.label, t)}</TableCell>
+                    <TableCell>{row.meta?.source ?? t("dataset.common.na")}</TableCell>
+                    <TableCell>{row.meta?.split ?? t("dataset.common.na")}</TableCell>
+                    <TableCell>{row.meta?.is_augmented ? t("dataset.common.yes") : t("dataset.common.no")}</TableCell>
+                    <TableCell>{row.meta?.created_at ?? t("dataset.common.na")}</TableCell>
                   </TableRow>
                 );
               })}
               {!rows.length && !loading && (
                 <TableRow>
                   <TableCell colSpan={7} className="text-center text-sm text-muted-foreground">
-                    Không có dữ liệu
+                    {t("dataset.common.noData")}
                   </TableCell>
                 </TableRow>
               )}

@@ -178,15 +178,38 @@ def main() -> None:
     parser.add_argument("--c-train-ratio", type=float, default=0.7)
     parser.add_argument("--c-validation-ratio", type=float, default=0.2)
     parser.add_argument("--c-test-ratio", type=float, default=0.1)
+    parser.add_argument("--protocols", default="a,b,c", help="Comma-separated list of protocols to build: a,b,c")
+    parser.add_argument("--protocol-a-mode", choices=["legacy", "leakage_safe"], default="legacy")
     args = parser.parse_args()
 
     if abs(args.c_train_ratio + args.c_validation_ratio + args.c_test_ratio - 1.0) > 1e-8:
         raise ValueError("C split ratios must sum to 1.0")
 
+    selected_protocols = {
+        p.strip().lower()
+        for p in args.protocols.split(",")
+        if p.strip()
+    }
+    valid_protocols = {"a", "b", "c"}
+    invalid_protocols = selected_protocols - valid_protocols
+    if not selected_protocols:
+        raise ValueError("--protocols cannot be empty")
+    if invalid_protocols:
+        raise ValueError(f"Invalid protocol ids in --protocols: {sorted(invalid_protocols)}")
+
     victsd_dir = Path(args.victsd_dir)
     vihsd_dir = Path(args.vihsd_dir)
     output_root = Path(args.output_root)
     output_root.mkdir(parents=True, exist_ok=True)
+    report_path = output_root / f"{args.dataset_prefix}_protocol_build_report.json"
+
+    existing_report = {}
+    if report_path.exists():
+        with report_path.open("r", encoding="utf-8") as f:
+            existing_report = json.load(f)
+
+    existing_protocols = existing_report.get("protocols") if isinstance(existing_report, dict) else {}
+    existing_warnings = existing_report.get("warnings") if isinstance(existing_report, dict) else []
 
     # Load + normalize ViCTSD
     victsd: Dict[str, List[dict]] = {}
@@ -200,8 +223,10 @@ def main() -> None:
                 norm_rows.append(nrow)
         victsd[split] = norm_rows
 
-    # Load + preprocess ViHSD offensive only
-    vihsd_offensive = dedup_rows(normalize_vihsd_offensive_rows(vihsd_dir))
+    # Load + preprocess ViHSD offensive only when needed
+    vihsd_offensive: List[dict] = []
+    if "b" in selected_protocols or "c" in selected_protocols:
+        vihsd_offensive = dedup_rows(normalize_vihsd_offensive_rows(vihsd_dir))
 
     report = {
         "config": {
@@ -217,124 +242,168 @@ def main() -> None:
                 "validation": args.c_validation_ratio,
                 "test": args.c_test_ratio,
             },
+            "protocols": sorted(selected_protocols),
+            "protocol_a_mode": args.protocol_a_mode,
         },
-        "warnings": [],
+        "warnings": list(existing_warnings) if isinstance(existing_warnings, list) else [],
         "protocols": {},
     }
+
+    if selected_protocols != valid_protocols:
+        report["warnings"].append(
+            f"Partial rebuild executed for protocols={sorted(selected_protocols)}; untouched protocol report entries were preserved from existing report."
+        )
+
+    for protocol_id in sorted(valid_protocols - selected_protocols):
+        if isinstance(existing_protocols, dict) and isinstance(existing_protocols.get(protocol_id), dict):
+            report["protocols"][protocol_id] = existing_protocols[protocol_id]
 
     # ----------------
     # Protocol A
     # ----------------
-    protocol_a_rows = {split: list(victsd[split]) for split in SPLITS}
-    a_paths = protocol_paths(output_root, args.dataset_prefix, "a")
-    for split in SPLITS:
-        write_jsonl(a_paths[split], protocol_a_rows[split])
+    if "a" in selected_protocols:
+        protocol_a_rows = {split: list(victsd[split]) for split in SPLITS}
+        removed_train_rows = 0
+        removed_train_unique_keys = 0
+        removed_validation_rows = 0
+        removed_validation_unique_keys = 0
 
-    report["protocols"]["a"] = {
-        "files": {k: str(v) for k, v in a_paths.items()},
-        "stats": {split: split_stats(protocol_a_rows[split]) for split in SPLITS},
-        "overlap_exact": {
-            "train_validation": overlap_count(protocol_a_rows["train"], protocol_a_rows["validation"]),
-            "train_test": overlap_count(protocol_a_rows["train"], protocol_a_rows["test"]),
-            "validation_test": overlap_count(protocol_a_rows["validation"], protocol_a_rows["test"]),
-        },
-    }
+        if args.protocol_a_mode == "leakage_safe":
+            original_validation = protocol_a_rows["validation"]
+            original_validation_keys = {dedup_key(x["text"]) for x in original_validation}
+            test_keys = {dedup_key(x["text"]) for x in protocol_a_rows["test"]}
+            filtered_validation = [r for r in original_validation if dedup_key(r["text"]) not in test_keys]
+            filtered_validation_keys = {dedup_key(x["text"]) for x in filtered_validation}
+            removed_validation_rows = len(original_validation) - len(filtered_validation)
+            removed_validation_unique_keys = len(original_validation_keys - filtered_validation_keys)
+            protocol_a_rows["validation"] = filtered_validation
+
+            train_block_keys = test_keys | filtered_validation_keys
+            original_train = protocol_a_rows["train"]
+            original_train_keys = {dedup_key(x["text"]) for x in original_train}
+            filtered_train = [r for r in original_train if dedup_key(r["text"]) not in train_block_keys]
+            filtered_train_keys = {dedup_key(x["text"]) for x in filtered_train}
+            removed_train_rows = len(original_train) - len(filtered_train)
+            removed_train_unique_keys = len(original_train_keys - filtered_train_keys)
+            protocol_a_rows["train"] = filtered_train
+
+        a_paths = protocol_paths(output_root, args.dataset_prefix, "a")
+        for split in SPLITS:
+            write_jsonl(a_paths[split], protocol_a_rows[split])
+
+        report["protocols"]["a"] = {
+            "mode": args.protocol_a_mode,
+            "leakage_filter": {
+                "removed_train_rows": removed_train_rows,
+                "removed_train_unique_keys": removed_train_unique_keys,
+                "removed_validation_rows": removed_validation_rows,
+                "removed_validation_unique_keys": removed_validation_unique_keys,
+            },
+            "files": {k: str(v) for k, v in a_paths.items()},
+            "stats": {split: split_stats(protocol_a_rows[split]) for split in SPLITS},
+            "overlap_exact": {
+                "train_validation": overlap_count(protocol_a_rows["train"], protocol_a_rows["validation"]),
+                "train_test": overlap_count(protocol_a_rows["train"], protocol_a_rows["test"]),
+                "validation_test": overlap_count(protocol_a_rows["validation"], protocol_a_rows["test"]),
+            },
+        }
 
     # ----------------
     # Protocol B
     # ----------------
-    b_train_base = list(victsd["train"])
-    b_val = list(victsd["validation"])
-    b_test = list(victsd["test"])
+    if "b" in selected_protocols:
+        b_train_base = list(victsd["train"])
+        b_val = list(victsd["validation"])
+        b_test = list(victsd["test"])
 
-    val_test_keys = {dedup_key(x["text"]) for x in b_val + b_test}
-    train_base_keys = {dedup_key(x["text"]) for x in b_train_base}
+        val_test_keys = {dedup_key(x["text"]) for x in b_val + b_test}
+        train_base_keys = {dedup_key(x["text"]) for x in b_train_base}
 
-    candidate_pool = [
-        r for r in vihsd_offensive
-        if dedup_key(r["text"]) not in val_test_keys and dedup_key(r["text"]) not in train_base_keys
-    ]
+        candidate_pool = [
+            r for r in vihsd_offensive
+            if dedup_key(r["text"]) not in val_test_keys and dedup_key(r["text"]) not in train_base_keys
+        ]
 
-    base_total = len(b_train_base)
-    base_toxic = sum(1 for r in b_train_base if int(r["toxicity"]) == 1)
-    min_add, max_add = compute_required_additions(base_total, base_toxic, args.b_toxic_min, args.b_toxic_max)
+        base_total = len(b_train_base)
+        base_toxic = sum(1 for r in b_train_base if int(r["toxicity"]) == 1)
+        min_add, max_add = compute_required_additions(base_total, base_toxic, args.b_toxic_min, args.b_toxic_max)
 
-    if min_add > max_add and max_add > 0:
-        report["warnings"].append(
-            f"Protocol B target window infeasible from base distribution: min_add={min_add}, max_add={max_add}. Using max_add."
-        )
+        if min_add > max_add and max_add > 0:
+            report["warnings"].append(
+                f"Protocol B target window infeasible from base distribution: min_add={min_add}, max_add={max_add}. Using max_add."
+            )
 
-    desired_add = min_add
-    if max_add > 0:
-        desired_add = min(desired_add, max_add)
+        desired_add = min_add
+        if max_add > 0:
+            desired_add = min(desired_add, max_add)
 
-    if desired_add > len(candidate_pool):
-        report["warnings"].append(
-            f"Protocol B lacks enough ViHSD offensive rows: need {desired_add}, available {len(candidate_pool)}. Using all available."
-        )
-        desired_add = len(candidate_pool)
+        if desired_add > len(candidate_pool):
+            report["warnings"].append(
+                f"Protocol B lacks enough ViHSD offensive rows: need {desired_add}, available {len(candidate_pool)}. Using all available."
+            )
+            desired_add = len(candidate_pool)
 
-    rng = random.Random(args.seed)
-    rng.shuffle(candidate_pool)
-    selected_additions = candidate_pool[:desired_add]
+        rng = random.Random(args.seed)
+        rng.shuffle(candidate_pool)
+        selected_additions = candidate_pool[:desired_add]
 
-    b_train = dedup_rows(b_train_base + selected_additions)
+        b_train = dedup_rows(b_train_base + selected_additions)
 
-    # Final safety: no overlap train vs val/test
-    b_val_test_keys = {dedup_key(x["text"]) for x in b_val + b_test}
-    b_train = [r for r in b_train if dedup_key(r["text"]) not in b_val_test_keys]
+        # Final safety: no overlap train vs val/test
+        b_val_test_keys = {dedup_key(x["text"]) for x in b_val + b_test}
+        b_train = [r for r in b_train if dedup_key(r["text"]) not in b_val_test_keys]
 
-    protocol_b_rows = {
-        "train": b_train,
-        "validation": b_val,
-        "test": b_test,
-    }
+        protocol_b_rows = {
+            "train": b_train,
+            "validation": b_val,
+            "test": b_test,
+        }
 
-    b_paths = protocol_paths(output_root, args.dataset_prefix, "b")
-    for split in SPLITS:
-        write_jsonl(b_paths[split], protocol_b_rows[split])
+        b_paths = protocol_paths(output_root, args.dataset_prefix, "b")
+        for split in SPLITS:
+            write_jsonl(b_paths[split], protocol_b_rows[split])
 
-    report["protocols"]["b"] = {
-        "files": {k: str(v) for k, v in b_paths.items()},
-        "stats": {split: split_stats(protocol_b_rows[split]) for split in SPLITS},
-        "merge": {
-            "vihsd_offensive_pool_after_dedup": len(vihsd_offensive),
-            "candidate_pool_after_overlap_filter": len(candidate_pool),
-            "selected_additions": len(selected_additions),
-            "base_train_total": base_total,
-            "base_train_toxic": base_toxic,
-            "requested_additions_min": min_add,
-            "requested_additions_max": max_add,
-        },
-        "overlap_exact": {
-            "train_validation": overlap_count(protocol_b_rows["train"], protocol_b_rows["validation"]),
-            "train_test": overlap_count(protocol_b_rows["train"], protocol_b_rows["test"]),
-            "validation_test": overlap_count(protocol_b_rows["validation"], protocol_b_rows["test"]),
-        },
-    }
+        report["protocols"]["b"] = {
+            "files": {k: str(v) for k, v in b_paths.items()},
+            "stats": {split: split_stats(protocol_b_rows[split]) for split in SPLITS},
+            "merge": {
+                "vihsd_offensive_pool_after_dedup": len(vihsd_offensive),
+                "candidate_pool_after_overlap_filter": len(candidate_pool),
+                "selected_additions": len(selected_additions),
+                "base_train_total": base_total,
+                "base_train_toxic": base_toxic,
+                "requested_additions_min": min_add,
+                "requested_additions_max": max_add,
+            },
+            "overlap_exact": {
+                "train_validation": overlap_count(protocol_b_rows["train"], protocol_b_rows["validation"]),
+                "train_test": overlap_count(protocol_b_rows["train"], protocol_b_rows["test"]),
+                "validation_test": overlap_count(protocol_b_rows["validation"], protocol_b_rows["test"]),
+            },
+        }
 
     # ----------------
     # Protocol C
     # ----------------
-    c_pool = dedup_rows(victsd["train"] + victsd["validation"] + victsd["test"] + vihsd_offensive)
-    c_split = stratified_split(c_pool, args.c_train_ratio, args.c_validation_ratio, args.seed)
+    if "c" in selected_protocols:
+        c_pool = dedup_rows(victsd["train"] + victsd["validation"] + victsd["test"] + vihsd_offensive)
+        c_split = stratified_split(c_pool, args.c_train_ratio, args.c_validation_ratio, args.seed)
 
-    c_paths = protocol_paths(output_root, args.dataset_prefix, "c")
-    for split in SPLITS:
-        write_jsonl(c_paths[split], c_split[split])
+        c_paths = protocol_paths(output_root, args.dataset_prefix, "c")
+        for split in SPLITS:
+            write_jsonl(c_paths[split], c_split[split])
 
-    report["protocols"]["c"] = {
-        "files": {k: str(v) for k, v in c_paths.items()},
-        "stats": {split: split_stats(c_split[split]) for split in SPLITS},
-        "pool_size_after_global_dedup": len(c_pool),
-        "overlap_exact": {
-            "train_validation": overlap_count(c_split["train"], c_split["validation"]),
-            "train_test": overlap_count(c_split["train"], c_split["test"]),
-            "validation_test": overlap_count(c_split["validation"], c_split["test"]),
-        },
-    }
+        report["protocols"]["c"] = {
+            "files": {k: str(v) for k, v in c_paths.items()},
+            "stats": {split: split_stats(c_split[split]) for split in SPLITS},
+            "pool_size_after_global_dedup": len(c_pool),
+            "overlap_exact": {
+                "train_validation": overlap_count(c_split["train"], c_split["validation"]),
+                "train_test": overlap_count(c_split["train"], c_split["test"]),
+                "validation_test": overlap_count(c_split["validation"], c_split["test"]),
+            },
+        }
 
-    report_path = output_root / f"{args.dataset_prefix}_protocol_build_report.json"
     with report_path.open("w", encoding="utf-8") as f:
         json.dump(report, f, ensure_ascii=False, indent=2)
         f.write("\n")

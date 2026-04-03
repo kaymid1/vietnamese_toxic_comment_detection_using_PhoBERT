@@ -42,6 +42,7 @@ import {
   BarChart,
   Bar,
 } from "recharts";
+import { useI18n } from "@/app/i18n/context";
 
 interface ModelPageProps {
   onTryNow: () => void;
@@ -119,13 +120,9 @@ const buildApiUrl = (path: string) => {
 
 const formatRatio = (value?: number) => (value === undefined ? "--" : `${(value * 100).toFixed(1)}%`);
 
-const formatScore = (value?: number | null) => (value == null ? "Chưa có metrics" : value.toFixed(3));
+const formatScore = (value: number | null | undefined, t: (key: string) => string) =>
+  (value == null ? t("model.common.noMetrics") : value.toFixed(3));
 
-const demoExamples = [
-  "   Trời ơi!!!   Đẹp vãi 😡😡   ",
-  "k\t có   j đâu\n mà ồn ào...",
-  "Giỏi quá ha,   chắc chưa? 😏   ",
-];
 
 const toVisibleWhitespace = (text: string) =>
   text
@@ -151,6 +148,7 @@ const applyActiveSteps = (text: string, steps: PreprocessStep[]) => {
 };
 
 export function ModelPage({ onTryNow }: ModelPageProps) {
+  const { t } = useI18n();
   const [registry, setRegistry] = useState<RegistryResponse>({ runs: [] });
   const [registryError, setRegistryError] = useState<string | null>(null);
   const [preprocessSteps, setPreprocessSteps] = useState<PreprocessStep[]>([]);
@@ -165,6 +163,15 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
   const [demoStepIndex, setDemoStepIndex] = useState(0);
   const [demoExampleIndex, setDemoExampleIndex] = useState(0);
 
+  const demoExamples = useMemo(
+    () => [
+      t("model.pipeline.demoExample1"),
+      t("model.pipeline.demoExample2"),
+      t("model.pipeline.demoExample3"),
+    ],
+    [t],
+  );
+
   const fetchRegistry = async (refresh = false) => {
     try {
       const endpoint = refresh ? "/api/experiments/registry?refresh=true" : "/api/experiments/registry";
@@ -174,7 +181,7 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
       setRegistry(data);
       setRegistryError(null);
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Không thể tải registry";
+      const message = err instanceof Error ? err.message : t("model.status.cannotLoadRegistry");
       setRegistryError(message);
     }
   };
@@ -276,13 +283,13 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
   const pipelineSteps = preprocessSteps.length
     ? preprocessSteps
     : [
-        { id: "trim", label: "Loại bỏ khoảng trắng đầu/cuối", active: true },
-        { id: "normalize_unicode", label: "Chuẩn hoá Unicode (NFC)", active: true },
-        { id: "normalize_whitespace", label: "Chuẩn hoá khoảng trắng", active: true },
-        { id: "lowercase", label: "Chuyển lowercase", active: false },
-        { id: "remove_emoji", label: "Xử lý emoji", active: false },
-        { id: "strip_punctuation", label: "Loại bỏ dấu câu mạnh", active: false },
-        { id: "teencode", label: "Chuẩn hoá teencode", active: false },
+        { id: "trim", label: t("model.pipeline.stepTrim"), active: true },
+        { id: "normalize_unicode", label: t("model.pipeline.stepUnicode"), active: true },
+        { id: "normalize_whitespace", label: t("model.pipeline.stepWhitespace"), active: true },
+        { id: "lowercase", label: t("model.pipeline.stepLowercase"), active: false },
+        { id: "remove_emoji", label: t("model.pipeline.stepEmoji"), active: false },
+        { id: "strip_punctuation", label: t("model.pipeline.stepPunctuation"), active: false },
+        { id: "teencode", label: t("model.pipeline.stepTeencode"), active: false },
       ];
 
   const activeSteps = pipelineSteps.filter((step) => step.active);
@@ -346,10 +353,10 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
         {/* Header */}
         <div className="mb-12 text-center">
           <h1 className="text-4xl mb-4" style={{ color: "var(--primary)" }}>
-            Model & Hiệu Năng Hệ Thống
+            {t("model.hero.title")}
           </h1>
           <p className="text-xl text-muted-foreground max-w-3xl mx-auto">
-            Tìm hiểu về mô hình PhoBERT và hiệu năng phát hiện nội dung độc hại tiếng Việt
+            {t("model.hero.subtitle")}
           </p>
         </div>
 
@@ -361,40 +368,38 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
             </div>
             <div className="flex-1">
               <h2 className="text-2xl mb-3" style={{ color: "var(--primary)" }}>
-                Về Mô Hình PhoBERT
+                {t("model.about.title")}
               </h2>
               <p className="text-foreground leading-relaxed mb-4">
-                VietToxic Detector sử dụng <strong>PhoBERT-base</strong>, một mô hình ngôn ngữ
-                tiên tiến được huấn luyện trước trên kho ngữ liệu tiếng Việt lớn. Mô hình này
-                được tinh chỉnh (fine-tuned) đặc biệt cho tác vụ phát hiện nội dung độc hại.
+                {t("model.about.description")}
               </p>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div className="flex items-start gap-3">
                   <CheckCircle className="w-5 h-5 mt-1 flex-shrink-0" style={{ color: "var(--success)" }} />
                   <div>
-                    <h4 className="mb-1">Tiền xử lý văn bản</h4>
-                    <p className="text-sm text-muted-foreground">Chuẩn hóa Unicode + khoảng trắng</p>
+                    <h4 className="mb-1">{t("model.about.preprocessTitle")}</h4>
+                    <p className="text-sm text-muted-foreground">{t("model.about.preprocessDesc")}</p>
                   </div>
                 </div>
                 <div className="flex items-start gap-3">
                   <CheckCircle className="w-5 h-5 mt-1 flex-shrink-0" style={{ color: "var(--success)" }} />
                   <div>
-                    <h4 className="mb-1">Giữ nguyên chữ hoa</h4>
-                    <p className="text-sm text-muted-foreground">Không lowercase để giữ thông tin quan trọng</p>
+                    <h4 className="mb-1">{t("model.about.keepCaseTitle")}</h4>
+                    <p className="text-sm text-muted-foreground">{t("model.about.keepCaseDesc")}</p>
                   </div>
                 </div>
                 <div className="flex items-start gap-3">
                   <Database className="w-5 h-5 mt-1 flex-shrink-0" style={{ color: "var(--primary)" }} />
                   <div>
-                    <h4 className="mb-1">Bộ dữ liệu</h4>
-                    <p className="text-sm text-muted-foreground">ViCTSD + feedback mới thu thập</p>
+                    <h4 className="mb-1">{t("model.about.datasetTitle")}</h4>
+                    <p className="text-sm text-muted-foreground">{t("model.about.datasetDesc")}</p>
                   </div>
                 </div>
                 <div className="flex items-start gap-3">
                   <TrendingUp className="w-5 h-5 mt-1 flex-shrink-0" style={{ color: "var(--primary)" }} />
                   <div>
-                    <h4 className="mb-1">Transfer Learning</h4>
-                    <p className="text-sm text-muted-foreground">Tận dụng kiến thức từ pre-training</p>
+                    <h4 className="mb-1">{t("model.about.transferTitle")}</h4>
+                    <p className="text-sm text-muted-foreground">{t("model.about.transferDesc")}</p>
                   </div>
                 </div>
               </div>
@@ -407,14 +412,14 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
           <div className="flex flex-wrap items-center justify-between gap-4 mb-6">
             <div>
               <h2 className="text-2xl mb-1" style={{ color: "var(--primary)" }}>
-                Model Registry
+                {t("model.registry.title")}
               </h2>
-              <p className="text-sm text-muted-foreground">Thống kê từ experiments/registry.json</p>
+              <p className="text-sm text-muted-foreground">{t("model.registry.subtitle")}</p>
             </div>
             <div className="flex flex-wrap items-center gap-2">
-              <Badge className="bg-background-info text-text-info">Last updated: {registry.last_updated ?? "--"}</Badge>
+              <Badge className="bg-background-info text-text-info">{t("model.common.lastUpdated", { value: registry.last_updated ?? t("model.common.na") })}</Badge>
               <Button variant="outline" onClick={() => void fetchRegistry(true)}>
-                Refresh registry
+                {t("model.registry.refresh")}
               </Button>
             </div>
           </div>
@@ -424,31 +429,31 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
               <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
                 <div>
                   <h3 className="text-lg" style={{ color: "var(--primary)" }}>
-                    Baseline: {baselineRun.model_name}
+                    {t("model.registry.baselineLabel", { name: baselineRun.model_name })}
                   </h3>
-                  <p className="text-sm text-muted-foreground">Dataset: {baselineRun.dataset_version}</p>
+                  <p className="text-sm text-muted-foreground">{t("model.registry.dataset", { value: baselineRun.dataset_version })}</p>
                 </div>
                 <Badge className="bg-background-success text-text-success">{baselineRun.created_at}</Badge>
               </div>
               <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
                 <Card className="bg-card border p-4">
-                  <p className="text-xs text-muted-foreground">F1</p>
-                  <p className="text-xl text-foreground">{formatScore(baselineRun.metrics?.f1)}</p>
+                  <p className="text-xs text-muted-foreground">{t("model.metrics.f1")}</p>
+                  <p className="text-xl text-foreground">{formatScore(baselineRun.metrics?.f1, t)}</p>
                 </Card>
                 <Card className="bg-card border p-4">
-                  <p className="text-xs text-muted-foreground">Precision</p>
-                  <p className="text-xl text-foreground">{formatScore(baselineRun.metrics?.precision)}</p>
+                  <p className="text-xs text-muted-foreground">{t("model.metrics.precision")}</p>
+                  <p className="text-xl text-foreground">{formatScore(baselineRun.metrics?.precision, t)}</p>
                 </Card>
                 <Card className="bg-card border p-4">
-                  <p className="text-xs text-muted-foreground">Recall</p>
-                  <p className="text-xl text-foreground">{formatScore(baselineRun.metrics?.recall)}</p>
+                  <p className="text-xs text-muted-foreground">{t("model.metrics.recall")}</p>
+                  <p className="text-xl text-foreground">{formatScore(baselineRun.metrics?.recall, t)}</p>
                 </Card>
                 <Card className="bg-card border p-4">
-                  <p className="text-xs text-muted-foreground">Accuracy</p>
-                  <p className="text-xl text-foreground">{formatScore(baselineRun.metrics?.accuracy)}</p>
+                  <p className="text-xs text-muted-foreground">{t("model.metrics.accuracy")}</p>
+                  <p className="text-xl text-foreground">{formatScore(baselineRun.metrics?.accuracy, t)}</p>
                 </Card>
               </div>
-              <p className="text-sm text-muted-foreground mt-3">Checkpoint: {baselineRun.checkpoint_path}</p>
+              <p className="text-sm text-muted-foreground mt-3">{t("model.registry.checkpoint", { value: baselineRun.checkpoint_path })}</p>
             </div>
           )}
 
@@ -456,14 +461,14 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>Run ID</TableHead>
-                  <TableHead>Model</TableHead>
-                  <TableHead>Dataset</TableHead>
-                  <TableHead className="text-right">F1</TableHead>
-                  <TableHead className="text-right">Precision</TableHead>
-                  <TableHead className="text-right">Recall</TableHead>
-                  <TableHead className="text-right">Accuracy</TableHead>
-                  <TableHead>Created</TableHead>
+                  <TableHead>{t("model.registry.table.runId")}</TableHead>
+                  <TableHead>{t("model.registry.table.model")}</TableHead>
+                  <TableHead>{t("model.registry.table.dataset")}</TableHead>
+                  <TableHead className="text-right">{t("model.metrics.f1")}</TableHead>
+                  <TableHead className="text-right">{t("model.metrics.precision")}</TableHead>
+                  <TableHead className="text-right">{t("model.metrics.recall")}</TableHead>
+                  <TableHead className="text-right">{t("model.metrics.accuracy")}</TableHead>
+                  <TableHead>{t("model.registry.table.created")}</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -472,17 +477,17 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
                     <TableCell>{run.run_id}</TableCell>
                     <TableCell>{run.model_name}</TableCell>
                     <TableCell>{run.dataset_version}</TableCell>
-                    <TableCell className="text-right">{formatScore(run.metrics?.f1)}</TableCell>
-                    <TableCell className="text-right">{formatScore(run.metrics?.precision)}</TableCell>
-                    <TableCell className="text-right">{formatScore(run.metrics?.recall)}</TableCell>
-                    <TableCell className="text-right">{formatScore(run.metrics?.accuracy)}</TableCell>
+                    <TableCell className="text-right">{formatScore(run.metrics?.f1, t)}</TableCell>
+                    <TableCell className="text-right">{formatScore(run.metrics?.precision, t)}</TableCell>
+                    <TableCell className="text-right">{formatScore(run.metrics?.recall, t)}</TableCell>
+                    <TableCell className="text-right">{formatScore(run.metrics?.accuracy, t)}</TableCell>
                     <TableCell>{run.created_at}</TableCell>
                   </TableRow>
                 ))}
                 {!registry.runs.length && (
                   <TableRow>
                     <TableCell colSpan={8} className="text-center text-sm text-muted-foreground">
-                      Chưa có thí nghiệm nào
+                      {t("model.registry.noExperiments")}
                     </TableCell>
                   </TableRow>
                 )}
@@ -499,26 +504,26 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
             </div>
             <div className="flex-1">
               <h2 className="text-2xl mb-2" style={{ color: "var(--primary)" }}>
-                Pipeline Demo
+                {t("model.pipeline.title")}
               </h2>
               <p className="text-sm text-muted-foreground">
-                Mô phỏng các bước tiền xử lý thực tế (chỉ hiển thị bước đã triển khai).
+                {t("model.pipeline.subtitle")}
               </p>
             </div>
           </div>
 
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
             <div className="border rounded-lg p-4 bg-background-secondary">
-              <p className="text-xs text-muted-foreground mb-2">Input (whitespace-visible)</p>
+              <p className="text-xs text-muted-foreground mb-2">{t("model.pipeline.inputWhitespace")}</p>
               <p className="text-foreground text-sm font-mono whitespace-pre-wrap">{toVisibleWhitespace(demoInput)}</p>
               <div className="mt-4">
-                <p className="text-xs text-muted-foreground mb-2">Output (whitespace-visible, sau {activeSteps.length} bước)</p>
+                <p className="text-xs text-muted-foreground mb-2">{t("model.pipeline.outputWhitespaceAfterSteps", { count: activeSteps.length })}</p>
                 <p className="text-foreground text-sm font-mono whitespace-pre-wrap">{toVisibleWhitespace(demoOutput)}</p>
               </div>
             </div>
 
             <div className="border rounded-lg p-4">
-              <p className="text-xs text-muted-foreground mb-3">Các bước</p>
+              <p className="text-xs text-muted-foreground mb-3">{t("model.pipeline.steps")}</p>
               <div className="space-y-2">
                 {pipelineSteps.map((step, idx) => {
                   const isActive = step.active;
@@ -532,7 +537,7 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
                     >
                       <span>{step.label}</span>
                       <Badge className={isActive ? "bg-background-success text-text-success" : "bg-muted text-muted-foreground"}>
-                        {isActive ? "Active" : "Planned — not yet active"}
+                        {isActive ? t("model.pipeline.active") : t("model.pipeline.plannedNotActive")}
                       </Badge>
                     </div>
                   );
@@ -543,24 +548,16 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
 
           <div className="mt-6 border rounded-lg p-4 bg-background-info/40">
             <h3 className="text-sm mb-3" style={{ color: "var(--primary)" }}>
-              Lý do preprocessing hiện chỉ active 3 bước chính
+              {t("model.pipeline.whyOnlyThreeActive")}
             </h3>
             <ul className="list-disc pl-5 space-y-2 text-sm text-foreground">
               <li>
-                <strong>PhoBERT là mô hình case-sensitive</strong>, nên không lowercase để giữ tín hiệu chữ hoa/chữ thường.
+                {t("model.pipeline.reason1")}
               </li>
-              <li>
-                <strong>Emoji và dấu câu</strong> (ví dụ !!!, ???, 😡, 😂) có thể là tín hiệu toxic/sarcasm, nên chưa loại bỏ.
-              </li>
-              <li>
-                Tránh <strong>over-cleaning</strong> để dữ liệu huấn luyện gần với dữ liệu thực tế khi deploy.
-              </li>
-              <li>
-                <strong>Teencode normalization</strong> vẫn để planned vì mapping dễ sai ngữ cảnh; chỉ nên bật sau khi có kết quả ablation rõ ràng.
-              </li>
-              <li>
-                Bản baseline ưu tiên các bước “an toàn cao”: trim + Unicode NFC + chuẩn hoá khoảng trắng.
-              </li>
+              <li>{t("model.pipeline.reason2")}</li>
+              <li>{t("model.pipeline.reason3")}</li>
+              <li>{t("model.pipeline.reason4")}</li>
+              <li>{t("model.pipeline.reason5")}</li>
             </ul>
           </div>
         </Card>
@@ -573,80 +570,80 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
             </div>
             <div className="flex-1">
               <h2 className="text-2xl mb-3" style={{ color: "var(--primary)" }}>
-                Hiệu Năng & Metrics
+                {t("model.metrics.title")}
               </h2>
-              <p className="text-foreground mb-6">Đánh giá chất lượng mô hình theo registry</p>
+              <p className="text-foreground mb-6">{t("model.metrics.qualityByRegistry")}</p>
             </div>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
             <div className="bg-background-info p-6 rounded-xl">
-              <h4 className="text-sm text-muted-foreground mb-2">Macro F1-Score</h4>
+              <h4 className="text-sm text-muted-foreground mb-2">{t("model.metrics.macroF1")}</h4>
               <div className="flex items-end gap-2">
                 <span className="text-4xl" style={{ color: "var(--primary)" }}>
-                  {formatScore(baselineRun?.metrics?.f1)}
+                  {formatScore(baselineRun?.metrics?.f1, t)}
                 </span>
                 <Badge className="mb-2" style={{ backgroundColor: "var(--success)" }}>
-                  Baseline
+                  {t("model.common.baseline")}
                 </Badge>
               </div>
-              <p className="text-sm text-muted-foreground mt-2">Trung bình F1 của tất cả các lớp</p>
+              <p className="text-sm text-muted-foreground mt-2">{t("model.metrics.avgF1AllClasses")}</p>
             </div>
 
             <div className="bg-background-danger p-6 rounded-xl">
-              <h4 className="text-sm text-muted-foreground mb-2">Precision</h4>
+              <h4 className="text-sm text-muted-foreground mb-2">{t("model.metrics.precision")}</h4>
               <div className="flex items-end gap-2">
                 <span className="text-4xl" style={{ color: "var(--destructive)" }}>
-                  {formatScore(baselineRun?.metrics?.precision)}
+                  {formatScore(baselineRun?.metrics?.precision, t)}
                 </span>
-                <Badge className="mb-2 bg-text-warning">Baseline</Badge>
+                <Badge className="mb-2 bg-text-warning">{t("model.common.baseline")}</Badge>
               </div>
-              <p className="text-sm text-muted-foreground mt-2">Độ chính xác (precision)</p>
+              <p className="text-sm text-muted-foreground mt-2">{t("model.metrics.precisionDesc")}</p>
             </div>
 
             <div className="bg-background-success p-6 rounded-xl">
-              <h4 className="text-sm text-muted-foreground mb-2">Recall</h4>
+              <h4 className="text-sm text-muted-foreground mb-2">{t("model.metrics.recall")}</h4>
               <div className="flex items-end gap-2">
                 <span className="text-4xl" style={{ color: "var(--success)" }}>
-                  {formatScore(baselineRun?.metrics?.recall)}
+                  {formatScore(baselineRun?.metrics?.recall, t)}
                 </span>
                 <Badge className="mb-2" style={{ backgroundColor: "var(--success)" }}>
-                  Baseline
+                  {t("model.common.baseline")}
                 </Badge>
               </div>
-              <p className="text-sm text-muted-foreground mt-2">Độ bao phủ (recall)</p>
+              <p className="text-sm text-muted-foreground mt-2">{t("model.metrics.recallDesc")}</p>
             </div>
           </div>
 
           {/* Detailed Metrics Table */}
           <div className="mb-6">
             <h3 className="text-xl mb-4" style={{ color: "var(--primary)" }}>
-              Chi Tiết Metrics
+              {t("model.metrics.detailsTitle")}
             </h3>
             <div className="border rounded-lg overflow-hidden">
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead>Metric</TableHead>
-                    <TableHead className="text-right">Baseline</TableHead>
+                    <TableHead>{t("model.metrics.metric")}</TableHead>
+                    <TableHead className="text-right">{t("model.common.baseline")}</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   <TableRow>
-                    <TableCell>Precision</TableCell>
-                    <TableCell className="text-right">{formatScore(baselineRun?.metrics?.precision)}</TableCell>
+                    <TableCell>{t("model.metrics.precision")}</TableCell>
+                    <TableCell className="text-right">{formatScore(baselineRun?.metrics?.precision, t)}</TableCell>
                   </TableRow>
                   <TableRow>
-                    <TableCell>Recall</TableCell>
-                    <TableCell className="text-right">{formatScore(baselineRun?.metrics?.recall)}</TableCell>
+                    <TableCell>{t("model.metrics.recall")}</TableCell>
+                    <TableCell className="text-right">{formatScore(baselineRun?.metrics?.recall, t)}</TableCell>
                   </TableRow>
                   <TableRow>
-                    <TableCell>F1-Score</TableCell>
-                    <TableCell className="text-right font-medium">{formatScore(baselineRun?.metrics?.f1)}</TableCell>
+                    <TableCell>{t("model.metrics.f1Score")}</TableCell>
+                    <TableCell className="text-right font-medium">{formatScore(baselineRun?.metrics?.f1, t)}</TableCell>
                   </TableRow>
                   <TableRow>
-                    <TableCell>Accuracy</TableCell>
-                    <TableCell className="text-right">{formatScore(baselineRun?.metrics?.accuracy)}</TableCell>
+                    <TableCell>{t("model.metrics.accuracy")}</TableCell>
+                    <TableCell className="text-right">{formatScore(baselineRun?.metrics?.accuracy, t)}</TableCell>
                   </TableRow>
                 </TableBody>
               </Table>
@@ -657,7 +654,7 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
         {/* Model Comparison */}
         <Card className="bg-card p-8 mb-8 shadow-lg">
           <h2 className="text-2xl mb-6" style={{ color: "var(--primary)" }}>
-            So Sánh Với Baseline Models
+            {t("model.comparison.title")}
           </h2>
           <ResponsiveContainer width="100%" height={300}>
             <BarChart data={comparisonData}>
@@ -666,12 +663,12 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
               <YAxis domain={[0, 1]} />
               <Tooltip />
               <Legend />
-              <Bar dataKey="macroF1" fill="var(--primary)" name="Macro F1" />
-              <Bar dataKey="toxicF1" fill="var(--destructive)" name="Toxic Class F1" />
+              <Bar dataKey="macroF1" fill="var(--primary)" name={t("model.comparison.macroF1")} />
+              <Bar dataKey="toxicF1" fill="var(--destructive)" name={t("model.comparison.toxicClassF1")} />
             </BarChart>
           </ResponsiveContainer>
           <p className="text-sm text-muted-foreground mt-4 text-center">
-            So sánh dựa trên registry hiện có.
+            {t("model.comparison.subtitle")}
           </p>
         </Card>
 
@@ -680,44 +677,47 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
           <div className="flex flex-wrap items-center justify-between gap-4">
             <div>
               <h2 className="text-2xl mb-2" style={{ color: "var(--primary)" }}>
-                Evaluation Policy
+                {t("model.evaluation.title")}
               </h2>
-              <p className="text-sm text-muted-foreground">Giải thích cách chia tập và đánh giá.</p>
+              <p className="text-sm text-muted-foreground">{t("model.evaluation.subtitle")}</p>
             </div>
             <Dialog>
               <DialogTrigger asChild>
-                <Button variant="outline">Xem chi tiết</Button>
+                <Button variant="outline">{t("model.evaluation.viewDetails")}</Button>
               </DialogTrigger>
               <DialogContent className="max-w-2xl">
                 <DialogHeader>
-                  <DialogTitle>Evaluation Policy</DialogTitle>
-                  <DialogDescription>
-                    Thông tin được lấy từ config/eval_policy.json
+                  <DialogTitle>{t("model.evaluation.title")}</DialogTitle>                  <DialogDescription>
+                    {t("model.evaluation.description")}
                   </DialogDescription>
                 </DialogHeader>
                 <div className="space-y-4 text-sm text-foreground">
                   <div>
-                    <p className="font-medium">Tỷ lệ chia tập</p>
+                    <p className="font-medium">{t("model.evaluation.splitRatio")}</p>
                     <p>
-                      Train: {formatRatio(policy?.policy.split?.train)} | Val: {formatRatio(policy?.policy.split?.val)} | Test:{" "}
+                      {t("model.evaluation.train")}: {formatRatio(policy?.policy.split?.train)} | {t("model.evaluation.val")}: {formatRatio(policy?.policy.split?.val)} | {t("model.evaluation.test")}:{" "}
                       {formatRatio(policy?.policy.split?.test)}
                     </p>
                   </div>
                   <div>
-                    <p className="font-medium">Test set cố định</p>
+                    <p className="font-medium">{t("model.evaluation.fixedTestSet")}</p>
                     <p>
-                      {policy?.policy.test_set_fixed ? "Có" : "Không"} (từ {policy?.policy.fixed_since ?? "--"})
+                      {policy?.policy.test_set_fixed
+                        ? t("model.common.yes")
+                        : t("model.common.no")} ({t("model.evaluation.since", { value: policy?.policy.fixed_since ?? t("model.common.na") })})
                     </p>
                   </div>
                   <div>
-                    <p className="font-medium">Hard-case subsets</p>
+                    <p className="font-medium">{t("model.evaluation.hardCaseSubsets")}</p>
                     <p>
-                      {policy?.policy.hard_case_subsets_evaluated ? "Được đánh giá" : "Chưa áp dụng"}
+                      {policy?.policy.hard_case_subsets_evaluated
+                        ? t("model.evaluation.evaluated")
+                        : t("model.evaluation.notApplied")}
                     </p>
                   </div>
                   <div>
-                    <p className="font-medium">Ghi chú</p>
-                    <p>{policy?.policy.note ?? "--"}</p>
+                    <p className="font-medium">{t("model.evaluation.notes")}</p>
+                    <p>{policy?.policy.note ?? t("model.common.na")}</p>
                   </div>
                 </div>
               </DialogContent>
@@ -728,52 +728,52 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
         {/* Training Visualization */}
         <Card className="bg-card p-8 mb-8 shadow-lg">
           <h2 className="text-2xl mb-6" style={{ color: "var(--primary)" }}>
-            Quá Trình Training & Fine-tuning
+            {t("model.training.title")}
           </h2>
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
             {/* Training Loss Curve */}
             <div>
-              <h3 className="mb-4">Training Loss</h3>
+              <h3 className="mb-4">{t("model.training.trainingLoss")}</h3>
               <ResponsiveContainer width="100%" height={250}>
                 <RechartsLine data={trainingData}>
                   <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis dataKey="epoch" label={{ value: "Epoch", position: "insideBottom", offset: -5 }} />
-                  <YAxis label={{ value: "Loss", angle: -90, position: "insideLeft" }} />
+                  <XAxis dataKey="epoch" label={{ value: t("model.training.epoch"), position: "insideBottom", offset: -5 }} />
+                  <YAxis label={{ value: t("model.training.loss"), angle: -90, position: "insideLeft" }} />
                   <Tooltip />
                   <Line 
                     type="monotone" 
                     dataKey="loss" 
                     stroke="var(--destructive)" 
                     strokeWidth={2}
-                    name="Validation Loss"
+                    name={t("model.training.validationLoss")}
                   />
                 </RechartsLine>
               </ResponsiveContainer>
               <p className="text-sm text-muted-foreground mt-2 text-center">
-                Loss giảm đều qua các epoch
+                {t("model.training.lossTrend")}
               </p>
             </div>
 
             {/* F1 Score Curve */}
             <div>
-              <h3 className="mb-4">Validation F1-Score</h3>
+              <h3 className="mb-4">{t("model.training.validationF1")}</h3>
               <ResponsiveContainer width="100%" height={250}>
                 <RechartsLine data={trainingData}>
                   <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis dataKey="epoch" label={{ value: "Epoch", position: "insideBottom", offset: -5 }} />
-                  <YAxis domain={[0, 1]} label={{ value: "F1 Score", angle: -90, position: "insideLeft" }} />
+                  <XAxis dataKey="epoch" label={{ value: t("model.training.epoch"), position: "insideBottom", offset: -5 }} />
+                  <YAxis domain={[0, 1]} label={{ value: t("model.training.f1Score"), angle: -90, position: "insideLeft" }} />
                   <Tooltip />
                   <Line 
                     type="monotone" 
                     dataKey="f1" 
                     stroke="var(--success)" 
                     strokeWidth={2}
-                    name="Macro F1"
+                    name={t("model.training.macroF1")}
                   />
                 </RechartsLine>
               </ResponsiveContainer>
               <p className="text-sm text-muted-foreground mt-2 text-center">
-                F1 score cải thiện và ổn định sau 5 epochs
+                {t("model.training.f1Trend")}
               </p>
             </div>
           </div>
@@ -784,25 +784,25 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
           <div className="flex flex-wrap items-center justify-between gap-4 mb-6">
             <div>
               <h2 className="text-2xl mb-1" style={{ color: "var(--primary)" }}>
-                Phân Tích Lỗi (Error Analysis)
+                {t("model.error.title")}
               </h2>
-              <p className="text-sm text-muted-foreground">Tổng hợp từ data/processed/error_analysis.json</p>
+              <p className="text-sm text-muted-foreground">{t("model.error.subtitle")}</p>
             </div>
-            <Badge className="bg-background-info text-text-info">Last updated: {errorLastUpdated ?? "--"}</Badge>
+            <Badge className="bg-background-info text-text-info">{t("model.common.lastUpdated", { value: errorLastUpdated ?? t("model.common.na") })}</Badge>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
             <Card className="border p-5">
               <div className="flex items-center gap-2 mb-2">
                 <XCircle className="w-5 h-5" style={{ color: "var(--destructive)" }} />
-                <h3 style={{ color: "var(--primary)" }}>False Positives</h3>
+                <h3 style={{ color: "var(--primary)" }}>{t("model.error.falsePositives")}</h3>
               </div>
               <p className="text-3xl" style={{ color: "var(--primary)" }}>{errorStats.fp}</p>
             </Card>
             <Card className="border p-5">
               <div className="flex items-center gap-2 mb-2">
                 <XCircle className="w-5 h-5" style={{ color: "var(--success)" }} />
-                <h3 style={{ color: "var(--primary)" }}>False Negatives</h3>
+                <h3 style={{ color: "var(--primary)" }}>{t("model.error.falseNegatives")}</h3>
               </div>
               <p className="text-3xl" style={{ color: "var(--primary)" }}>{errorStats.fn}</p>
             </Card>
@@ -810,19 +810,19 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
             <div>
-              <Label className="text-sm text-muted-foreground">Mismatch type</Label>
+              <Label className="text-sm text-muted-foreground">{t("model.error.mismatchType")}</Label>
               <select
                 className="mt-2 w-full border rounded-lg px-3 py-2 text-sm"
                 value={errorFilter}
                 onChange={(event) => setErrorFilter(event.target.value)}
               >
-                <option value="all">all</option>
-                <option value="fp">false positive</option>
-                <option value="fn">false negative</option>
+                <option value="all">{t("model.common.all")}</option>
+                <option value="fp">{t("model.error.falsePositive")}</option>
+                <option value="fn">{t("model.error.falseNegative")}</option>
               </select>
             </div>
             <div>
-              <Label className="text-sm text-muted-foreground">Source dataset</Label>
+              <Label className="text-sm text-muted-foreground">{t("model.error.sourceDataset")}</Label>
               <select
                 className="mt-2 w-full border rounded-lg px-3 py-2 text-sm"
                 value={sourceFilter}
@@ -836,7 +836,7 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
               </select>
             </div>
             <div>
-              <Label className="text-sm text-muted-foreground">Subset tag</Label>
+              <Label className="text-sm text-muted-foreground">{t("model.error.subsetTag")}</Label>
               <select
                 className="mt-2 w-full border rounded-lg px-3 py-2 text-sm"
                 value={subsetFilter}
@@ -855,12 +855,12 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>Text</TableHead>
-                  <TableHead className="text-right">True</TableHead>
-                  <TableHead className="text-right">Pred</TableHead>
-                  <TableHead className="text-right">Confidence</TableHead>
-                  <TableHead>Source</TableHead>
-                  <TableHead>Subset</TableHead>
+                  <TableHead>{t("model.table.text")}</TableHead>
+                  <TableHead className="text-right">{t("model.error.true")}</TableHead>
+                  <TableHead className="text-right">{t("model.error.pred")}</TableHead>
+                  <TableHead className="text-right">{t("model.error.confidence")}</TableHead>
+                  <TableHead>{t("model.table.source")}</TableHead>
+                  <TableHead>{t("model.table.subset")}</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -874,15 +874,15 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
                     </TableCell>
                     <TableCell className="text-right">{row.true_label}</TableCell>
                     <TableCell className="text-right">{row.predicted_label}</TableCell>
-                    <TableCell className="text-right">{row.confidence?.toFixed(2) ?? "--"}</TableCell>
-                    <TableCell>{row.source_dataset ?? "--"}</TableCell>
-                    <TableCell>{row.subset_tag ?? "--"}</TableCell>
+                    <TableCell className="text-right">{row.confidence?.toFixed(2) ?? t("model.common.na")}</TableCell>
+                    <TableCell>{row.source_dataset ?? t("model.common.na")}</TableCell>
+                    <TableCell>{row.subset_tag ?? t("model.common.na")}</TableCell>
                   </TableRow>
                 ))}
                 {!filteredErrors.length && (
                   <TableRow>
                     <TableCell colSpan={6} className="text-center text-sm text-muted-foreground">
-                      Chưa có lỗi để hiển thị
+                      {t("model.error.noRows")}
                     </TableCell>
                   </TableRow>
                 )}
@@ -896,33 +896,33 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
           <div className="flex flex-wrap items-center justify-between gap-4 mb-6">
             <div>
               <h2 className="text-2xl mb-1" style={{ color: "var(--primary)" }}>
-                Phase 1 — Heuristic Candidates
+                {t("model.hardCase.title")}
               </h2>
-              <p className="text-sm text-muted-foreground">Hard-case subset scaffold</p>
+              <p className="text-sm text-muted-foreground">{t("model.hardCase.subtitle")}</p>
             </div>
             <div className="flex flex-wrap items-center gap-3">
-              <Badge className="bg-background-info text-text-info">Last updated: {hardCaseLastUpdated ?? "--"}</Badge>
+              <Badge className="bg-background-info text-text-info">{t("model.common.lastUpdated", { value: hardCaseLastUpdated ?? t("model.common.na") })}</Badge>
               <Button variant="outline" onClick={downloadHardCases} disabled={!hardCases.length}>
                 <Download className="w-4 h-4 mr-2" />
-                Export for annotation
+                {t("model.hardCase.exportForAnnotation")}
               </Button>
             </div>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
             <Card className="border p-4">
-              <p className="text-sm text-muted-foreground">Candidate count</p>
+              <p className="text-sm text-muted-foreground">{t("model.hardCase.candidateCount")}</p>
               <p className="text-2xl" style={{ color: "var(--primary)" }}>{hardCases.length}</p>
             </Card>
             <Card className="border p-4 md:col-span-2">
-              <p className="text-sm text-muted-foreground mb-2">Breakdown by reason</p>
+              <p className="text-sm text-muted-foreground mb-2">{t("model.hardCase.breakdownByReason")}</p>
               <div className="flex flex-wrap gap-2">
                 {Object.entries(hardCaseBreakdown).map(([reason, count]) => (
                   <Badge key={reason} className="bg-background-info text-text-info">
                     {reason}: {count}
                   </Badge>
                 ))}
-                {!Object.keys(hardCaseBreakdown).length && <span className="text-sm text-muted-foreground">--</span>}
+                {!Object.keys(hardCaseBreakdown).length && <span className="text-sm text-muted-foreground">{t("model.common.na")}</span>}
               </div>
             </Card>
           </div>
@@ -931,10 +931,10 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>Text</TableHead>
-                  <TableHead>Reason</TableHead>
-                  <TableHead>Source</TableHead>
-                  <TableHead>Subset</TableHead>
+                  <TableHead>{t("model.table.text")}</TableHead>
+                  <TableHead>{t("model.hardCase.reason")}</TableHead>
+                  <TableHead>{t("model.table.source")}</TableHead>
+                  <TableHead>{t("model.table.subset")}</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -943,15 +943,15 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
                     <TableCell className="max-w-[320px] truncate" title={row.text}>
                       {row.text}
                     </TableCell>
-                    <TableCell>{row.candidate_reason ?? "--"}</TableCell>
-                    <TableCell>{row.source_dataset ?? "--"}</TableCell>
-                    <TableCell>{row.subset_tag ?? "--"}</TableCell>
+                    <TableCell>{row.candidate_reason ?? t("model.common.na")}</TableCell>
+                    <TableCell>{row.source_dataset ?? t("model.common.na")}</TableCell>
+                    <TableCell>{row.subset_tag ?? t("model.common.na")}</TableCell>
                   </TableRow>
                 ))}
                 {!hardCases.length && (
                   <TableRow>
                     <TableCell colSpan={4} className="text-center text-sm text-muted-foreground">
-                      Chưa có hard-case candidates
+                      {t("model.hardCase.noCandidates")}
                     </TableCell>
                   </TableRow>
                 )}
@@ -963,50 +963,47 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
         {/* MLOps & Reliability */}
         <Card className="bg-card p-8 mb-8 shadow-lg">
           <h2 className="text-2xl mb-6" style={{ color: "var(--primary)" }}>
-            MLOps & Độ Tin Cậy
+            {t("model.mlops.title")}
           </h2>
 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
             <div className="border rounded-lg p-5">
               <h4 className="mb-3" style={{ color: "var(--primary)" }}>
-                Model Versioning
+                {t("model.mlops.versioningTitle")}
               </h4>
               <p className="text-sm text-muted-foreground mb-3">
-                Tất cả các phiên bản mô hình được theo dõi và có thể rollback
+                {t("model.mlops.versioningDesc")}
               </p>
-              <Badge className="bg-background-info text-text-info">v1.2.0 (Current)</Badge>
+              <Badge className="bg-background-info text-text-info">{t("model.mlops.versionCurrent")}</Badge>
             </div>
 
             <div className="border rounded-lg p-5">
               <h4 className="mb-3" style={{ color: "var(--primary)" }}>
-                Experiment Tracking
+                {t("model.mlops.experimentTrackingTitle")}
               </h4>
               <p className="text-sm text-muted-foreground mb-3">
-                Sử dụng MLflow để theo dõi thí nghiệm và hyperparameters
+                {t("model.mlops.experimentTrackingDesc")}
               </p>
-              <Badge className="bg-background-success text-text-success">Active</Badge>
+              <Badge className="bg-background-success text-text-success">{t("model.mlops.statusActive")}</Badge>
             </div>
 
             <div className="border rounded-lg p-5">
               <h4 className="mb-3" style={{ color: "var(--primary)" }}>
-                Monitoring
+                {t("model.mlops.monitoringTitle")}
               </h4>
               <p className="text-sm text-muted-foreground mb-3">
-                Theo dõi performance và data drift trong production
+                {t("model.mlops.monitoringDesc")}
               </p>
-              <Badge className="bg-background-info text-text-info">Real-time</Badge>
+              <Badge className="bg-background-info text-text-info">{t("model.mlops.statusRealtime")}</Badge>
             </div>
           </div>
 
           <div className="border-l-4 border-l-primary p-5 rounded bg-background-info/40">
             <h4 className="mb-2" style={{ color: "var(--primary)" }}>
-              ⚠️ Disclaimer - Lưu Ý Quan Trọng
+              {t("model.disclaimer.title")}
             </h4>
             <p className="text-foreground">
-              Kết quả dự đoán từ mô hình AI mang tính <strong>hỗ trợ và tham khảo</strong>, 
-              không thay thế được đánh giá và phán đoán của con người. Hệ thống có thể mắc lỗi 
-              và không nên được sử dụng làm căn cứ duy nhất cho các quyết định quan trọng. 
-              Luôn kết hợp với kiểm chứng thủ công và suy nghĩ phản biện.
+              {t("model.disclaimer.text")}
             </p>
           </div>
         </Card>
@@ -1015,17 +1012,17 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
         <div className="text-center">
           <div className="inline-block bg-card rounded-2xl shadow-lg p-8">
             <h3 className="text-2xl mb-4" style={{ color: "var(--primary)" }}>
-              Sẵn Sàng Thử Nghiệm?
+              {t("model.cta.title")}
             </h3>
             <p className="text-muted-foreground mb-6 max-w-md">
-              Phân tích nội dung web của bạn ngay với mô hình PhoBERT
+              {t("model.cta.subtitle")}
             </p>
             <Button
               onClick={onTryNow}
               className="h-12 px-8"
               style={{ backgroundColor: "var(--primary)" }}
             >
-              Thử Phân Tích URL Ngay
+              {t("model.cta.button")}
               <ArrowRight className="w-5 h-5 ml-2" />
             </Button>
           </div>

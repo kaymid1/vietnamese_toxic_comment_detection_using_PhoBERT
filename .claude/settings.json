@@ -3,7 +3,11 @@
     "allow": [
       "mcp__stitch__edit_screens",
       "Bash(npm run:*)",
-      "Bash(python3 -m py_compile \"/Users/mac/git/Thesis/backend/app.py\" \"/Users/mac/git/Thesis/setup_and_crawl.py\")"
+      "Bash(python3 -m py_compile \"/Users/mac/git/Thesis/backend/app.py\" \"/Users/mac/git/Thesis/setup_and_crawl.py\")",
+      "Bash(python3 -m py_compile \"/Users/mac/git/Thesis/scripts/02_preprocess.py\" \"/Users/mac/git/Thesis/scripts/02a_build_protocol_datasets.py\")",
+      "Bash(python3 \"/Users/mac/git/Thesis/scripts/02_preprocess.py\" --leakage-gate warn)",
+      "Bash(python3 \"/Users/mac/git/Thesis/scripts/02a_build_protocol_datasets.py\" --protocols a --protocol-a-mode leakage_safe)",
+      "Bash(python3 -m py_compile \"/Users/mac/git/Thesis/scripts/02a_build_protocol_datasets.py\")"
     ]
   }
 }

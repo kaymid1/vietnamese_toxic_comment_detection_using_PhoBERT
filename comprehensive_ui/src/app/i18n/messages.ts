@@ -113,6 +113,87 @@ export const messages = {
       contactLine: "Liên hệ:",
       joinDiscord: "Tham gia Discord",
     },
+    dataset: {
+      hero: { title: "Dataset & Phân tích", subtitle: "Khám phá dữ liệu huấn luyện, so sánh nguồn và kiểm tra chất lượng nhãn." },
+      analysis: { title: "Phân tích dataset", subtitle: "Tổng quan thành phần dữ liệu, mức cân bằng nhãn và ghi chú phương pháp." },
+      tabs: { overview: "Tổng quan", compare: "So sánh nguồn", annotation: "Annotation", limitation: "Giới hạn", definition: "Định nghĩa" },
+      common: { unknown: "Không xác định", total: "Tổng", yes: "Có", no: "Không", na: "N/A", noData: "Không có dữ liệu" },
+      status: {
+        cannotLoadDataset: "Không thể tải dataset",
+        exportedRowsToPath: "Đã export {count} dòng vào {path}",
+        exportFailed: "Export thất bại",
+        confirmDeleteFeedback: "Xoá {count} feedback đã chọn?",
+        deletedFeedbackCount: "Đã xoá {count} feedback.",
+        deleteFeedbackFailed: "Xoá feedback thất bại",
+        deleting: "Đang xoá...",
+        loading: "Đang tải...",
+      },
+      actions: { refresh: "Làm mới", exportJsonl: "Export JSONL", deleteFeedbackCount: "Xoá feedback ({count})" },
+      filters: {
+        allSources: "Tất cả nguồn", all: "Tất cả", clean: "An toàn", toxic: "Độc hại", source: "Nguồn", label: "Nhãn", split: "Split", pageSize: "Kích thước trang", train: "Train", validation: "Validation", test: "Test", feedback: "Feedback",
+      },
+      overview: {
+        title: "Tổng quan dữ liệu", currentFilterStats: "Thống kê theo bộ lọc hiện tại", mergedDatasets: "{count} nguồn dữ liệu đã gộp", balanced: "Tương đối cân bằng", imbalanced: "Mất cân bằng", dominantClassWarning: "Lớp {label} đang chiếm ưu thế ({percent}).", distributionAfterMerge: "Phân phối sau khi merge", totalSamples: "Tổng mẫu", sourcesSummary: "Theo tất cả nguồn", cleanNonToxic: "Clean / Non-toxic", percentOfDataset: "Chiếm {percent} dataset", imbalanceRatio: "Tỷ lệ mất cân bằng", cleanToxicCurrent: "Clean:Toxic hiện tại", contributionBySource: "Đóng góp theo nguồn", resultLabel: "Kết luận:", dynamicRenderNote: "Các chỉ số được render động từ API preview.", page: "Trang", crossTab: "Bảng chéo theo nguồn",
+      },
+      compare: {
+        datasetCharacteristics: "Đặc điểm từng nguồn", similaritiesReason: "Điểm tương đồng & lý do merge", empiricalEvidence: "Bằng chứng thực nghiệm", differencesAcknowledged: "Khác biệt cần thừa nhận", victsdBadge: "ViCTSD", victsdTitle: "UIT-ViCTSD (2021)", vihsdBadge: "ViHSD", vihsdTitle: "UIT-ViHSD (2021)",
+        fields: { source: "Nguồn", originalSize: "Kích thước gốc", labelSchema: "Label schema", binarizedTo: "Binarize thành", originalToxic: "Toxic gốc", textLength: "Độ dài text", style: "Phong cách", paper: "Paper", take: "Bạn lấy", samplesUsed: "Samples dùng" },
+        victsd: { source: "YouTube comments trên video tin tức VN", originalSize: "10,000 comments", labelSchema: "Toxic / Constructive / Neutral", binarizedTo: "Toxic vs Non-toxic", originalToxic: "~10.8% (heavily imbalanced)", textLength: "Dài hơn, có ngữ cảnh tranh luận", style: "Informal, comment phản hồi video", note: "10 domains: chính trị, thể thao, giải trí, kinh tế, sức khỏe... — đa dạng chủ đề." },
+        vihsd: { source: "Facebook posts + comments", originalSize: "33,400 comments", labelSchema: "CLEAN / OFFENSIVE / HATE", take: "Chỉ OFFENSIVE → map sang Toxic", samplesUsed: "2,260 OFFENSIVE samples", textLength: "Ngắn hơn, nhiều viết tắt, emoji", style: "Informal, status/comment Facebook", note: "Comments chứa nhiều teencode, viết tắt (M.n, mik, Dm), slang — cần xử lý tiền xử lý riêng." },
+        similarity1Title: "Cùng domain", similarity1Desc: "Cả hai đều là social media informal Vietnamese text — domain shift nhỏ.", similarity2Title: "Cùng nguồn gốc", similarity2Desc: "Cả hai do UIT NLP Group xây dựng với quy trình annotation chuẩn.", similarity3Title: "Ngữ nghĩa gần nhau", similarity3Desc: "OFFENSIVE ≈ Toxic về mức độ xúc phạm, phù hợp mapping 1-1.",
+        evidenceScoreTitle: "Mean toxic_score (ViCTSD-trained model)", evidenceOffensive: "Offensive (label=1)", evidenceHate: "Hate (label=2)", evidenceHateValue: "N/A (không có trong merged binary set)", evidenceClean: "Clean (label=0)", evidenceConclusion: "Khoảng cách điểm rất rõ giữa Offensive và Clean (0.8726 vs 0.1285), cho thấy mapping OFFENSIVE → Toxic có tính nhất quán thực nghiệm. Theo rule mean > 0.6, quyết định merge là hợp lý.", distributionTitle: "Distribution toxic_score", distributionAlt: "Phân phối toxic score cho clean, offensive và hate", distributionDesc: "Phân phối cho thấy cụm Offensive tập trung ở vùng điểm cao, còn Clean tập trung ở vùng thấp. Điều này củng cố thêm cơ sở empirical để merge ViHSD Offensive vào lớp Toxic.", toxicShareTitle: "74.9% toxic samples đến từ ViHSD OFFENSIVE", toxicShareDesc: "(2,260/3,019). Model đang học toxic từ nguồn nào nhiều hơn? → ViCTSD cung cấp label schema và negative examples; ViHSD cung cấp positive examples để cân bằng class — cả hai cùng định hình decision boundary.",
+      },
+      annotation: {
+        consistencyMock: "Độ nhất quán annotation", consistencyTitle: "Annotation consistency", consistencyDesc: "= mức độ đồng thuận giữa các annotator khi label cùng một câu text. Đo bằng Cohen's Kappa (κ) hoặc Fleiss' Kappa.", kappa1: "κ = 0.0–0.2 → Gần như ngẫu nhiên", kappa2: "κ = 0.2–0.4 → Yếu", kappa3: "κ = 0.4–0.6 → Trung bình (acceptable)", kappa4: "κ = 0.6–0.8 → Tốt", whyOffensiveToToxic: "Vì sao OFFENSIVE được map sang Toxic", offensiveBadge: "OFFENSIVE → Toxic ✓", hateBadge: "HATE → Loại ✗",
+        fields: { definition: "Định nghĩa", overlap: "Overlap", annotationBoundary: "Annotation boundary", labelNoise: "Label noise khi merge", characteristics: "Đặc điểm" },
+        offensive: { definition: "Ngôn ngữ xúc phạm cá nhân, thô tục", overlap: "Cao với Toxic trong ViCTSD", annotationBoundary: "Tương đối rõ ràng, consistent", labelNoise: "Thấp", note: "Phù hợp để bổ sung positive examples cho bài toán toxic detection." },
+        hate: { definition: "Kích động thù địch nhắm nhóm người", characteristics: "Nhắm ethnicity, religion, gender...", annotationBoundary: "Khác guideline so với ViCTSD", labelNoise: "Cao — concept khác nhau", note: "Thêm HATE gây label noise: annotator ViCTSD không train theo tiêu chí này." },
+        faq: "FAQ", q1: "Annotation boundary giữa OFFENSIVE và Toxic có consistent không?", a1: "Không hoàn toàn identical — đây là limitation được thừa nhận. Tuy nhiên cả hai đều do UIT NLP Group xây dựng, cùng hướng đến toxic/offensive content trên social media VN. Semantic overlap đủ cao để merge có ý nghĩa. Rủi ro label noise nhỏ được chấp nhận đổi lại việc cải thiện class balance đáng kể từ 8.2:1 xuống 2.1:1.", q2: "Vì sao không merge CLEAN của ViHSD vào Non-toxic?", a2: "ViCTSD đã có đủ non-toxic samples (6,241 samples — 89.2%). Thêm CLEAN từ ViHSD sẽ khiến imbalance tệ hơn theo hướng ngược lại. Mục tiêu là cân bằng class, không phải tối đa hóa data.",
+      },
+      limitation: {
+        title: "Giới hạn nghiên cứu", l1Title: "Annotation guideline không hoàn toàn identical", l1Desc: "ViCTSD và ViHSD được xây dựng bởi hai nhóm khác nhau với guideline riêng. OFFENSIVE trong ViHSD và Toxic trong ViCTSD overlap về ngữ nghĩa nhưng ranh giới không được định nghĩa thống nhất. Dẫn đến một lượng nhỏ label noise trong merged dataset.", l2Title: "74.9% toxic samples đến từ ViHSD", l2Desc: "Model học toxic chủ yếu từ Facebook data (ViHSD OFFENSIVE: 2,260/3,019 toxic samples). Điều này có thể khiến model nhạy hơn với style toxic của Facebook so với YouTube.", l3Title: "Toàn bộ dataset là social media text — bias với formal domain", l3Desc: "Cả ViCTSD (YouTube) và ViHSD (Facebook) đều là informal text. Model không có negative examples từ formal domain (báo chí, văn bản hành chính) → false positive cao khi inference trên news website. Đây là vấn đề cốt lõi dẫn đến việc phải implement domain-aware thresholding.", l4Title: "Imbalance vẫn còn (2.1:1)", l4Desc: "Sau khi merge, ratio Clean:Toxic là 2.1:1 — cải thiện đáng kể từ 8.2:1 nhưng vẫn chưa balanced hoàn toàn. Model vẫn có xu hướng predict Non-toxic nhiều hơn, đặc biệt với các trường hợp borderline.", l5Title: "Temporal & domain coverage hạn chế", l5Desc: "Cả hai dataset được thu thập trước 2021 — slang, cách viết tắt, và hình thức toxic mới (teencodes mới, emoji-based toxicity) có thể chưa được cover. New_collected (9 samples) quá nhỏ để bù đắp.", tipTitle: "Mẹo bảo vệ:", tipDesc: "Chủ động nêu L3 và L4 trước — đây là những limitation bạn đã nhận ra và đã có giải pháp (domain-aware thresholding). Hội đồng sẽ đánh giá cao việc bạn không né tránh mà đối mặt trực tiếp với limitation của mình.",
+      },
+      definition: {
+        title: "Định nghĩa nhãn", p1Prefix: "Trong nghiên cứu này, “toxic” được định nghĩa theo nhãn ", p1Label: "Toxicity", p1Mid: " gốc của ViCTSD. Label nhị phân được giữ nguyên: ", p1Clean: "0 = non-toxic/clean", p1Toxic: "1 = toxic", p2Prefix: "Không gộp thêm các mức độ khác hay tiêu chí ", p2Constructiveness: "Constructiveness", p2Suffix: " để đảm bảo tính nhất quán với annotation guideline gốc của dataset và tránh thay đổi semantics nhãn trong quá trình tiền xử lý.",
+      },
+      table: { select: "Chọn", text: "Nội dung", augmented: "Augmented", created: "Thời gian tạo" },
+    },
+    model: {
+      common: { noMetrics: "Không có số liệu", na: "N/A", baseline: "Baseline", yes: "Có", no: "Không", all: "Tất cả", lastUpdated: "Cập nhật: {value}" },
+      status: { cannotLoadRegistry: "Không thể tải experiment registry" },
+      hero: { title: "Mô hình & Hiệu năng", subtitle: "Theo dõi pipeline tiền xử lý, chỉ số huấn luyện và phân tích lỗi để cải thiện hệ thống." },
+      about: {
+        title: "Tổng quan mô hình", description: "Mô hình hiện tại tập trung phát hiện toxicity tiếng Việt trong ngữ cảnh social media.", preprocessTitle: "Tiền xử lý", preprocessDesc: "Giữ pipeline tối giản để bảo toàn tín hiệu ngôn ngữ tự nhiên.", keepCaseTitle: "Giữ nguyên case", keepCaseDesc: "Không ép lowercase để tránh mất ngữ nghĩa trong một số trường hợp.", datasetTitle: "Nguồn dữ liệu", datasetDesc: "Huấn luyện trên tập merge ViCTSD + ViHSD OFFENSIVE.", transferTitle: "Khả năng tổng quát", transferDesc: "Đánh giá liên tục qua hard cases và phản hồi thực tế.",
+      },
+      registry: {
+        title: "Experiment Registry", subtitle: "Danh sách run gần nhất và checkpoint tương ứng.", refresh: "Làm mới", baselineLabel: "Baseline: {name}", dataset: "Dataset: {value}", checkpoint: "Checkpoint: {value}", noExperiments: "Chưa có run nào.", table: { runId: "Run ID", model: "Model", dataset: "Dataset", created: "Thời gian" },
+      },
+      pipeline: {
+        title: "Pipeline tiền xử lý", subtitle: "Minh hoạ input/output theo các bước đang active.", demoExample1: "   Trời ơi!!!   Đẹp vãi 😡😡   ", demoExample2: "k\t có   j đâu\n mà ồn ào...", demoExample3: "Giỏi quá ha,   chắc chưa? 😏   ", inputWhitespace: "Input (hiển thị khoảng trắng)", outputWhitespaceAfterSteps: "Output sau {count} bước active", steps: "Danh sách bước", active: "Active", plannedNotActive: "Planned (chưa bật)", whyOnlyThreeActive: "Vì sao chỉ bật 3 bước?", reason1: "Giữ văn bản gần dữ liệu thật khi deploy giúp giảm lệch phân phối.", reason2: "Emoji và dấu câu có thể mang tín hiệu toxicity/sarcasm nên chưa loại bỏ.", reason3: "Tránh over-cleaning để không mất thông tin ngữ nghĩa quan trọng.", reason4: "Teencode normalization để planned vì mapping dễ sai ngữ cảnh.", reason5: "Baseline ưu tiên các bước an toàn: trim + Unicode NFC + chuẩn hoá khoảng trắng.", stepTrim: "Loại bỏ khoảng trắng đầu/cuối", stepUnicode: "Chuẩn hoá Unicode (NFC)", stepWhitespace: "Chuẩn hoá khoảng trắng", stepLowercase: "Chuyển lowercase", stepEmoji: "Xử lý emoji", stepPunctuation: "Loại bỏ dấu câu mạnh", stepTeencode: "Chuẩn hoá teencode",
+      },
+      metrics: {
+        title: "Chỉ số hiệu năng", qualityByRegistry: "Tổng hợp chất lượng theo run baseline hiện tại.", macroF1: "Macro F1", avgF1AllClasses: "Trung bình F1 trên tất cả lớp", precision: "Precision", precisionDesc: "Tỷ lệ dự đoán toxic đúng trên tổng dự đoán toxic", recall: "Recall", recallDesc: "Tỷ lệ phát hiện toxic đúng trên tổng mẫu toxic thật", detailsTitle: "Bảng chỉ số chi tiết", metric: "Metric", f1: "F1", f1Score: "F1 Score", accuracy: "Accuracy",
+      },
+      comparison: { title: "So sánh giữa các model", subtitle: "Macro F1 và Toxic F1 theo từng run.", macroF1: "Macro F1", toxicClassF1: "Toxic Class F1" },
+      evaluation: {
+        title: "Chính sách đánh giá", subtitle: "Theo dõi split, test set cố định và hard-case subsets.", viewDetails: "Xem chi tiết", description: "Thông tin policy hiện tại dùng cho đánh giá mô hình.", splitRatio: "Tỉ lệ split", train: "Train", val: "Val", test: "Test", fixedTestSet: "Test set cố định", since: "từ {value}", hardCaseSubsets: "Hard-case subsets", evaluated: "Đã đánh giá", notApplied: "Chưa áp dụng", notes: "Ghi chú",
+      },
+      training: {
+        title: "Biểu đồ huấn luyện", trainingLoss: "Training / Validation Loss", epoch: "Epoch", loss: "Loss", validationLoss: "Validation Loss", lossTrend: "Loss giảm dần theo epoch", validationF1: "Validation F1", f1Score: "F1 Score", macroF1: "Macro F1", f1Trend: "F1 tăng dần theo epoch",
+      },
+      error: {
+        title: "Phân tích lỗi", subtitle: "Theo dõi false positives/negatives và lọc theo nguồn.", falsePositives: "False Positives", falseNegatives: "False Negatives", mismatchType: "Loại mismatch", falsePositive: "False Positive", falseNegative: "False Negative", sourceDataset: "Nguồn dataset", subsetTag: "Subset tag", true: "Nhãn thật", pred: "Nhãn dự đoán", confidence: "Độ tin cậy", noRows: "Không có dòng nào phù hợp bộ lọc.",
+      },
+      hardCase: {
+        title: "Phase 1 — Heuristic Candidates", subtitle: "Các mẫu khó cần ưu tiên review thủ công.", exportForAnnotation: "Export để annotation", candidateCount: "Số lượng candidate", breakdownByReason: "Phân loại theo lý do", reason: "Lý do", noCandidates: "Không có hard-case candidates.",
+      },
+      mlops: {
+        title: "MLOps & Độ tin cậy", versioningTitle: "Versioning", versioningDesc: "Quản lý phiên bản model và cấu hình inference.", versionCurrent: "Phiên bản hiện tại", experimentTrackingTitle: "Experiment tracking", experimentTrackingDesc: "Sử dụng MLflow để theo dõi thí nghiệm và hyperparameters.", monitoringTitle: "Monitoring", monitoringDesc: "Theo dõi performance và data drift trong production.", statusActive: "Đang hoạt động", statusRealtime: "Theo thời gian thực",
+      },
+      disclaimer: { title: "Lưu ý quan trọng", text: "Kết quả dự đoán từ mô hình AI mang tính hỗ trợ và tham khảo, không thay thế đánh giá của con người. Hệ thống có thể mắc lỗi và không nên được dùng làm căn cứ duy nhất cho các quyết định quan trọng. Luôn kết hợp kiểm chứng thủ công và tư duy phản biện." },
+      cta: { title: "Sẵn sàng thử nghiệm?", subtitle: "Phân tích nội dung web của bạn ngay với mô hình PhoBERT.", button: "Thử phân tích URL ngay" },
+      table: { text: "Nội dung", source: "Nguồn", subset: "Subset" },
+    },
     synthetic: {
       title: "Sinh dữ liệu tổng hợp",
       subtitle: "Sinh dữ liệu mới và review trước khi export.",
@@ -307,6 +388,87 @@ export const messages = {
       c4: "Integration into social media platforms",
       contactLine: "Contact:",
       joinDiscord: "Join Discord",
+    },
+    dataset: {
+      hero: { title: "Dataset & Analysis", subtitle: "Explore training data, compare sources, and inspect label quality." },
+      analysis: { title: "Dataset analysis", subtitle: "Overview of data composition, class balance, and methodology notes." },
+      tabs: { overview: "Overview", compare: "Source comparison", annotation: "Annotation", limitation: "Limitations", definition: "Definition" },
+      common: { unknown: "Unknown", total: "Total", yes: "Yes", no: "No", na: "N/A", noData: "No data" },
+      status: {
+        cannotLoadDataset: "Unable to load dataset",
+        exportedRowsToPath: "Exported {count} rows to {path}",
+        exportFailed: "Export failed",
+        confirmDeleteFeedback: "Delete {count} selected feedback rows?",
+        deletedFeedbackCount: "Deleted {count} feedback rows.",
+        deleteFeedbackFailed: "Failed to delete feedback",
+        deleting: "Deleting...",
+        loading: "Loading...",
+      },
+      actions: { refresh: "Refresh", exportJsonl: "Export JSONL", deleteFeedbackCount: "Delete feedback ({count})" },
+      filters: {
+        allSources: "All sources", all: "All", clean: "Clean", toxic: "Toxic", source: "Source", label: "Label", split: "Split", pageSize: "Page size", train: "Train", validation: "Validation", test: "Test", feedback: "Feedback",
+      },
+      overview: {
+        title: "Dataset overview", currentFilterStats: "Statistics for current filters", mergedDatasets: "{count} merged data sources", balanced: "Relatively balanced", imbalanced: "Imbalanced", dominantClassWarning: "Class {label} is dominant ({percent}).", distributionAfterMerge: "Distribution after merge", totalSamples: "Total samples", sourcesSummary: "Across all sources", cleanNonToxic: "Clean / Non-toxic", percentOfDataset: "{percent} of dataset", imbalanceRatio: "Imbalance ratio", cleanToxicCurrent: "Current Clean:Toxic", contributionBySource: "Contribution by source", resultLabel: "Result:", dynamicRenderNote: "Metrics are dynamically rendered from the preview API.", page: "Page", crossTab: "Cross-tab by source",
+      },
+      compare: {
+        datasetCharacteristics: "Source characteristics", similaritiesReason: "Similarities and merge rationale", empiricalEvidence: "Empirical evidence", differencesAcknowledged: "Acknowledged differences", victsdBadge: "ViCTSD", victsdTitle: "UIT-ViCTSD (2021)", vihsdBadge: "ViHSD", vihsdTitle: "UIT-ViHSD (2021)",
+        fields: { source: "Source", originalSize: "Original size", labelSchema: "Label schema", binarizedTo: "Binarized to", originalToxic: "Original toxic rate", textLength: "Text length", style: "Style", paper: "Paper", take: "Selected subset", samplesUsed: "Samples used" },
+        victsd: { source: "YouTube comments on Vietnamese news videos", originalSize: "10,000 comments", labelSchema: "Toxic / Constructive / Neutral", binarizedTo: "Toxic vs Non-toxic", originalToxic: "~10.8% (heavily imbalanced)", textLength: "Longer, more argumentative context", style: "Informal, video-comment replies", note: "10 domains: politics, sports, entertainment, economy, health... broad topical diversity." },
+        vihsd: { source: "Facebook posts + comments", originalSize: "33,400 comments", labelSchema: "CLEAN / OFFENSIVE / HATE", take: "OFFENSIVE only → mapped to Toxic", samplesUsed: "2,260 OFFENSIVE samples", textLength: "Shorter, more abbreviations and emoji", style: "Informal, Facebook status/comments", note: "Contains more teencode, abbreviations (M.n, mik, Dm), and slang — needs dedicated preprocessing." },
+        similarity1Title: "Same domain", similarity1Desc: "Both are informal Vietnamese social-media text — limited domain shift.", similarity2Title: "Same institution", similarity2Desc: "Both were created by UIT NLP Group with structured annotation workflows.", similarity3Title: "Close semantics", similarity3Desc: "OFFENSIVE ≈ Toxic in insult severity, suitable for 1-1 mapping.",
+        evidenceScoreTitle: "Mean toxic_score (ViCTSD-trained model)", evidenceOffensive: "Offensive (label=1)", evidenceHate: "Hate (label=2)", evidenceHateValue: "N/A (not included in merged binary set)", evidenceClean: "Clean (label=0)", evidenceConclusion: "The score gap is clear between Offensive and Clean (0.8726 vs 0.1285), supporting empirical consistency for OFFENSIVE → Toxic mapping. Under the mean > 0.6 rule, the merge decision is justified.", distributionTitle: "Distribution toxic_score", distributionAlt: "Distribution of toxic scores across clean, offensive, and hate groups", distributionDesc: "The distribution shows Offensive concentrated in high-score regions while Clean concentrates in low-score regions. This further supports empirically merging ViHSD Offensive into the Toxic class.", toxicShareTitle: "74.9% of toxic samples come from ViHSD OFFENSIVE", toxicShareDesc: "(2,260/3,019). Which source contributes most toxic signals? ViCTSD provides label schema and negative examples; ViHSD provides positive examples to rebalance classes — both shape the decision boundary.",
+      },
+      annotation: {
+        consistencyMock: "Annotation consistency", consistencyTitle: "Annotation consistency", consistencyDesc: "= annotator agreement when labeling the same sentence. Measured with Cohen's Kappa (κ) or Fleiss' Kappa.", kappa1: "κ = 0.0–0.2 → Almost random", kappa2: "κ = 0.2–0.4 → Weak", kappa3: "κ = 0.4–0.6 → Moderate (acceptable)", kappa4: "κ = 0.6–0.8 → Good", whyOffensiveToToxic: "Why OFFENSIVE is mapped to Toxic", offensiveBadge: "OFFENSIVE → Toxic ✓", hateBadge: "HATE → Excluded ✗",
+        fields: { definition: "Definition", overlap: "Overlap", annotationBoundary: "Annotation boundary", labelNoise: "Label noise when merging", characteristics: "Characteristics" },
+        offensive: { definition: "Personal insults and vulgar language", overlap: "High overlap with ViCTSD Toxic", annotationBoundary: "Relatively clear and consistent", labelNoise: "Low", note: "Suitable for adding positive examples to toxic detection." },
+        hate: { definition: "Hostility targeting social groups", characteristics: "Targets ethnicity, religion, gender...", annotationBoundary: "Different guideline boundary than ViCTSD", labelNoise: "High — different concept", note: "Including HATE increases label noise because ViCTSD annotators were not trained for that criterion." },
+        faq: "FAQ", q1: "Is the annotation boundary between OFFENSIVE and Toxic consistent?", a1: "Not fully identical — this limitation is explicitly acknowledged. However, both datasets were built by UIT NLP Group and target toxic/offensive Vietnamese social-media content. Semantic overlap is high enough for a meaningful merge. Small label-noise risk is accepted in exchange for significant class-balance improvement from 8.2:1 to 2.1:1.", q2: "Why not merge ViHSD CLEAN into Non-toxic?", a2: "ViCTSD already has enough non-toxic samples (6,241 samples — 89.2%). Adding ViHSD CLEAN would worsen imbalance in the opposite direction. The goal is class balance, not maximizing raw data volume.",
+      },
+      limitation: {
+        title: "Research limitations", l1Title: "Annotation guidelines are not fully identical", l1Desc: "ViCTSD and ViHSD were created by different teams with separate guidelines. OFFENSIVE in ViHSD and Toxic in ViCTSD overlap semantically, but boundaries are not identically defined. This introduces a small amount of label noise in the merged dataset.", l2Title: "74.9% of toxic samples come from ViHSD", l2Desc: "The model learns toxic patterns mainly from Facebook data (ViHSD OFFENSIVE: 2,260/3,019 toxic samples). This can make the model more sensitive to Facebook-style toxicity than YouTube-style toxicity.", l3Title: "Entire dataset is social-media text — bias for formal domains", l3Desc: "Both ViCTSD (YouTube) and ViHSD (Facebook) are informal text. The model lacks negative examples from formal domains (news, administrative text), leading to higher false positives on news websites. This is a core reason domain-aware thresholding is required.", l4Title: "Imbalance still exists (2.1:1)", l4Desc: "After merging, Clean:Toxic is 2.1:1 — much better than 8.2:1 but still not fully balanced. The model may still over-predict Non-toxic, especially on borderline cases.", l5Title: "Limited temporal and domain coverage", l5Desc: "Both datasets were collected before 2021 — newer slang, abbreviations, and toxicity forms (new teencode, emoji-based toxicity) may be under-covered. New_collected (9 samples) is too small to compensate.", tipTitle: "Defense tip:", tipDesc: "Proactively present L3 and L4 first — these are limitations you already identified and addressed with domain-aware thresholding. Reviewers will value direct, transparent handling of limitations.",
+      },
+      definition: {
+        title: "Label definition", p1Prefix: "In this work, “toxic” is defined according to the original ViCTSD ", p1Label: "Toxicity", p1Mid: " label. Binary labels are kept as: ", p1Clean: "0 = non-toxic/clean", p1Toxic: "1 = toxic", p2Prefix: "No additional levels or ", p2Constructiveness: "Constructiveness", p2Suffix: " criteria are merged, to preserve consistency with the dataset's original annotation guideline and avoid semantic drift during preprocessing.",
+      },
+      table: { select: "Select", text: "Text", augmented: "Augmented", created: "Created at" },
+    },
+    model: {
+      common: { noMetrics: "No metrics", na: "N/A", baseline: "Baseline", yes: "Yes", no: "No", all: "All", lastUpdated: "Last updated: {value}" },
+      status: { cannotLoadRegistry: "Unable to load experiment registry" },
+      hero: { title: "Model & Performance", subtitle: "Track preprocessing, training metrics, and error analysis to improve the system." },
+      about: {
+        title: "Model overview", description: "The current model focuses on Vietnamese toxicity detection in social-media contexts.", preprocessTitle: "Preprocessing", preprocessDesc: "Keep the pipeline minimal to preserve natural language signals.", keepCaseTitle: "Preserve casing", keepCaseDesc: "Do not force lowercase to avoid losing semantic cues in some cases.", datasetTitle: "Data source", datasetDesc: "Trained on merged ViCTSD + ViHSD OFFENSIVE.", transferTitle: "Generalization", transferDesc: "Continuously evaluated through hard cases and real-world feedback.",
+      },
+      registry: {
+        title: "Experiment Registry", subtitle: "Recent runs and their corresponding checkpoints.", refresh: "Refresh", baselineLabel: "Baseline: {name}", dataset: "Dataset: {value}", checkpoint: "Checkpoint: {value}", noExperiments: "No runs yet.", table: { runId: "Run ID", model: "Model", dataset: "Dataset", created: "Created" },
+      },
+      pipeline: {
+        title: "Preprocessing pipeline", subtitle: "Input/output demo for currently active steps.", demoExample1: "   OMG!!!   So beautiful 😡😡   ", demoExample2: "k\t no big deal\n why so loud...", demoExample3: "Wow,   really sure? 😏   ", inputWhitespace: "Input (visible whitespace)", outputWhitespaceAfterSteps: "Output after {count} active steps", steps: "Steps", active: "Active", plannedNotActive: "Planned (not active)", whyOnlyThreeActive: "Why only 3 active steps?", reason1: "Keeping text close to production data reduces distribution shift.", reason2: "Emoji and punctuation can carry toxicity/sarcasm signals, so they are preserved.", reason3: "Avoid over-cleaning to retain important semantic information.", reason4: "Teencode normalization remains planned because mappings can be context-sensitive.", reason5: "Baseline prioritizes safe steps: trim + Unicode NFC + whitespace normalization.", stepTrim: "Trim leading/trailing whitespace", stepUnicode: "Normalize Unicode (NFC)", stepWhitespace: "Normalize whitespace", stepLowercase: "Lowercase conversion", stepEmoji: "Emoji handling", stepPunctuation: "Remove strong punctuation", stepTeencode: "Normalize teencode",
+      },
+      metrics: {
+        title: "Performance metrics", qualityByRegistry: "Quality summary from the current baseline run.", macroF1: "Macro F1", avgF1AllClasses: "Average F1 across all classes", precision: "Precision", precisionDesc: "Correct toxic predictions over all toxic predictions", recall: "Recall", recallDesc: "Correctly detected toxic samples over all truly toxic samples", detailsTitle: "Detailed metrics table", metric: "Metric", f1: "F1", f1Score: "F1 Score", accuracy: "Accuracy",
+      },
+      comparison: { title: "Model comparison", subtitle: "Macro F1 and Toxic F1 by run.", macroF1: "Macro F1", toxicClassF1: "Toxic Class F1" },
+      evaluation: {
+        title: "Evaluation policy", subtitle: "Track split policy, fixed test set, and hard-case subsets.", viewDetails: "View details", description: "Current policy information used for model evaluation.", splitRatio: "Split ratio", train: "Train", val: "Val", test: "Test", fixedTestSet: "Fixed test set", since: "since {value}", hardCaseSubsets: "Hard-case subsets", evaluated: "Evaluated", notApplied: "Not applied", notes: "Notes",
+      },
+      training: {
+        title: "Training charts", trainingLoss: "Training / Validation Loss", epoch: "Epoch", loss: "Loss", validationLoss: "Validation Loss", lossTrend: "Loss decreases across epochs", validationF1: "Validation F1", f1Score: "F1 Score", macroF1: "Macro F1", f1Trend: "F1 increases across epochs",
+      },
+      error: {
+        title: "Error analysis", subtitle: "Track false positives/negatives and filter by source.", falsePositives: "False Positives", falseNegatives: "False Negatives", mismatchType: "Mismatch type", falsePositive: "False Positive", falseNegative: "False Negative", sourceDataset: "Source dataset", subsetTag: "Subset tag", true: "True", pred: "Pred", confidence: "Confidence", noRows: "No rows match current filters.",
+      },
+      hardCase: {
+        title: "Phase 1 — Heuristic Candidates", subtitle: "Difficult samples prioritized for manual review.", exportForAnnotation: "Export for annotation", candidateCount: "Candidate count", breakdownByReason: "Breakdown by reason", reason: "Reason", noCandidates: "No hard-case candidates.",
+      },
+      mlops: {
+        title: "MLOps & Reliability", versioningTitle: "Versioning", versioningDesc: "Manage model versions and inference configuration.", versionCurrent: "Current version", experimentTrackingTitle: "Experiment tracking", experimentTrackingDesc: "Use MLflow to track experiments and hyperparameters.", monitoringTitle: "Monitoring", monitoringDesc: "Track production performance and data drift.", statusActive: "Active", statusRealtime: "Real-time",
+      },
+      disclaimer: { title: "Important note", text: "Model predictions are assistive and for reference only; they do not replace human judgment. The system can make mistakes and should not be used as the sole basis for critical decisions. Always combine with manual verification and critical thinking." },
+      cta: { title: "Ready to try?", subtitle: "Analyze your web content now with the PhoBERT model.", button: "Try URL analysis now" },
+      table: { text: "Text", source: "Source", subset: "Subset" },
     },
     synthetic: {
       title: "Synthetic Dataset Generation",
