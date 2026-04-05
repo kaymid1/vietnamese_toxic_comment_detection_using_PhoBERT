@@ -49,6 +49,13 @@ interface PendingFallbackUrl {
   trafilatura_text_len?: number;
 }
 
+interface DomainThresholds {
+  news?: number;
+  social?: number;
+  forum?: number;
+  unknown?: number;
+}
+
 interface AnalyzeResponse {
   job_id: string;
   source_job_id?: string;
@@ -59,6 +66,7 @@ interface AnalyzeResponse {
     seg_threshold?: number;
     page_threshold?: number;
   };
+  thresholds_by_domain?: DomainThresholds;
   results?: ApiResult[];
 }
 
@@ -68,6 +76,7 @@ interface CompareModelResponse {
     seg_threshold?: number;
     page_threshold?: number;
   };
+  thresholds_by_domain?: DomainThresholds;
   results: ApiResult[];
 }
 
@@ -95,6 +104,7 @@ interface ScanHistoryItem {
   jobId: string | null;
   modelId: string | null;
   thresholds: AnalyzeResponse["thresholds"] | null;
+  thresholdsByDomain: DomainThresholds | null;
   result: ApiResult;
 }
 
@@ -172,8 +182,9 @@ const createHistoryEntries = (params: {
   jobId: string | null;
   modelId: string | null;
   thresholds: AnalyzeResponse["thresholds"] | null;
+  thresholdsByDomain: DomainThresholds | null;
 }): ScanHistoryItem[] => {
-  const { results, jobId, modelId, thresholds } = params;
+  const { results, jobId, modelId, thresholds, thresholdsByDomain } = params;
   const savedAt = new Date().toISOString();
   return results.map((result, index) => ({
     id: `${result.url_hash || result.url}-${modelId || "unknown"}-${Date.now()}-${index}`,
@@ -181,6 +192,7 @@ const createHistoryEntries = (params: {
     jobId,
     modelId,
     thresholds,
+    thresholdsByDomain,
     result,
   }));
 };
@@ -193,6 +205,7 @@ export default function App() {
   const [scanHistory, setScanHistory] = useState<ScanHistoryItem[]>([]);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [thresholds, setThresholds] = useState<AnalyzeResponse["thresholds"] | null>(null);
+  const [thresholdsByDomain, setThresholdsByDomain] = useState<DomainThresholds | null>(null);
   const [availableModels, setAvailableModels] = useState<string[]>([]);
   const [selectedModels, setSelectedModels] = useState<string[]>([]);
   const [compareModels, setCompareModels] = useState<Record<string, CompareModelResponse> | null>(null);
@@ -448,6 +461,7 @@ export default function App() {
         setActiveResultModel(firstModel);
         setAnalysisModelId(firstModel);
         setThresholds(selectedPayload?.thresholds || null);
+        setThresholdsByDomain(selectedPayload?.thresholds_by_domain || null);
         setAnalysisResults(selectedPayload?.results || []);
 
         const compareHistoryEntries = Object.entries(comparePayloads).flatMap(([modelKey, payload]) =>
@@ -456,6 +470,7 @@ export default function App() {
             jobId: data.job_id,
             modelId: modelKey,
             thresholds: payload?.thresholds || null,
+            thresholdsByDomain: payload?.thresholds_by_domain || null,
           }),
         );
         appendHistory(compareHistoryEntries);
@@ -500,6 +515,7 @@ export default function App() {
       setJobId(data.job_id);
       setAnalysisModelId(resolvedModel);
       setThresholds(data.thresholds || null);
+      setThresholdsByDomain(data.thresholds_by_domain || null);
       setAnalysisResults(data.results || []);
       appendHistory(
         createHistoryEntries({
@@ -507,6 +523,7 @@ export default function App() {
           jobId: data.job_id,
           modelId: resolvedModel,
           thresholds: data.thresholds || null,
+          thresholdsByDomain: data.thresholds_by_domain || null,
         }),
       );
       setCurrentPage("results");
@@ -524,6 +541,7 @@ export default function App() {
     setJobId(null);
     setAnalysisModelId(null);
     setThresholds(null);
+    setThresholdsByDomain(null);
     setCompareModels(null);
     setActiveResultModel(null);
   };
@@ -534,6 +552,7 @@ export default function App() {
     setActiveResultModel(modelName);
     setAnalysisModelId(modelName);
     setThresholds(payload.thresholds || null);
+    setThresholdsByDomain(payload.thresholds_by_domain || null);
     setAnalysisResults(payload.results || []);
   };
 
@@ -544,6 +563,7 @@ export default function App() {
     setJobId(item.jobId);
     setAnalysisModelId(item.modelId);
     setThresholds(item.thresholds);
+    setThresholdsByDomain(item.thresholdsByDomain || null);
     setAnalysisResults([item.result]);
   };
 
@@ -672,6 +692,7 @@ export default function App() {
           results={analysisResults}
           jobId={jobId}
           thresholds={thresholds}
+          thresholdsByDomain={thresholdsByDomain}
           modelId={analysisModelId}
           compareModelNames={compareModels ? Object.keys(compareModels) : []}
           activeResultModel={activeResultModel}
@@ -682,7 +703,12 @@ export default function App() {
         />
       )}
 
-      {currentPage === "dataset" && <DatasetPage datasetVersion={datasetVersion} />}
+      {currentPage === "dataset" && (
+        <DatasetPage
+          datasetVersion={datasetVersion}
+          onNavigateToProtocol={() => setCurrentPage("protocol")}
+        />
+      )}
 
       {currentPage === "dataset_synthetic" && (
         <SyntheticGenerationPage onBack={() => setCurrentPage("dataset")} />

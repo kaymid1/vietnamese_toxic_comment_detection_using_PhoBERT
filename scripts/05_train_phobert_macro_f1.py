@@ -8,13 +8,11 @@ Refactored to match the LoRA script data source + export layout.
 # -----------------------
 # !pip -q install -U transformers datasets scikit-learn torch accelerate
 
-import argparse
-import os, json, random, shutil, time, uuid
-from datetime import datetime, timezone
+import os, json, random, time, uuid
 import numpy as np
 import torch
 import torch.nn.functional as F
-from datasets import DatasetDict, concatenate_datasets, load_dataset
+from datasets import load_dataset
 from transformers import (
     AutoTokenizer,
     AutoModelForSequenceClassification,
@@ -36,11 +34,10 @@ from sklearn.metrics import (
 # -----------------------
 t0 = time.time()
 
-MLFLOW_ENABLED = os.environ.get("MLFLOW_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
-MLFLOW_TRACKING_URI = os.environ.get("MLFLOW_TRACKING_URI", "mlruns/")
-MLFLOW_EXPERIMENT_NAME = os.environ.get("MLFLOW_EXPERIMENT_NAME", "viettoxic-phobert-lora-macro-f1")
+ENABLE_MLFLOW = os.environ.get("ENABLE_MLFLOW", "0").strip().lower() in {"1", "true", "yes", "on"}
+MLFLOW_EXPERIMENT = os.environ.get("MLFLOW_EXPERIMENT", "viettoxic-self-learning-macro-f1")
 POLICY_VERSION = os.environ.get("POLICY_VERSION", "policy-v1")
-MODEL_VERSION = os.environ.get("MODEL_VERSION", "phobert/v2-macro-f1")
+MODEL_VERSION = os.environ.get("MODEL_VERSION", "phobert/baseline-macro-f1")
 RUN_TIMESTAMP = time.strftime("%Y%m%d_%H%M%S")
 RUN_SUFFIX = uuid.uuid4().hex[:8]
 RUN_ID = ""
@@ -64,23 +61,10 @@ os.environ["WANDB_DISABLED"] = "true"
 # ================================================================
 # Config — tune here
 # ================================================================
-parser = argparse.ArgumentParser(description="Train PhoBERT LoRA/full fine-tune with optional pseudo-label mixing")
-parser.add_argument("--dry-run", action="store_true", help="Validate inputs and print resolved config without training")
-args, _ = parser.parse_known_args()
-
 DATA_DIR = os.environ.get("DATA_DIR", "/content/drive/MyDrive/victsd_gold")
-DATASET_PREFIX = os.environ.get("DATASET_PREFIX", "").strip()
-DATASET_LAYOUT = os.environ.get("DATASET_LAYOUT", "auto").strip().lower()
-MODEL_NAME = os.environ.get("MODEL_NAME", "vinai/phobert-base-v2").strip()
+DATASET_PREFIX = os.environ.get("DATASET_PREFIX", "")
+MODEL_NAME = "vinai/phobert-base"
 MAX_LENGTH = 256
-
-PSEUDO_LABELS_DIR = os.environ.get("PSEUDO_LABELS_DIR", "").strip()
-PSEUDO_LOSS_WEIGHT = float(os.environ.get("PSEUDO_LOSS_WEIGHT", "0.3"))
-GOLD_DATA_DIR = os.environ.get("GOLD_DATA_DIR", "data/processed/victsd_gold")
-GOLD_DATASET_PREFIX = os.environ.get("GOLD_DATASET_PREFIX", "").strip()
-MAX_PSEUDO_RATIO = float(os.environ.get("MAX_PSEUDO_RATIO", "0.4"))
-RUN_MANIFEST_DIR = os.environ.get("RUN_MANIFEST_DIR", "experiments/retrain_runs/")
-MIXED_MODE = bool(PSEUDO_LABELS_DIR)
 
 BATCH_SIZE = 16
 GRAD_ACCUM = 2
@@ -102,24 +86,24 @@ TOXIC_WEIGHT_SCALE = 0.5
 SEED = int(os.environ.get("SEED", "42"))
 
 run_dataset_tag = DATASET_PREFIX if DATASET_PREFIX else "victsd_gold"
-RUN_ID = f"{run_dataset_tag}_{RUN_TIMESTAMP}_{RUN_SUFFIX}"
-OUTPUT_BASE_ENV = os.environ.get("OUTPUT_BASE", "").strip()
-OUTPUT_BASE = OUTPUT_BASE_ENV if OUTPUT_BASE_ENV else f"models/options/phobert/{RUN_ID}"
+OUTPUT_BASE = os.environ.get("OUTPUT_BASE", f"models/phobert/{run_dataset_tag}")
 RESULTS_BASE = os.environ.get("RESULTS_BASE", f"results/phobert/{run_dataset_tag}")
 
-if MLFLOW_ENABLED and not args.dry_run:
+RUN_ID = f"{run_dataset_tag}_{RUN_TIMESTAMP}_{RUN_SUFFIX}"
+
+if ENABLE_MLFLOW:
     try:
         import mlflow as _mlflow
 
         mlflow = _mlflow
-        mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
-        mlflow.set_experiment(MLFLOW_EXPERIMENT_NAME)
+        mlflow.set_experiment(MLFLOW_EXPERIMENT)
         mlflow.start_run(run_name=RUN_ID)
         mlflow_active = True
+        print(f"[MLflow] started run {RUN_ID} in experiment {MLFLOW_EXPERIMENT}", flush=True)
     except Exception as exc:
-        print(f"MLflow logging disabled: {exc}", flush=True)
+        print(f"[MLflow] disabled due to error: {exc}", flush=True)
 
-PRIMARY_METRIC = os.environ.get("PRIMARY_METRIC", "eval_macro_f1")
+PRIMARY_METRIC = os.environ.get("PRIMARY_METRIC", "macro_f1")
 
 THRESH_MIN  = 0.05
 THRESH_MAX  = 0.95
@@ -149,158 +133,39 @@ show_gpu()
 # ================================================================
 # Dataset
 # ================================================================
-if PSEUDO_LOSS_WEIGHT <= 0:
-    raise ValueError(f"PSEUDO_LOSS_WEIGHT must be > 0, got {PSEUDO_LOSS_WEIGHT}")
-if not (0.0 <= MAX_PSEUDO_RATIO < 1.0):
-    raise ValueError(f"MAX_PSEUDO_RATIO must be in [0, 1), got {MAX_PSEUDO_RATIO}")
-
 log("Checking dataset files...")
+split_names = ["train", "validation", "test"]
 
-pseudo_manifest = None
-pseudo_manifest_path = None
-if MIXED_MODE:
-    gold_files = {
-        split: (f"{GOLD_DATA_DIR}/{GOLD_DATASET_PREFIX}_{split}.jsonl" if GOLD_DATASET_PREFIX else f"{GOLD_DATA_DIR}/{split}.jsonl")
-        for split in ["train", "validation", "test"]
-    }
-    for split, path in gold_files.items():
-        assert os.path.exists(path), f"Missing gold {split} file: {path}"
-
-    pseudo_accepted_path = f"{PSEUDO_LABELS_DIR}/accepted.jsonl"
-    pseudo_manifest_path = f"{PSEUDO_LABELS_DIR}/manifest.json"
-    assert os.path.exists(pseudo_accepted_path), f"Missing pseudo labels file: {pseudo_accepted_path}"
-    assert os.path.exists(pseudo_manifest_path), f"Missing pseudo manifest file: {pseudo_manifest_path}"
-
-    with open(pseudo_manifest_path, "r", encoding="utf-8") as f:
-        pseudo_manifest = json.load(f)
-
-    assert pseudo_manifest.get("batch_id"), "Pseudo manifest missing batch_id"
-    assert pseudo_manifest.get("seed_model"), "Pseudo manifest missing seed_model"
-
-    log("Loading gold + pseudo datasets ...")
-    gold_dataset = load_dataset("json", data_files=gold_files)
-    pseudo_dataset = load_dataset("json", data_files={"train": pseudo_accepted_path})["train"]
-    if len(pseudo_dataset) == 0:
-        raise ValueError("Pseudo labels accepted.jsonl is empty")
-
-    pseudo_cols = pseudo_dataset.column_names
-    for col in ["text", "toxicity"]:
-        if col not in pseudo_cols:
-            raise ValueError(f"Pseudo labels missing required column: {col}")
-
-    keep_cols = ["text", "toxicity"]
-    gold_train_base = gold_dataset["train"].remove_columns([c for c in gold_dataset["train"].column_names if c not in keep_cols])
-    val_dataset = gold_dataset["validation"].remove_columns([c for c in gold_dataset["validation"].column_names if c not in keep_cols])
-    test_dataset = gold_dataset["test"].remove_columns([c for c in gold_dataset["test"].column_names if c not in keep_cols])
-    pseudo_base = pseudo_dataset.remove_columns([c for c in pseudo_dataset.column_names if c not in keep_cols])
-
-    gold_train = gold_train_base.add_column("is_pseudo", [0] * len(gold_train_base))
-    gold_train = gold_train.add_column("sample_weight", [1.0] * len(gold_train))
-
-    pseudo_train = pseudo_base.add_column("is_pseudo", [1] * len(pseudo_base))
-    pseudo_train = pseudo_train.add_column("sample_weight", [float(PSEUDO_LOSS_WEIGHT)] * len(pseudo_train))
-
-    train_dataset = concatenate_datasets([gold_train, pseudo_train])
-
-    dataset = DatasetDict({
-        "train": train_dataset,
-        "validation": val_dataset,
-        "test": test_dataset,
-    })
-
-    gold_data_dir_used = GOLD_DATA_DIR
-    gold_prefix_used = GOLD_DATASET_PREFIX
-    n_train_gold = len(gold_train)
-    n_train_pseudo = len(pseudo_train)
-else:
-    split_names = ["train", "validation", "test"]
-
-    def _resolve_split_paths(data_dir, dataset_prefix, layout):
-        resolved = {}
-        attempted = {}
-
-        for split in split_names:
-            if layout == "plain":
-                candidates = [
-                    os.path.join(data_dir, f"{split}.jsonl"),
-                    os.path.join(data_dir, f"{dataset_prefix}_{split}.jsonl") if dataset_prefix else None,
-                ]
-            elif layout == "augmented":
-                if not dataset_prefix:
-                    raise ValueError("DATASET_PREFIX is required when DATASET_LAYOUT=augmented")
-                candidates = [os.path.join(data_dir, f"{dataset_prefix}_{split}_augmented.jsonl")]
-            else:  # auto
-                candidates = [
-                    os.path.join(data_dir, f"{split}.jsonl"),
-                    os.path.join(data_dir, f"{dataset_prefix}_{split}.jsonl") if dataset_prefix else None,
-                    os.path.join(data_dir, f"{dataset_prefix}_{split}_augmented.jsonl") if dataset_prefix else None,
-                ]
-
-            candidates = [c for c in candidates if c]
-            attempted[split] = candidates
-            found = next((p for p in candidates if os.path.exists(p)), None)
-            if not found:
-                attempted_msg = " | ".join(candidates)
-                raise FileNotFoundError(f"Missing {split} file. Tried: {attempted_msg}")
-            resolved[split] = found
-
-        return resolved, attempted
-
-    dataset_files, _ = _resolve_split_paths(DATA_DIR, DATASET_PREFIX, DATASET_LAYOUT)
-
-    log("Loading dataset ...")
-    dataset = load_dataset("json", data_files=dataset_files)
-
-    keep_cols = ["text", "toxicity"]
+def _resolve_split_paths(data_dir, dataset_prefix):
+    resolved = {}
     for split in split_names:
-        dataset[split] = dataset[split].remove_columns([c for c in dataset[split].column_names if c not in keep_cols])
+        candidates = [
+            os.path.join(data_dir, f"{split}.jsonl"),
+            os.path.join(data_dir, f"{dataset_prefix}_{split}.jsonl") if dataset_prefix else None,
+            os.path.join(data_dir, f"{dataset_prefix}_{split}_augmented.jsonl") if dataset_prefix else None,
+        ]
+        candidates = [c for c in candidates if c]
+        found = next((p for p in candidates if os.path.exists(p)), None)
+        if not found:
+            attempted = " | ".join(candidates)
+            raise FileNotFoundError(f"Missing {split} file. Tried: {attempted}")
+        resolved[split] = found
+    return resolved
 
-    dataset["train"] = dataset["train"].add_column("is_pseudo", [0] * len(dataset["train"]))
-    dataset["train"] = dataset["train"].add_column("sample_weight", [1.0] * len(dataset["train"]))
+dataset_files = _resolve_split_paths(DATA_DIR, DATASET_PREFIX)
 
-    gold_data_dir_used = DATA_DIR
-    gold_prefix_used = DATASET_PREFIX
-    n_train_gold = len(dataset["train"])
-    n_train_pseudo = 0
+os.makedirs(f"{OUTPUT_BASE}/checkpoints", exist_ok=True)
+os.makedirs(f"{OUTPUT_BASE}/best", exist_ok=True)
+os.makedirs(RESULTS_BASE, exist_ok=True)
 
-for split in ["validation", "test"]:
-    if "is_pseudo" not in dataset[split].column_names:
-        dataset[split] = dataset[split].add_column("is_pseudo", [0] * len(dataset[split]))
-    if "sample_weight" not in dataset[split].column_names:
-        dataset[split] = dataset[split].add_column("sample_weight", [1.0] * len(dataset[split]))
+log("Loading dataset ...")
+dataset = load_dataset("json", data_files=dataset_files)
 
 raw_text = {
     split: dataset[split]["text"] if "text" in dataset[split].column_names else None
     for split in ["validation", "test"]
 }
-
 log(f"Sizes: train={len(dataset['train'])}, val={len(dataset['validation'])}, test={len(dataset['test'])}")
-log(f"Validation set: gold-only (n={len(dataset['validation'])} samples)")
-
-if args.dry_run:
-    log("Dry run mode enabled. Validating config and inputs only.")
-    log(
-        "Dry run config: "
-        f"mode={'mixed' if MIXED_MODE else 'gold_only'} | "
-        f"gold_data_dir={gold_data_dir_used} | gold_dataset_prefix={gold_prefix_used or '<none>'} | "
-        f"pseudo_dir={PSEUDO_LABELS_DIR or '<unset>'} | pseudo_loss_weight={PSEUDO_LOSS_WEIGHT} | "
-        f"max_pseudo_ratio={MAX_PSEUDO_RATIO} | run_manifest_dir={RUN_MANIFEST_DIR}"
-    )
-    if MIXED_MODE:
-        log(
-            "Dry run pseudo lineage: "
-            f"batch_id={pseudo_manifest.get('batch_id')} | seed_model={pseudo_manifest.get('seed_model')} | "
-            f"n_accepted_toxic={pseudo_manifest.get('n_accepted_toxic')} | "
-            f"n_accepted_clean={pseudo_manifest.get('n_accepted_clean')}"
-        )
-        observed_ratio = n_train_pseudo / max(1, len(dataset["train"]))
-        log(f"Dry run pseudo ratio (train): {observed_ratio:.4f} ({n_train_pseudo}/{len(dataset['train'])})")
-    raise SystemExit(0)
-
-os.makedirs(f"{OUTPUT_BASE}/checkpoints", exist_ok=True)
-os.makedirs(OUTPUT_BASE, exist_ok=True)
-os.makedirs(RESULTS_BASE, exist_ok=True)
-os.makedirs(RUN_MANIFEST_DIR, exist_ok=True)
 
 # ================================================================
 # Tokenizer
@@ -313,24 +178,13 @@ def tokenize_batch(examples):
 
 log("Tokenizing...")
 tokenized_dataset = dataset.map(tokenize_batch, batched=True)
+cols_to_remove = [c for c in ["text", "meta"] if c in tokenized_dataset["train"].column_names]
+if cols_to_remove:
+    tokenized_dataset = tokenized_dataset.remove_columns(cols_to_remove)
 if "toxicity" in tokenized_dataset["train"].column_names:
     tokenized_dataset = tokenized_dataset.rename_column("toxicity", "labels")
-
-allowed_feature_cols = {"input_ids", "attention_mask", "token_type_ids", "labels", "is_pseudo", "sample_weight"}
-remove_cols = [c for c in tokenized_dataset["train"].column_names if c not in allowed_feature_cols]
-if remove_cols:
-    tokenized_dataset = tokenized_dataset.remove_columns(remove_cols)
-
 tokenized_dataset.set_format("torch")
-base_data_collator = DataCollatorWithPadding(tokenizer=tokenizer, padding="longest")
-
-def data_collator(features):
-    sample_weight = torch.tensor([float(f.pop("sample_weight", 1.0)) for f in features], dtype=torch.float)
-    is_pseudo = torch.tensor([int(f.pop("is_pseudo", 0)) for f in features], dtype=torch.long)
-    batch = base_data_collator(features)
-    batch["sample_weight"] = sample_weight
-    batch["is_pseudo"] = is_pseudo
-    return batch
+data_collator = DataCollatorWithPadding(tokenizer=tokenizer, padding="longest")
 
 # ================================================================
 # Base model + dropout tweaks
@@ -361,112 +215,38 @@ log(f"Class weights (scaled): {class_weights.tolist()}  raw={raw_toxic_weight:.4
 # ================================================================
 # Custom trainer with weighted / focal loss
 # ================================================================
-def focal_loss(logits, labels, weight=None, gamma=2.0, reduction="mean"):
+def focal_loss(logits, labels, weight=None, gamma=2.0):
     logp  = F.log_softmax(logits, dim=-1)
     p     = torch.exp(logp)
     pt    = p.gather(1, labels.unsqueeze(1)).squeeze(1)
     logpt = logp.gather(1, labels.unsqueeze(1)).squeeze(1)
     at    = weight.to(logits.device).gather(0, labels) if weight is not None else 1.0
-    loss  = -at * (1 - pt) ** gamma * logpt
-    if reduction == "none":
-        return loss
-    return loss.mean()
+    return (-at * (1 - pt) ** gamma * logpt).mean()
 
 class WeightedTrainer(Trainer):
     def __init__(self, *args, class_weights=None, label_smoothing=0.0,
-                 use_focal=False, focal_gamma=2.0, max_pseudo_ratio=1.0, **kwargs):
+                 use_focal=False, focal_gamma=2.0, **kwargs):
         super().__init__(*args, **kwargs)
         self.class_weights   = class_weights
         self.label_smoothing = float(label_smoothing or 0.0)
         self.use_focal       = bool(use_focal)
         self.focal_gamma     = float(focal_gamma)
-        self.max_pseudo_ratio = float(max_pseudo_ratio)
-
-        self._samples_seen = 0
-        self._pseudo_seen = 0
-        self._samples_used = 0
-        self._pseudo_used = 0
-        self._pseudo_dropped = 0
-
-    def pseudo_ratio_stats(self):
-        seen_ratio = self._pseudo_seen / max(1, self._samples_seen)
-        used_ratio = self._pseudo_used / max(1, self._samples_used)
-        return {
-            "samples_seen": int(self._samples_seen),
-            "pseudo_seen": int(self._pseudo_seen),
-            "samples_used": int(self._samples_used),
-            "pseudo_used": int(self._pseudo_used),
-            "pseudo_dropped": int(self._pseudo_dropped),
-            "pseudo_ratio_seen": float(seen_ratio),
-            "pseudo_ratio_used": float(used_ratio),
-        }
 
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
-        labels = inputs["labels"]
-        sample_weight = inputs.get("sample_weight", None)
-        is_pseudo = inputs.get("is_pseudo", None)
-
-        model_inputs = {k: v for k, v in inputs.items() if k not in {"labels", "sample_weight", "is_pseudo"}}
-        outputs = model(**model_inputs)
-        logits = outputs["logits"]
-        w = self.class_weights.to(logits.device) if self.class_weights is not None else None
-
-        keep_mask = torch.ones_like(labels, dtype=torch.bool)
-        pseudo_count = 0
-        dropped_count = 0
-
-        if is_pseudo is not None:
-            pseudo_mask = is_pseudo.to(labels.device).long() > 0
-            pseudo_count = int(pseudo_mask.sum().item())
-            gold_count = int((~pseudo_mask).sum().item())
-
-            if model.training and self.max_pseudo_ratio < 1.0 and pseudo_count > 0:
-                if gold_count <= 0:
-                    max_pseudo_keep = 1
-                else:
-                    max_pseudo_keep = int((self.max_pseudo_ratio * gold_count) / max(1e-8, (1.0 - self.max_pseudo_ratio)))
-                max_pseudo_keep = max(0, max_pseudo_keep)
-                if pseudo_count > max_pseudo_keep:
-                    pseudo_indices = torch.where(pseudo_mask)[0]
-                    drop_n = pseudo_count - max_pseudo_keep
-                    perm = torch.randperm(pseudo_indices.numel(), device=pseudo_indices.device)
-                    drop_idx = pseudo_indices[perm[:drop_n]]
-                    keep_mask[drop_idx] = False
-                    dropped_count = int(drop_n)
-
-        if not bool(keep_mask.any().item()):
-            keep_mask[0] = True
-
-        logits_kept = logits[keep_mask]
-        labels_kept = labels[keep_mask]
+        labels  = inputs["labels"]
+        outputs = model(**{k: v for k, v in inputs.items() if k != "labels"})
+        logits  = outputs["logits"]
+        w       = self.class_weights.to(logits.device) if self.class_weights is not None else None
 
         if self.use_focal:
-            per_loss = focal_loss(logits_kept, labels_kept, weight=w, gamma=self.focal_gamma, reduction="none")
+            loss = focal_loss(logits, labels, weight=w, gamma=self.focal_gamma)
         elif self.label_smoothing > 0.0:
-            lp = F.log_softmax(logits_kept, dim=-1)
-            nll = F.nll_loss(lp, labels_kept, weight=w, reduction="none")
-            smooth = -lp.mean(dim=-1)
-            per_loss = (1 - self.label_smoothing) * nll + self.label_smoothing * smooth
+            lp     = F.log_softmax(logits, dim=-1)
+            nll    = F.nll_loss(lp, labels, weight=w, reduction="mean")
+            smooth = -lp.mean(dim=-1).mean()
+            loss   = (1 - self.label_smoothing) * nll + self.label_smoothing * smooth
         else:
-            per_loss = torch.nn.CrossEntropyLoss(weight=w, reduction="none")(logits_kept, labels_kept)
-
-        if sample_weight is not None:
-            sw = sample_weight.to(per_loss.device).float()
-            if sw.dim() > 1:
-                sw = sw.view(-1)
-            sw = sw[keep_mask]
-            loss = (per_loss * sw).sum() / sw.sum().clamp_min(1e-12)
-        else:
-            loss = per_loss.mean()
-
-        used_count = int(keep_mask.sum().item())
-        used_pseudo = pseudo_count - dropped_count
-        if model.training:
-            self._samples_seen += int(labels.shape[0])
-            self._pseudo_seen += int(pseudo_count)
-            self._samples_used += int(used_count)
-            self._pseudo_used += int(max(0, used_pseudo))
-            self._pseudo_dropped += int(dropped_count)
+            loss = torch.nn.CrossEntropyLoss(weight=w)(logits, labels)
 
         return (loss, outputs) if return_outputs else loss
 
@@ -640,7 +420,6 @@ training_args = TrainingArguments(
     metric_for_best_model=PRIMARY_METRIC, greater_is_better=True,
     logging_steps=50, logging_first_step=True, save_total_limit=2,
     fp16=torch.cuda.is_available(), seed=SEED, report_to=[],
-    remove_unused_columns=False,
 )
 
 trainer = WeightedTrainer(
@@ -652,25 +431,17 @@ trainer = WeightedTrainer(
     class_weights=class_weights,
     label_smoothing=LABEL_SMOOTHING,
     use_focal=USE_FOCAL, focal_gamma=FOCAL_GAMMA,
-    max_pseudo_ratio=MAX_PSEUDO_RATIO,
     callbacks=[EarlyStoppingCallback(early_stopping_patience=EARLY_STOP_PATIENCE)],
 )
 
 log("Training full fine-tune...")
 trainer.train()
 log(f"Training finished. Best checkpoint: {trainer.state.best_model_checkpoint}")
-pseudo_ratio_stats = trainer.pseudo_ratio_stats()
-log(
-    "Pseudo ratio stats: "
-    f"seen={pseudo_ratio_stats['pseudo_ratio_seen']:.4f} "
-    f"used={pseudo_ratio_stats['pseudo_ratio_used']:.4f} "
-    f"dropped={pseudo_ratio_stats['pseudo_dropped']}"
-)
 
 # ================================================================
 # Save best model
 # ================================================================
-best_model_path = OUTPUT_BASE
+best_model_path = f"{OUTPUT_BASE}/best"
 model.save_pretrained(best_model_path)
 tokenizer.save_pretrained(best_model_path)
 log(f"Saved model → {best_model_path}")
@@ -915,18 +686,8 @@ results = {
         "primary_threshold_objective": PRIMARY_THRESHOLD_OBJECTIVE,
         "ece_bins": N_BINS_ECE, "use_temp_scaling": USE_TEMP_SCALING,
         "temp_lr": TEMP_LR, "temp_max_iters": TEMP_MAX_ITERS,
-        "training_type": "pseudo_label_augmented" if MIXED_MODE else "gold_only",
-        "pseudo_loss_weight": PSEUDO_LOSS_WEIGHT,
-        "max_pseudo_ratio": MAX_PSEUDO_RATIO,
     },
     "train_label_counts": {"clean": int(num_clean), "toxic": int(num_toxic)},
-    "train_composition": {
-        "n_gold": int(n_train_gold),
-        "n_pseudo": int(n_train_pseudo),
-        "n_total": int(len(dataset["train"])),
-        "pseudo_ratio_raw": float(n_train_pseudo / max(1, len(dataset["train"]))),
-        "pseudo_ratio_stats": pseudo_ratio_stats,
-    },
     "class_weights": [float(x) for x in class_weights.tolist()],
     "best_model_checkpoint": trainer.state.best_model_checkpoint,
     "test_argmax_basic":       test_argmax_basic,
@@ -956,65 +717,11 @@ with open(f"{RESULTS_BASE}/report_final.txt","w",encoding="utf-8") as f:
 
 log("Done. Saved model + metrics + calibration + error analysis.")
 
-best_eval_f1_toxic = None
-best_eval_macro_f1 = None
-best_epoch = None
-for row in trainer.state.log_history:
-    if "eval_f1_toxic" in row:
-        v = float(row["eval_f1_toxic"])
-        if best_eval_f1_toxic is None or v > best_eval_f1_toxic:
-            best_eval_f1_toxic = v
-            best_eval_macro_f1 = float(row.get("eval_macro_f1")) if row.get("eval_macro_f1") is not None else best_eval_macro_f1
-            best_epoch = int(row.get("epoch")) if row.get("epoch") is not None else best_epoch
-
-training_manifest = {
-    "run_id": RUN_ID,
-    "trained_at": datetime.now(timezone.utc).isoformat(),
-    "training_type": "pseudo_label_augmented" if MIXED_MODE else "gold_only",
-    "gold_data": {
-        "dir": gold_data_dir_used,
-        "prefix": gold_prefix_used,
-        "n_train": int(n_train_gold),
-        "n_val": int(len(dataset["validation"])),
-        "n_test": int(len(dataset["test"])),
-    },
-    "pseudo_labels": {
-        "batch_id": pseudo_manifest.get("batch_id"),
-        "batch_manifest_path": pseudo_manifest_path,
-        "seed_model": pseudo_manifest.get("seed_model"),
-        "n_accepted_toxic": int(pseudo_manifest.get("n_accepted_toxic", 0)),
-        "n_accepted_clean": int(pseudo_manifest.get("n_accepted_clean", 0)),
-        "pseudo_loss_weight": float(PSEUDO_LOSS_WEIGHT),
-        "max_pseudo_ratio": float(MAX_PSEUDO_RATIO),
-    } if MIXED_MODE else None,
-    "hyperparams": {
-        "base_model": MODEL_NAME,
-        "epochs": int(EPOCHS),
-        "lr": float(LR),
-        "batch_size": int(BATCH_SIZE),
-        "max_length": int(MAX_LENGTH),
-        "seed": int(SEED),
-    },
-    "results": {
-        "best_epoch": best_epoch,
-        "best_eval_f1_toxic": best_eval_f1_toxic,
-        "best_eval_macro_f1": best_eval_macro_f1,
-        "test_f1_toxic": float(final_test_rich.get("f1_toxic")) if final_test_rich.get("f1_toxic") is not None else None,
-        "test_macro_f1": float(final_test_rich.get("macro_f1")) if final_test_rich.get("macro_f1") is not None else None,
-    },
-    "promotion_status": "pending",
-}
-
-training_manifest_path = f"{best_model_path}/training_manifest.json"
-with open(training_manifest_path, "w", encoding="utf-8") as f:
-    json.dump(training_manifest, f, ensure_ascii=False, indent=2)
-
-run_manifest_path = f"{RUN_MANIFEST_DIR.rstrip('/')}/{RUN_ID}.json"
-shutil.copyfile(training_manifest_path, run_manifest_path)
-
 # ================================================================
 # Metadata export (drop-in at end)
 # ================================================================
+from datetime import datetime
+
 MODEL_ID = MODEL_VERSION
 DATASET_VERSION = run_dataset_tag
 IS_BASELINE = True
@@ -1073,63 +780,6 @@ metrics_out = {
     "accuracy": metrics_payload.get("accuracy"),
 }
 
-training_type = "pseudo_label_augmented" if MIXED_MODE else "gold_only"
-pseudo_batch_id = pseudo_manifest.get("batch_id") if MIXED_MODE and pseudo_manifest else "none"
-
-def _build_epoch_mlflow_metrics(log_history):
-    rows = []
-    latest_train_loss = None
-    for entry in log_history:
-        step = entry.get("step")
-        step = int(step) if isinstance(step, (int, float)) else None
-
-        if entry.get("loss") is not None:
-            latest_train_loss = float(entry["loss"])
-            rows.append((step, {"train_loss": latest_train_loss}))
-
-        if any(k in entry for k in ["eval_f1_toxic", "eval_macro_f1", "eval_loss"]):
-            metrics = {}
-            if entry.get("eval_f1_toxic") is not None:
-                metrics["eval_f1_toxic"] = float(entry["eval_f1_toxic"])
-            if entry.get("eval_macro_f1") is not None:
-                metrics["eval_macro_f1"] = float(entry["eval_macro_f1"])
-            if entry.get("eval_loss") is not None:
-                metrics["eval_loss"] = float(entry["eval_loss"])
-            if latest_train_loss is not None:
-                metrics["train_loss"] = latest_train_loss
-            if metrics:
-                rows.append((step, metrics))
-    return rows
-
-epoch_mlflow_metrics = _build_epoch_mlflow_metrics(trainer.state.log_history)
-
-mlflow_params = {
-    "training_type": training_type,
-    "base_model": MODEL_NAME,
-    "epochs": int(EPOCHS),
-    "lr": float(LR),
-    "batch_size": int(BATCH_SIZE),
-    "max_length": int(MAX_LENGTH),
-    "seed": int(SEED),
-    "gold_n_train": int(n_train_gold),
-    "gold_n_val": int(len(dataset["validation"])),
-}
-if MIXED_MODE and pseudo_manifest:
-    mlflow_params.update({
-        "pseudo_loss_weight": float(PSEUDO_LOSS_WEIGHT),
-        "max_pseudo_ratio": float(MAX_PSEUDO_RATIO),
-        "pseudo_batch_id": str(pseudo_manifest.get("batch_id", "")),
-        "pseudo_seed_model": str(pseudo_manifest.get("seed_model", "")),
-        "pseudo_n_accepted_toxic": int(pseudo_manifest.get("n_accepted_toxic", 0)),
-        "pseudo_n_accepted_clean": int(pseudo_manifest.get("n_accepted_clean", 0)),
-    })
-
-mlflow_tags = {
-    "mlflow.runName": RUN_ID,
-    "training_type": training_type,
-    "pseudo_label_batch": pseudo_batch_id,
-}
-
 with open(f"{best_model_path}/run_config.json", "w", encoding="utf-8") as f:
     json.dump(run_config, f, ensure_ascii=False, indent=2)
 
@@ -1141,41 +791,35 @@ with open(f"{best_model_path}/training_curve.json", "w", encoding="utf-8") as f:
 
 if mlflow_active and mlflow is not None:
     try:
-        try:
-            mlflow.set_tags(mlflow_tags)
-        except Exception:
-            pass
-
-        for k, v in mlflow_params.items():
-            try:
-                mlflow.log_param(k, v)
-            except Exception:
-                pass
-
-        for idx, (step, metric_row) in enumerate(epoch_mlflow_metrics):
-            try:
-                effective_step = step if step is not None else idx
-                for mk, mv in metric_row.items():
-                    mlflow.log_metric(mk, mv, step=effective_step)
-            except Exception:
-                pass
-
-        final_mlflow_metrics = {
-            "test_f1_toxic": float(final_test_rich.get("f1_toxic") or 0.0),
-            "test_macro_f1": float(final_test_rich.get("macro_f1") or 0.0),
-        }
-        for k, v in final_mlflow_metrics.items():
-            try:
-                mlflow.log_metric(k, v)
-            except Exception:
-                pass
-
-        try:
-            mlflow.log_artifact(training_manifest_path)
-        except Exception:
-            pass
+        mlflow.log_params({
+            "dataset_version": DATASET_VERSION,
+            "model_version": MODEL_VERSION,
+            "policy_version": POLICY_VERSION,
+            "model_name": MODEL_NAME,
+            "batch_size": BATCH_SIZE,
+            "epochs": EPOCHS,
+            "learning_rate": LR,
+            "seed": SEED,
+            "run_id": RUN_ID,
+        })
+        mlflow.log_metrics({
+            "macro_f1": float(metrics_out.get("macro_f1") or 0.0),
+            "f1_toxic": float(metrics_out.get("f1_toxic") or 0.0),
+            "precision": float(metrics_out.get("precision") or 0.0),
+            "recall": float(metrics_out.get("recall") or 0.0),
+            "accuracy": float(metrics_out.get("accuracy") or 0.0),
+        })
+        for artifact in [
+            f"{RESULTS_BASE}/metrics.json",
+            f"{RESULTS_BASE}/calibration_summary.json",
+            f"{best_model_path}/run_config.json",
+            f"{best_model_path}/metrics.json",
+            f"{best_model_path}/training_curve.json",
+        ]:
+            if os.path.exists(artifact):
+                mlflow.log_artifact(artifact)
     except Exception as exc:
-        print(f"MLflow logging disabled: {exc}", flush=True)
+        log(f"MLflow logging warning: {exc}")
     finally:
         try:
             mlflow.end_run()
@@ -1185,6 +829,8 @@ if mlflow_active and mlflow is not None:
 # ================================================================
 # ZIP EXPORT
 # ================================================================
+import shutil
+
 zip_names = {
     "best": f"best_model_full_{run_dataset_tag}",
     "results": f"results_full_{run_dataset_tag}",
@@ -1202,7 +848,3 @@ for name, path in [
         shutil.make_archive(zip_base, "zip", path)
 
 log(f"All zips created in {ZIP_OUTPUT_DIR}")
-
-print(f"Model saved to {best_model_path}", flush=True)
-print(f"Run manifest: {run_manifest_path}", flush=True)
-print("Promotion status: pending — run Phase E promotion check", flush=True)

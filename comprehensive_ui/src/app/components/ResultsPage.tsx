@@ -1,7 +1,10 @@
+import { useState } from "react";
 import { Button } from "@/app/components/ui/button";
 import { Card } from "@/app/components/ui/card";
 import { Progress } from "@/app/components/ui/progress";
-import { AlertTriangle, CheckCircle, Download, ExternalLink, RotateCcw } from "lucide-react";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/app/components/ui/tooltip";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/app/components/ui/dialog";
+import { AlertTriangle, CheckCircle, CircleHelp, Download, ExternalLink, RotateCcw } from "lucide-react";
 import { PieChart, Pie, Cell, ResponsiveContainer, Legend, Tooltip as RechartTooltip } from "recharts";
 import { useI18n } from "@/app/i18n/context";
 
@@ -39,6 +42,13 @@ interface ResultData {
   };
 }
 
+interface DomainThresholds {
+  news?: number;
+  social?: number;
+  forum?: number;
+  unknown?: number;
+}
+
 interface HistoryItem {
   id: string;
   savedAt: string;
@@ -48,6 +58,7 @@ interface HistoryItem {
     seg_threshold?: number;
     page_threshold?: number;
   } | null;
+  thresholdsByDomain?: DomainThresholds | null;
   result: ResultData;
 }
 
@@ -58,6 +69,7 @@ interface ResultsPageProps {
     seg_threshold?: number;
     page_threshold?: number;
   } | null;
+  thresholdsByDomain?: DomainThresholds | null;
   modelId?: string | null;
   compareModelNames?: string[];
   activeResultModel?: string | null;
@@ -88,10 +100,13 @@ const getSeverityClasses = (score: number | null) => {
   return "bg-background-danger text-text-danger border-border-danger";
 };
 
+const DOMAIN_KEYS: Array<keyof DomainThresholds> = ["news", "social", "forum", "unknown"];
+
 export function ResultsPage({
   results,
   jobId,
   thresholds,
+  thresholdsByDomain,
   modelId,
   compareModelNames,
   activeResultModel,
@@ -102,6 +117,14 @@ export function ResultsPage({
 }: ResultsPageProps) {
   const { language, t } = useI18n();
   const dateLocale = language === "vi" ? "vi-VN" : "en-US";
+  const [thresholdDetailsResult, setThresholdDetailsResult] = useState<ResultData | null>(null);
+
+  const getDomainThresholdLabel = (key: keyof DomainThresholds) => {
+    if (key === "news") return t("results.thresholdDomainNews");
+    if (key === "social") return t("results.thresholdDomainSocial");
+    if (key === "forum") return t("results.thresholdDomainForum");
+    return t("results.thresholdDomainUnknown");
+  };
 
   return (
     <div className="min-h-screen bg-background py-12 px-4 sm:px-6 lg:px-8">
@@ -172,8 +195,39 @@ export function ResultsPage({
                       <div className="mt-2 text-xs text-muted-foreground space-y-1">
                         <p>{t("results.htmlTag", { value: (result.html_tags && result.html_tags[0]) || "unknown" })}</p>
                         <p>{t("results.og", { value: (result.og_types && result.og_types.length > 0) ? result.og_types.join(", ") : "--" })}</p>
-                        <p>
-                          {t("results.usedThreshold")} <span className="font-medium text-foreground">{formatThreshold(result.seg_threshold_used)}</span>
+                        <p className="flex items-center gap-1.5">
+                          <span>{t("results.usedThreshold")} <span className="font-medium text-foreground">{formatThreshold(result.seg_threshold_used)}</span></span>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <button
+                                type="button"
+                                className="inline-flex h-4 w-4 items-center justify-center rounded-full text-muted-foreground hover:text-foreground"
+                                aria-label={t("results.thresholdInfoAria")}
+                              >
+                                <CircleHelp className="h-3.5 w-3.5" />
+                              </button>
+                            </TooltipTrigger>
+                            <TooltipContent side="top" sideOffset={8} className="max-w-72 p-3">
+                              <div className="space-y-2 text-xs">
+                                <p className="font-semibold">{t("results.thresholdInfoTitle")}</p>
+                                <div className="space-y-1">
+                                  {DOMAIN_KEYS.map((domainKey) => (
+                                    <div key={domainKey} className="flex items-center justify-between gap-3">
+                                      <span>{getDomainThresholdLabel(domainKey)}</span>
+                                      <span className="font-semibold">{formatThreshold(thresholdsByDomain?.[domainKey])}</span>
+                                    </div>
+                                  ))}
+                                </div>
+                                <button
+                                  type="button"
+                                  className="underline underline-offset-2 hover:opacity-80"
+                                  onClick={() => setThresholdDetailsResult(result)}
+                                >
+                                  {t("results.thresholdReadMore")}
+                                </button>
+                              </div>
+                            </TooltipContent>
+                          </Tooltip>
                         </p>
                       </div>
                     )}
@@ -394,6 +448,56 @@ export function ResultsPage({
             </div>
           </div>
         )}
+
+        <Dialog open={!!thresholdDetailsResult} onOpenChange={(open: boolean) => !open && setThresholdDetailsResult(null)}>
+          <DialogContent className="max-w-xl">
+            <DialogHeader>
+              <DialogTitle>{t("results.thresholdDetailsTitle")}</DialogTitle>
+              <DialogDescription>{t("results.thresholdDetailsIntro")}</DialogDescription>
+            </DialogHeader>
+            <div className="space-y-3 text-sm">
+              <div className="rounded-md border border-border bg-background-secondary p-3">
+                <p className="break-all text-xs text-muted-foreground">{thresholdDetailsResult?.url}</p>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <p>
+                  <span className="text-muted-foreground">{t("results.thresholdDetailHtmlTag")}</span>{" "}
+                  <span className="font-medium">{(thresholdDetailsResult?.html_tags && thresholdDetailsResult.html_tags[0]) || "--"}</span>
+                </p>
+                <p>
+                  <span className="text-muted-foreground">{t("results.thresholdDetailOg")}</span>{" "}
+                  <span className="font-medium">{(thresholdDetailsResult?.og_types && thresholdDetailsResult.og_types[0]) || "--"}</span>
+                </p>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <p>
+                  <span className="text-muted-foreground">{t("results.thresholdDetailUsed")}</span>{" "}
+                  <span className="font-medium">{formatThreshold(thresholdDetailsResult?.seg_threshold_used)}</span>
+                </p>
+                <p>
+                  <span className="text-muted-foreground">{t("results.thresholdDetailClamp")}</span>{" "}
+                  <span className="font-medium">0.40 - 0.85</span>
+                </p>
+              </div>
+              <div className="rounded-md border border-border p-3">
+                <p className="font-medium mb-2">{t("results.thresholdInfoTitle")}</p>
+                <div className="space-y-1 text-xs">
+                  {DOMAIN_KEYS.map((domainKey) => (
+                    <div key={domainKey} className="flex items-center justify-between gap-3">
+                      <span>{getDomainThresholdLabel(domainKey)}</span>
+                      <span className="font-semibold">{formatThreshold(thresholdsByDomain?.[domainKey])}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+              <ul className="list-disc pl-5 text-xs text-muted-foreground space-y-1">
+                <li>{t("results.thresholdDetailRule1")}</li>
+                <li>{t("results.thresholdDetailRule2")}</li>
+                <li>{t("results.thresholdDetailRule3")}</li>
+              </ul>
+            </div>
+          </DialogContent>
+        </Dialog>
 
         <div className="flex flex-col sm:flex-row gap-4 justify-center mt-8">
           <Button onClick={onScanAgain} className="h-12 px-8">

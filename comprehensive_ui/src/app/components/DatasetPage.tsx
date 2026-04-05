@@ -67,6 +67,7 @@ interface DatasetExportResponse {
 
 interface DatasetPageProps {
   datasetVersion: DatasetVersion;
+  onNavigateToProtocol?: () => void;
 }
 
 const RAW_API_BASE = import.meta.env.VITE_API_BASE_URL?.trim() ?? "";
@@ -97,9 +98,13 @@ const sourceLabel = (source: string, t: (key: string) => string) => {
 
 const SOURCE_ORDER: string[] = ["victsd", "victsd_augmented", "vihsd", "uit-vihsd_augmented", "new_collected"];
 
-const isVisibleSourceOption = (source: string) => {
+const LATEST_HIDDEN_SOURCES = new Set(["vihsd", "vihsd_augmented", "uit-vihsd_augmented"]);
+
+const isVisibleSourceOption = (source: string, isLegacyDataset: boolean) => {
   const normalized = source.trim().toLowerCase();
-  return normalized !== "all";
+  if (normalized === "all") return false;
+  if (!isLegacyDataset && LATEST_HIDDEN_SOURCES.has(normalized)) return false;
+  return true;
 };
 
 const sortSourcesByPreferredOrder = (sources: string[]) => {
@@ -124,7 +129,7 @@ const formatPercent = (value: number, total: number) => {
 const resolveDatasetVersionParam = (datasetVersion: DatasetVersion) =>
   datasetVersion === "latest" ? "latest" : "v1";
 
-export function DatasetPage({ datasetVersion }: DatasetPageProps) {
+export function DatasetPage({ datasetVersion, onNavigateToProtocol }: DatasetPageProps) {
   const { t } = useI18n();
   const isLegacyDataset = datasetVersion === "v1";
   const [rows, setRows] = useState<DatasetRow[]>([]);
@@ -153,16 +158,16 @@ export function DatasetPage({ datasetVersion }: DatasetPageProps) {
     if (!keys.length) return;
     setSourceOptions((prev) => {
       const merged = new Set([...prev, ...keys]);
-      const filtered = Array.from(merged).filter(isVisibleSourceOption);
+      const filtered = Array.from(merged).filter((source) => isVisibleSourceOption(source, isLegacyDataset));
       return sortSourcesByPreferredOrder(filtered);
     });
-  }, [stats]);
+  }, [isLegacyDataset, stats]);
 
   const availableSources = useMemo(() => {
     const merged = new Set([...sourceOptions, sourceFilter]);
-    const filtered = Array.from(merged).filter(isVisibleSourceOption);
+    const filtered = Array.from(merged).filter((source) => isVisibleSourceOption(source, isLegacyDataset));
     return ["all", ...sortSourcesByPreferredOrder(filtered)];
-  }, [sourceFilter, sourceOptions]);
+  }, [isLegacyDataset, sourceFilter, sourceOptions]);
 
   const aggregatedStats = useMemo(() => {
     const bySource = stats?.by_source || {};
@@ -195,6 +200,16 @@ export function DatasetPage({ datasetVersion }: DatasetPageProps) {
         toxic: vihsdBase.toxic + vihsdAug.toxic,
       },
     };
+  }, [stats]);
+
+  const latestSourceSummary = useMemo(() => {
+    const bySource = stats?.by_source || {};
+    const hiddenLatestSources = new Set(["vihsd", "vihsd_augmented", "uit-vihsd_augmented"]);
+
+    return Object.entries(bySource)
+      .filter(([source]) => !hiddenLatestSources.has(source.trim().toLowerCase()))
+      .filter(([, counts]) => (counts?.total ?? 0) > 0)
+      .sort((a, b) => (b[1]?.total ?? 0) - (a[1]?.total ?? 0));
   }, [stats]);
 
   const imbalanceRatioText = useMemo(() => {
@@ -395,6 +410,16 @@ export function DatasetPage({ datasetVersion }: DatasetPageProps) {
               </h2>
               <p className="text-sm text-muted-foreground">{t("dataset.analysis.subtitle")}</p>
             </div>
+            {isLegacyDataset && onNavigateToProtocol && (
+              <Button
+                type="button"
+                variant="outline"
+                onClick={onNavigateToProtocol}
+                className="border-2 border-foreground text-text-danger hover:text-text-danger"
+              >
+                {t("dataset.analysis.protocolPageCta")}
+              </Button>
+            )}
           </div>
           <Tabs defaultValue="overview" className="mt-2">
             <TabsList className="w-full flex flex-wrap justify-start gap-2">
@@ -432,42 +457,75 @@ export function DatasetPage({ datasetVersion }: DatasetPageProps) {
                 </div>
               </div>
 
-              <div>
-                <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">{t("dataset.overview.contributionBySource")}</p>
-                <div className="mt-3 flex flex-wrap gap-4 text-xs text-muted-foreground">
-                  <span className="inline-flex items-center gap-2">
-                    <span className="h-3 w-3 rounded-sm bg-text-info" />{t("dataset.compare.victsdBadge")}
-                  </span>
-                  <span className="inline-flex items-center gap-2">
-                    <span className="h-3 w-3 rounded-sm bg-text-warning" />{t("dataset.compare.vihsdBadge")}
-                  </span>
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+                <div className="lg:col-span-2">
+                  <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">{t("dataset.overview.contributionBySource")}</p>
+                  {isLegacyDataset ? (
+                    <>
+                      <div className="mt-3 flex flex-wrap gap-4 text-xs text-muted-foreground">
+                        <span className="inline-flex items-center gap-2">
+                          <span className="h-3 w-3 rounded-sm bg-text-info" />{t("dataset.compare.victsdBadge")}
+                        </span>
+                        <span className="inline-flex items-center gap-2">
+                          <span className="h-3 w-3 rounded-sm bg-text-warning" />{t("dataset.compare.vihsdBadge")}
+                        </span>
+                      </div>
+
+                      <div className="mt-4 space-y-3 text-sm">
+                        <div className="flex items-center gap-3">
+                          <div className="w-44 text-muted-foreground">{t("dataset.compare.victsdBadge")}</div>
+                          <div className="flex-1 h-3 rounded bg-muted overflow-hidden">
+                            <div className="flex h-full">
+                              <div className="bg-text-info" style={{ width: formatPercent(sourceSummary.victsd.clean, sourceSummary.victsd.total) }} />
+                              <div className="bg-text-warning" style={{ width: formatPercent(sourceSummary.victsd.toxic, sourceSummary.victsd.total) }} />
+                            </div>
+                          </div>
+                          <div className="w-20 text-right text-xs text-muted-foreground">{sourceSummary.victsd.total.toLocaleString()}</div>
+                        </div>
+                        <div className="flex items-center gap-3">
+                          <div className="w-44 text-muted-foreground">{t("dataset.compare.vihsdBadge")}</div>
+                          <div className="flex-1 h-3 rounded bg-muted overflow-hidden">
+                            <div className="flex h-full">
+                              <div className="bg-text-warning" style={{ width: formatPercent(sourceSummary.vihsd.toxic, sourceSummary.vihsd.total) }} />
+                            </div>
+                          </div>
+                          <div className="w-20 text-right text-xs text-muted-foreground">{sourceSummary.vihsd.total.toLocaleString()}</div>
+                        </div>
+                      </div>
+                    </>
+                  ) : (
+                    <div className="mt-4 space-y-3 text-sm">
+                      {latestSourceSummary.map(([source, counts]) => (
+                        <div key={source} className="flex items-center gap-3">
+                          <div className="w-44 text-muted-foreground">{sourceLabel(source, t)}</div>
+                          <div className="flex-1 h-3 rounded bg-muted overflow-hidden">
+                            <div className="flex h-full">
+                              <div className="bg-text-info" style={{ width: formatPercent(counts.clean, counts.total) }} />
+                              <div className="bg-text-warning" style={{ width: formatPercent(counts.toxic, counts.total) }} />
+                            </div>
+                          </div>
+                          <div className="w-20 text-right text-xs text-muted-foreground">{counts.total.toLocaleString()}</div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  <div className="mt-4 rounded-lg border-l-4 border-l-border-success bg-background-success p-4 text-sm text-text-success">
+                    <strong>{t("dataset.overview.resultLabel")}</strong> {t("dataset.overview.dynamicRenderNote")}
+                  </div>
                 </div>
 
-                <div className="mt-4 space-y-3 text-sm">
-                  <div className="flex items-center gap-3">
-                    <div className="w-44 text-muted-foreground">{t("dataset.compare.victsdBadge")}</div>
-                    <div className="flex-1 h-3 rounded bg-muted overflow-hidden">
-                      <div className="flex h-full">
-                        <div className="bg-text-info" style={{ width: formatPercent(sourceSummary.victsd.clean, sourceSummary.victsd.total) }} />
-                        <div className="bg-text-warning" style={{ width: formatPercent(sourceSummary.victsd.toxic, sourceSummary.victsd.total) }} />
-                      </div>
-                    </div>
-                    <div className="w-20 text-right text-xs text-muted-foreground">{sourceSummary.victsd.total.toLocaleString()}</div>
-                  </div>
-                  <div className="flex items-center gap-3">
-                    <div className="w-44 text-muted-foreground">{t("dataset.compare.vihsdBadge")}</div>
-                    <div className="flex-1 h-3 rounded bg-muted overflow-hidden">
-                      <div className="flex h-full">
-                        <div className="bg-text-warning" style={{ width: formatPercent(sourceSummary.vihsd.toxic, sourceSummary.vihsd.total) }} />
-                      </div>
-                    </div>
-                    <div className="w-20 text-right text-xs text-muted-foreground">{sourceSummary.vihsd.total.toLocaleString()}</div>
-                  </div>
-                </div>
-
-                <div className="mt-4 rounded-lg border-l-4 border-l-border-success bg-background-success p-4 text-sm text-text-success">
-                  <strong>{t("dataset.overview.resultLabel")}</strong> {t("dataset.overview.dynamicRenderNote")}
-                </div>
+                {!isLegacyDataset && (
+                  <Card className="border p-4 shadow-none">
+                    <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">Giới hạn (latest)</p>
+                    <ul className="mt-3 space-y-2 text-sm text-muted-foreground list-disc pl-4">
+                      <li>Phạm vi nguồn vẫn thiên về dữ liệu ViCTSD + dữ liệu thu thập trong đồ án, chưa đại diện đầy đủ mọi ngữ cảnh tiếng Việt.</li>
+                      <li>Nhãn mới đi theo luồng pseudo-label + tiêu chí duyệt, nên chất lượng dữ liệu phụ thuộc vào độ tốt của bộ tiêu chí và mức bao phủ của rule.</li>
+                      <li>Các trường hợp nằm sát ngưỡng hoặc mơ hồ ngữ nghĩa vẫn có thể bị pseudo-label sai trước bước duyệt.</li>
+                      <li>Mất cân bằng lớp clean/toxic vẫn còn đáng kể, có thể làm mô hình thiên lệch về lớp chiếm ưu thế.</li>
+                    </ul>
+                  </Card>
+                )}
               </div>
             </TabsContent>
 

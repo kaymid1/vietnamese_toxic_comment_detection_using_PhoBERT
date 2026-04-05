@@ -31,7 +31,6 @@ export function Navigation({
     { name: t("nav.home"), id: "home" },
     { name: t("nav.results"), id: "results" },
     { name: t("nav.dataset"), id: "dataset" },
-    { name: t("nav.protocol"), id: "protocol" },
     { name: t("nav.model"), id: "model" },
     { name: t("nav.contact"), id: "contact" },
   ];
