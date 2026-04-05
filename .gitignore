@@ -8,6 +8,7 @@ __pycache__/
 venv/
 comprehensive_ui/node_modules/
 comprehensive_ui/package-lock.json
+comprehensive_ui/dist/
 data/processed/
 data/raw/crawled_urls/
 viettoxic_outputs/
@@ -23,6 +24,8 @@ viettoxic_outputs_extract/
 .claude/
 .serena/
 .mcp.json
+.vscode/
+
 
 # Build outputs
 comprehensive_ui/dist/
