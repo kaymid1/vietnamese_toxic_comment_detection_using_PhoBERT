@@ -1,4 +1,4 @@
-#!/Users/mac/git/Thesis/.venv/bin/python
+#!/Users/mac/git/Thesis/.venv/bin/python3.12
 import sys
 from numpy.f2py.f2py2e import main
 if __name__ == '__main__':

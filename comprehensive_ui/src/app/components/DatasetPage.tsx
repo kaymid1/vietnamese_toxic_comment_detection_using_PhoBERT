@@ -40,6 +40,8 @@ interface DatasetStats {
   by_source: Record<string, { total: number; clean: number; toxic: number }>;
 }
 
+type DatasetVersion = "v1" | "latest";
+
 interface DatasetPreviewResponse {
   page: number;
   page_size: number;
@@ -47,12 +49,24 @@ interface DatasetPreviewResponse {
   total_pages: number;
   items: DatasetRow[];
   stats?: DatasetStats;
+  dataset_version?: string;
 }
 
 interface DatasetExportResponse {
   path: string;
+  artifact_path?: string;
+  manifest_path?: string;
   count: number;
   stats: DatasetStats;
+  artifact_versions?: {
+    dataset_version?: string;
+    model_version?: string;
+    policy_version?: string;
+  };
+}
+
+interface DatasetPageProps {
+  datasetVersion: DatasetVersion;
 }
 
 const RAW_API_BASE = import.meta.env.VITE_API_BASE_URL?.trim() ?? "";
@@ -71,23 +85,21 @@ const sourceLabel = (source: string, t: (key: string) => string) => {
   const normalized = source.trim().toLowerCase();
   const map: Record<string, string> = {
     all: t("dataset.filters.allSources"),
+    victsd: "ViCTSD",
     victsd_augmented: "ViCTSD",
+    vihsd: "UIT-ViHSD",
+    vihsd_augmented: "UIT-ViHSD",
     "uit-vihsd_augmented": "UIT-ViHSD",
     unknown: t("dataset.common.unknown"),
   };
   return map[normalized] || source.replaceAll("_", " ");
 };
 
-const SOURCE_ORDER: string[] = ["victsd_augmented", "uit-vihsd_augmented", "new_collected"];
+const SOURCE_ORDER: string[] = ["victsd", "victsd_augmented", "vihsd", "uit-vihsd_augmented", "new_collected"];
 
 const isVisibleSourceOption = (source: string) => {
   const normalized = source.trim().toLowerCase();
-  return (
-    normalized !== "all" &&
-    normalized !== "victsd" &&
-    normalized !== "vihsd" &&
-    normalized !== "vihsd_augmented"
-  );
+  return normalized !== "all";
 };
 
 const sortSourcesByPreferredOrder = (sources: string[]) => {
@@ -109,8 +121,12 @@ const formatPercent = (value: number, total: number) => {
   return `${((value / total) * 100).toFixed(1)}%`;
 };
 
-export function DatasetPage() {
+const resolveDatasetVersionParam = (datasetVersion: DatasetVersion) =>
+  datasetVersion === "latest" ? "latest" : "v1";
+
+export function DatasetPage({ datasetVersion }: DatasetPageProps) {
   const { t } = useI18n();
+  const isLegacyDataset = datasetVersion === "v1";
   const [rows, setRows] = useState<DatasetRow[]>([]);
   const [stats, setStats] = useState<DatasetStats | null>(null);
   const [page, setPage] = useState(1);
@@ -163,9 +179,21 @@ export function DatasetPage() {
 
   const sourceSummary = useMemo(() => {
     const bySource = stats?.by_source || {};
+    const victsdBase = bySource.victsd || { total: 0, clean: 0, toxic: 0 };
+    const victsdAug = bySource.victsd_augmented || { total: 0, clean: 0, toxic: 0 };
+    const vihsdBase = bySource.vihsd || { total: 0, clean: 0, toxic: 0 };
+    const vihsdAug = bySource.vihsd_augmented || bySource["uit-vihsd_augmented"] || { total: 0, clean: 0, toxic: 0 };
     return {
-      victsd: bySource.victsd_augmented || { total: 0, clean: 0, toxic: 0 },
-      vihsd: bySource["uit-vihsd_augmented"] || bySource.vihsd_augmented || { total: 0, clean: 0, toxic: 0 },
+      victsd: {
+        total: victsdBase.total + victsdAug.total,
+        clean: victsdBase.clean + victsdAug.clean,
+        toxic: victsdBase.toxic + victsdAug.toxic,
+      },
+      vihsd: {
+        total: vihsdBase.total + vihsdAug.total,
+        clean: vihsdBase.clean + vihsdAug.clean,
+        toxic: vihsdBase.toxic + vihsdAug.toxic,
+      },
     };
   }, [stats]);
 
@@ -199,6 +227,7 @@ export function DatasetPage() {
       if (sourceFilter !== "all") params.set("source", sourceFilter);
       if (labelFilter !== "all") params.set("label", labelFilter === "toxic" ? "1" : "0");
       if (splitFilter !== "all") params.set("split", splitFilter);
+      params.set("dataset_version", resolveDatasetVersionParam(datasetVersion));
 
       const response = await fetch(buildApiUrl(`/api/dataset/preview?${params.toString()}`));
       const data = (await response.json()) as DatasetPreviewResponse;
@@ -221,11 +250,11 @@ export function DatasetPage() {
   useEffect(() => {
     setPage(1);
     setSelectedFeedback([]);
-  }, [sourceFilter, labelFilter, splitFilter, pageSize]);
+  }, [sourceFilter, labelFilter, splitFilter, pageSize, datasetVersion]);
 
   useEffect(() => {
     void fetchPreview(page, pageSize);
-  }, [page, pageSize, sourceFilter, labelFilter, splitFilter]);
+  }, [page, pageSize, sourceFilter, labelFilter, splitFilter, datasetVersion]);
 
   const handleExport = async () => {
     setExportStatus(null);
@@ -234,6 +263,10 @@ export function DatasetPage() {
       if (sourceFilter !== "all") body.source = [sourceFilter];
       if (labelFilter !== "all") body.label = [labelFilter === "toxic" ? 1 : 0];
       if (splitFilter !== "all") body.split = [splitFilter];
+
+      body.dataset_version = resolveDatasetVersionParam(datasetVersion);
+      body.model_version = "phobert/baseline";
+      body.policy_version = "policy-v1";
 
       const response = await fetch(buildApiUrl("/api/dataset/export"), {
         method: "POST",
@@ -244,7 +277,18 @@ export function DatasetPage() {
       if (!response.ok) {
         throw new Error(JSON.stringify(data));
       }
-      setExportStatus(t("dataset.status.exportedRowsToPath", { count: data.count, path: data.path }));
+      const artifactPath = data.artifact_path || data.path;
+      const manifestPath = data.manifest_path || t("dataset.common.na");
+      setExportStatus(
+        t("dataset.status.exportedRowsWithLineage", {
+          count: data.count,
+          path: artifactPath,
+          manifest: manifestPath,
+          datasetVersion: data.artifact_versions?.dataset_version || t("dataset.common.na"),
+          modelVersion: data.artifact_versions?.model_version || t("dataset.common.na"),
+          policyVersion: data.artifact_versions?.policy_version || t("dataset.common.na"),
+        }),
+      );
     } catch (err) {
       const message = err instanceof Error ? err.message : t("dataset.status.exportFailed");
       setExportStatus(message);
@@ -355,10 +399,10 @@ export function DatasetPage() {
           <Tabs defaultValue="overview" className="mt-2">
             <TabsList className="w-full flex flex-wrap justify-start gap-2">
               <TabsTrigger value="overview">{t("dataset.tabs.overview")}</TabsTrigger>
-              <TabsTrigger value="compare">{t("dataset.tabs.compare")}</TabsTrigger>
-              <TabsTrigger value="annotation">{t("dataset.tabs.annotation")}</TabsTrigger>
-              <TabsTrigger value="limitation">{t("dataset.tabs.limitation")}</TabsTrigger>
-              <TabsTrigger value="definition">{t("dataset.tabs.definition")}</TabsTrigger>
+              {isLegacyDataset && <TabsTrigger value="compare">{t("dataset.tabs.compare")}</TabsTrigger>}
+              {isLegacyDataset && <TabsTrigger value="annotation">{t("dataset.tabs.annotation")}</TabsTrigger>}
+              {isLegacyDataset && <TabsTrigger value="limitation">{t("dataset.tabs.limitation")}</TabsTrigger>}
+              {isLegacyDataset && <TabsTrigger value="definition">{t("dataset.tabs.definition")}</TabsTrigger>}
             </TabsList>
 
             <TabsContent value="overview" className="mt-4 space-y-6">
@@ -427,232 +471,236 @@ export function DatasetPage() {
               </div>
             </TabsContent>
 
-            <TabsContent value="compare" className="mt-4 space-y-6">
-              <div>
-                <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">{t("dataset.compare.datasetCharacteristics")}</p>
-                <div className="mt-3 grid grid-cols-1 lg:grid-cols-2 gap-4">
-                  <Card className="border p-4 shadow-none">
-                    <span className="inline-flex rounded-md bg-background-info px-2 py-1 text-xs font-medium text-text-info">{t("dataset.compare.victsdBadge")}</span>
-                    <h3 className="mt-3 text-sm font-semibold">{t("dataset.compare.victsdTitle")}</h3>
-                    <div className="mt-3 space-y-2 text-sm">
-                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.compare.fields.source")}</span><span className="text-right">{t("dataset.compare.victsd.source")}</span></div>
-                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.compare.fields.originalSize")}</span><span className="text-right">{t("dataset.compare.victsd.originalSize")}</span></div>
-                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.compare.fields.labelSchema")}</span><span className="text-right">{t("dataset.compare.victsd.labelSchema")}</span></div>
-                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.compare.fields.binarizedTo")}</span><span className="text-right">{t("dataset.compare.victsd.binarizedTo")}</span></div>
-                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.compare.fields.originalToxic")}</span><span className="text-right">{t("dataset.compare.victsd.originalToxic")}</span></div>
-                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.compare.fields.textLength")}</span><span className="text-right">{t("dataset.compare.victsd.textLength")}</span></div>
-                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.compare.fields.style")}</span><span className="text-right">{t("dataset.compare.victsd.style")}</span></div>
-                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.compare.fields.paper")}</span><a className="text-text-info hover:underline" href="https://arxiv.org/abs/2103.10069" target="_blank" rel="noreferrer">arXiv 2103.10069</a></div>
-                    </div>
-                    <div className="mt-4 rounded-lg border-l-4 border-l-border-info bg-background-info p-3 text-sm text-text-info">
-                      {t("dataset.compare.victsd.note")}
-                    </div>
-                  </Card>
-
-                  <Card className="border p-4 shadow-none">
-                    <span className="inline-flex rounded-md bg-background-success px-2 py-1 text-xs font-medium text-text-success">{t("dataset.compare.vihsdBadge")}</span>
-                    <h3 className="mt-3 text-sm font-semibold">{t("dataset.compare.vihsdTitle")}</h3>
-                    <div className="mt-3 space-y-2 text-sm">
-                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.compare.fields.source")}</span><span className="text-right">{t("dataset.compare.vihsd.source")}</span></div>
-                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.compare.fields.originalSize")}</span><span className="text-right">{t("dataset.compare.vihsd.originalSize")}</span></div>
-                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.compare.fields.labelSchema")}</span><span className="text-right">{t("dataset.compare.vihsd.labelSchema")}</span></div>
-                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.compare.fields.take")}</span><span className="text-right">{t("dataset.compare.vihsd.take")}</span></div>
-                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.compare.fields.samplesUsed")}</span><span className="text-right">{t("dataset.compare.vihsd.samplesUsed")}</span></div>
-                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.compare.fields.textLength")}</span><span className="text-right">{t("dataset.compare.vihsd.textLength")}</span></div>
-                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.compare.fields.style")}</span><span className="text-right">{t("dataset.compare.vihsd.style")}</span></div>
-                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.compare.fields.paper")}</span><a className="text-text-success hover:underline" href="https://arxiv.org/abs/2103.11528" target="_blank" rel="noreferrer">arXiv 2103.11528</a></div>
-                    </div>
-                    <div className="mt-4 rounded-lg border-l-4 border-l-border-info bg-background-info p-3 text-sm text-text-info">
-                      {t("dataset.compare.vihsd.note")}
-                    </div>
-                  </Card>
-                </div>
-              </div>
-
-              <div>
-                <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">{t("dataset.compare.similaritiesReason")}</p>
-                <div className="mt-3 grid grid-cols-1 md:grid-cols-3 gap-3">
-                  <div className="rounded-lg border-l-4 border-l-border-success bg-background-success p-4 text-sm text-text-success">
-                    <strong>{t("dataset.compare.similarity1Title")}</strong><br />{t("dataset.compare.similarity1Desc")}
-                  </div>
-                  <div className="rounded-lg border-l-4 border-l-border-success bg-background-success p-4 text-sm text-text-success">
-                    <strong>{t("dataset.compare.similarity2Title")}</strong><br />{t("dataset.compare.similarity2Desc")}
-                  </div>
-                  <div className="rounded-lg border-l-4 border-l-border-success bg-background-success p-4 text-sm text-text-success">
-                    <strong>{t("dataset.compare.similarity3Title")}</strong><br />{t("dataset.compare.similarity3Desc")}
-                  </div>
-                </div>
-              </div>
-
-              <div>
-                <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">{t("dataset.compare.empiricalEvidence")}</p>
-                <div className="mt-3 grid grid-cols-1 lg:grid-cols-2 gap-4">
-                  <Card className="border p-4 shadow-none">
-                    <p className="text-sm font-semibold">{t("dataset.compare.evidenceScoreTitle")}</p>
-                    <div className="mt-3 space-y-2 text-sm">
-                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.compare.evidenceOffensive")}</span><span className="font-medium">0.8726</span></div>
-                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.compare.evidenceHate")}</span><span className="font-medium">{t("dataset.compare.evidenceHateValue")}</span></div>
-                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.compare.evidenceClean")}</span><span className="font-medium">0.1285</span></div>
-                    </div>
-                    <div className="mt-4 rounded-lg border-l-4 border-l-border-success bg-background-success p-3 text-sm text-text-success">
-                      {t("dataset.compare.evidenceConclusion")}
-                    </div>
-                  </Card>
-
-                  <Card className="border p-4 shadow-none">
-                    <p className="text-sm font-semibold">{t("dataset.compare.distributionTitle")}</p>
-                    <img
-                      src="/src/assets/images/distribution_vihsd_toxic.png"
-                      alt={t("dataset.compare.distributionAlt")}
-                      className="mt-3 w-full rounded-lg border"
-                    />
-                    <p className="mt-3 text-sm text-muted-foreground">
-                      {t("dataset.compare.distributionDesc")}
-                    </p>
-                  </Card>
-                </div>
-              </div>
-
-              <div>
-                <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">{t("dataset.compare.differencesAcknowledged")}</p>
-                <div className="mt-3 rounded-lg border-l-4 border-l-border-warning bg-background-warning p-4 text-sm text-text-warning">
-                  <strong>{t("dataset.compare.toxicShareTitle")}</strong> {t("dataset.compare.toxicShareDesc")}
-                </div>
-              </div>
-            </TabsContent>
-
-            <TabsContent value="annotation" className="mt-4 space-y-6">
-              <div>
-                <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">{t("dataset.annotation.consistencyMock")}</p>
-                <div className="mt-3 rounded-lg border bg-muted/30 p-4 text-sm">
-                  <p className="leading-7">
-                    <strong>{t("dataset.annotation.consistencyTitle")}</strong> {t("dataset.annotation.consistencyDesc")}
-                  </p>
-                  <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-2 text-sm text-muted-foreground">
-                    <div>{t("dataset.annotation.kappa1")}</div>
-                    <div>{t("dataset.annotation.kappa2")}</div>
-                    <div>{t("dataset.annotation.kappa3")}</div>
-                    <div>{t("dataset.annotation.kappa4")}</div>
-                  </div>
-                </div>
-              </div>
-
-              <div>
-                <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">{t("dataset.annotation.whyOffensiveToToxic")}</p>
-                <div className="mt-3 grid grid-cols-1 lg:grid-cols-2 gap-4">
-                  <Card className="border p-4 shadow-none">
-                    <span className="inline-flex rounded-md bg-background-success px-2 py-1 text-xs font-medium text-text-success">{t("dataset.annotation.offensiveBadge")}</span>
-                    <div className="mt-3 space-y-2 text-sm">
-                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.annotation.fields.definition")}</span><span className="text-right">{t("dataset.annotation.offensive.definition")}</span></div>
-                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.annotation.fields.overlap")}</span><span className="text-right">{t("dataset.annotation.offensive.overlap")}</span></div>
-                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.annotation.fields.annotationBoundary")}</span><span className="text-right">{t("dataset.annotation.offensive.annotationBoundary")}</span></div>
-                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.annotation.fields.labelNoise")}</span><span className="text-right">{t("dataset.annotation.offensive.labelNoise")}</span></div>
-                    </div>
-                    <div className="mt-4 rounded-lg border-l-4 border-l-border-success bg-background-success p-3 text-sm text-text-success">
-                      {t("dataset.annotation.offensive.note")}
-                    </div>
-                  </Card>
-
-                  <Card className="border p-4 shadow-none">
-                    <span className="inline-flex rounded-md bg-background-danger px-2 py-1 text-xs font-medium text-text-danger">{t("dataset.annotation.hateBadge")}</span>
-                    <div className="mt-3 space-y-2 text-sm">
-                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.annotation.fields.definition")}</span><span className="text-right">{t("dataset.annotation.hate.definition")}</span></div>
-                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.annotation.fields.characteristics")}</span><span className="text-right">{t("dataset.annotation.hate.characteristics")}</span></div>
-                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.annotation.fields.annotationBoundary")}</span><span className="text-right">{t("dataset.annotation.hate.annotationBoundary")}</span></div>
-                      <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.annotation.fields.labelNoise")}</span><span className="text-right">{t("dataset.annotation.hate.labelNoise")}</span></div>
-                    </div>
-                    <div className="mt-4 rounded-lg border-l-4 border-l-border-danger bg-background-danger p-3 text-sm text-text-danger">
-                      {t("dataset.annotation.hate.note")}
-                    </div>
-                  </Card>
-                </div>
-              </div>
-
-              <div>
-                <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">{t("dataset.annotation.faq")}</p>
-                <div className="mt-3 space-y-4 text-sm">
+            {isLegacyDataset && (
+              <>
+                <TabsContent value="compare" className="mt-4 space-y-6">
                   <div>
-                    <div className="flex items-start gap-2 font-medium">
-                      <span className="inline-flex h-5 w-5 items-center justify-center rounded-md bg-background-info text-xs text-text-info">Q</span>
-                      {t("dataset.annotation.q1")}
+                    <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">{t("dataset.compare.datasetCharacteristics")}</p>
+                    <div className="mt-3 grid grid-cols-1 lg:grid-cols-2 gap-4">
+                      <Card className="border p-4 shadow-none">
+                        <span className="inline-flex rounded-md bg-background-info px-2 py-1 text-xs font-medium text-text-info">{t("dataset.compare.victsdBadge")}</span>
+                        <h3 className="mt-3 text-sm font-semibold">{t("dataset.compare.victsdTitle")}</h3>
+                        <div className="mt-3 space-y-2 text-sm">
+                          <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.compare.fields.source")}</span><span className="text-right">{t("dataset.compare.victsd.source")}</span></div>
+                          <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.compare.fields.originalSize")}</span><span className="text-right">{t("dataset.compare.victsd.originalSize")}</span></div>
+                          <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.compare.fields.labelSchema")}</span><span className="text-right">{t("dataset.compare.victsd.labelSchema")}</span></div>
+                          <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.compare.fields.binarizedTo")}</span><span className="text-right">{t("dataset.compare.victsd.binarizedTo")}</span></div>
+                          <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.compare.fields.originalToxic")}</span><span className="text-right">{t("dataset.compare.victsd.originalToxic")}</span></div>
+                          <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.compare.fields.textLength")}</span><span className="text-right">{t("dataset.compare.victsd.textLength")}</span></div>
+                          <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.compare.fields.style")}</span><span className="text-right">{t("dataset.compare.victsd.style")}</span></div>
+                          <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.compare.fields.paper")}</span><a className="text-text-info hover:underline" href="https://arxiv.org/abs/2103.10069" target="_blank" rel="noreferrer">arXiv 2103.10069</a></div>
+                        </div>
+                        <div className="mt-4 rounded-lg border-l-4 border-l-border-info bg-background-info p-3 text-sm text-text-info">
+                          {t("dataset.compare.victsd.note")}
+                        </div>
+                      </Card>
+
+                      <Card className="border p-4 shadow-none">
+                        <span className="inline-flex rounded-md bg-background-success px-2 py-1 text-xs font-medium text-text-success">{t("dataset.compare.vihsdBadge")}</span>
+                        <h3 className="mt-3 text-sm font-semibold">{t("dataset.compare.vihsdTitle")}</h3>
+                        <div className="mt-3 space-y-2 text-sm">
+                          <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.compare.fields.source")}</span><span className="text-right">{t("dataset.compare.vihsd.source")}</span></div>
+                          <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.compare.fields.originalSize")}</span><span className="text-right">{t("dataset.compare.vihsd.originalSize")}</span></div>
+                          <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.compare.fields.labelSchema")}</span><span className="text-right">{t("dataset.compare.vihsd.labelSchema")}</span></div>
+                          <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.compare.fields.take")}</span><span className="text-right">{t("dataset.compare.vihsd.take")}</span></div>
+                          <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.compare.fields.samplesUsed")}</span><span className="text-right">{t("dataset.compare.vihsd.samplesUsed")}</span></div>
+                          <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.compare.fields.textLength")}</span><span className="text-right">{t("dataset.compare.vihsd.textLength")}</span></div>
+                          <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.compare.fields.style")}</span><span className="text-right">{t("dataset.compare.vihsd.style")}</span></div>
+                          <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.compare.fields.paper")}</span><a className="text-text-success hover:underline" href="https://arxiv.org/abs/2103.11528" target="_blank" rel="noreferrer">arXiv 2103.11528</a></div>
+                        </div>
+                        <div className="mt-4 rounded-lg border-l-4 border-l-border-info bg-background-info p-3 text-sm text-text-info">
+                          {t("dataset.compare.vihsd.note")}
+                        </div>
+                      </Card>
                     </div>
-                    <p className="mt-2 pl-7 text-muted-foreground">
-                      {t("dataset.annotation.a1")}
-                    </p>
                   </div>
+
                   <div>
-                    <div className="flex items-start gap-2 font-medium">
-                      <span className="inline-flex h-5 w-5 items-center justify-center rounded-md bg-background-info text-xs text-text-info">Q</span>
-                      {t("dataset.annotation.q2")}
+                    <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">{t("dataset.compare.similaritiesReason")}</p>
+                    <div className="mt-3 grid grid-cols-1 md:grid-cols-3 gap-3">
+                      <div className="rounded-lg border-l-4 border-l-border-success bg-background-success p-4 text-sm text-text-success">
+                        <strong>{t("dataset.compare.similarity1Title")}</strong><br />{t("dataset.compare.similarity1Desc")}
+                      </div>
+                      <div className="rounded-lg border-l-4 border-l-border-success bg-background-success p-4 text-sm text-text-success">
+                        <strong>{t("dataset.compare.similarity2Title")}</strong><br />{t("dataset.compare.similarity2Desc")}
+                      </div>
+                      <div className="rounded-lg border-l-4 border-l-border-success bg-background-success p-4 text-sm text-text-success">
+                        <strong>{t("dataset.compare.similarity3Title")}</strong><br />{t("dataset.compare.similarity3Desc")}
+                      </div>
                     </div>
-                    <p className="mt-2 pl-7 text-muted-foreground">
-                      {t("dataset.annotation.a2")}
-                    </p>
                   </div>
-                </div>
-              </div>
-            </TabsContent>
 
-            <TabsContent value="limitation" className="mt-4 space-y-6">
-              <div>
-                <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">{t("dataset.limitation.title")}</p>
-                <div className="mt-3 space-y-4 text-sm">
-                  <div className="flex gap-3 border-b pb-4">
-                    <div className="h-8 w-8 rounded-full bg-background-warning text-text-warning flex items-center justify-center text-xs font-semibold">L1</div>
-                    <div>
-                      <p className="font-medium">{t("dataset.limitation.l1Title")}</p>
-                      <p className="text-muted-foreground">{t("dataset.limitation.l1Desc")}</p>
-                    </div>
-                  </div>
-                  <div className="flex gap-3 border-b pb-4">
-                    <div className="h-8 w-8 rounded-full bg-background-warning text-text-warning flex items-center justify-center text-xs font-semibold">L2</div>
-                    <div>
-                      <p className="font-medium">{t("dataset.limitation.l2Title")}</p>
-                      <p className="text-muted-foreground">{t("dataset.limitation.l2Desc")}</p>
-                    </div>
-                  </div>
-                  <div className="flex gap-3 border-b pb-4">
-                    <div className="h-8 w-8 rounded-full bg-background-danger text-text-danger flex items-center justify-center text-xs font-semibold">L3</div>
-                    <div>
-                      <p className="font-medium">{t("dataset.limitation.l3Title")}</p>
-                      <p className="text-muted-foreground">{t("dataset.limitation.l3Desc")}</p>
-                    </div>
-                  </div>
-                  <div className="flex gap-3 border-b pb-4">
-                    <div className="h-8 w-8 rounded-full bg-background-danger text-text-danger flex items-center justify-center text-xs font-semibold">L4</div>
-                    <div>
-                      <p className="font-medium">{t("dataset.limitation.l4Title")}</p>
-                      <p className="text-muted-foreground">{t("dataset.limitation.l4Desc")}</p>
-                    </div>
-                  </div>
-                  <div className="flex gap-3">
-                    <div className="h-8 w-8 rounded-full bg-background-info text-text-info flex items-center justify-center text-xs font-semibold">L5</div>
-                    <div>
-                      <p className="font-medium">{t("dataset.limitation.l5Title")}</p>
-                      <p className="text-muted-foreground">{t("dataset.limitation.l5Desc")}</p>
-                    </div>
-                  </div>
-                </div>
-                <div className="mt-4 rounded-lg border-l-4 border-l-border-info bg-background-info p-4 text-sm text-text-info">
-                  <strong>{t("dataset.limitation.tipTitle")}</strong> {t("dataset.limitation.tipDesc")}
-                </div>
-              </div>
-            </TabsContent>
+                  <div>
+                    <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">{t("dataset.compare.empiricalEvidence")}</p>
+                    <div className="mt-3 grid grid-cols-1 lg:grid-cols-2 gap-4">
+                      <Card className="border p-4 shadow-none">
+                        <p className="text-sm font-semibold">{t("dataset.compare.evidenceScoreTitle")}</p>
+                        <div className="mt-3 space-y-2 text-sm">
+                          <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.compare.evidenceOffensive")}</span><span className="font-medium">0.8726</span></div>
+                          <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.compare.evidenceHate")}</span><span className="font-medium">{t("dataset.compare.evidenceHateValue")}</span></div>
+                          <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.compare.evidenceClean")}</span><span className="font-medium">0.1285</span></div>
+                        </div>
+                        <div className="mt-4 rounded-lg border-l-4 border-l-border-success bg-background-success p-3 text-sm text-text-success">
+                          {t("dataset.compare.evidenceConclusion")}
+                        </div>
+                      </Card>
 
-            <TabsContent value="definition" className="mt-4 space-y-6">
-              <div>
-                <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">{t("dataset.definition.title")}</p>
-                <div className="mt-3 text-sm text-muted-foreground space-y-3">
-                  <p>
-                    {t("dataset.definition.p1Prefix")}<strong>{t("dataset.definition.p1Label")}</strong>{t("dataset.definition.p1Mid")}
-                    <strong>{t("dataset.definition.p1Clean")}</strong>, <strong>{t("dataset.definition.p1Toxic")}</strong>.
-                  </p>
-                  <p>
-                    {t("dataset.definition.p2Prefix")}<strong>{t("dataset.definition.p2Constructiveness")}</strong>{t("dataset.definition.p2Suffix")}
-                  </p>
-                </div>
-              </div>
-            </TabsContent>
+                      <Card className="border p-4 shadow-none">
+                        <p className="text-sm font-semibold">{t("dataset.compare.distributionTitle")}</p>
+                        <img
+                          src="/src/assets/images/distribution_vihsd_toxic.png"
+                          alt={t("dataset.compare.distributionAlt")}
+                          className="mt-3 w-full rounded-lg border"
+                        />
+                        <p className="mt-3 text-sm text-muted-foreground">
+                          {t("dataset.compare.distributionDesc")}
+                        </p>
+                      </Card>
+                    </div>
+                  </div>
+
+                  <div>
+                    <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">{t("dataset.compare.differencesAcknowledged")}</p>
+                    <div className="mt-3 rounded-lg border-l-4 border-l-border-warning bg-background-warning p-4 text-sm text-text-warning">
+                      <strong>{t("dataset.compare.toxicShareTitle")}</strong> {t("dataset.compare.toxicShareDesc")}
+                    </div>
+                  </div>
+                </TabsContent>
+
+                <TabsContent value="annotation" className="mt-4 space-y-6">
+                  <div>
+                    <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">{t("dataset.annotation.consistencyMock")}</p>
+                    <div className="mt-3 rounded-lg border bg-muted/30 p-4 text-sm">
+                      <p className="leading-7">
+                        <strong>{t("dataset.annotation.consistencyTitle")}</strong> {t("dataset.annotation.consistencyDesc")}
+                      </p>
+                      <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-2 text-sm text-muted-foreground">
+                        <div>{t("dataset.annotation.kappa1")}</div>
+                        <div>{t("dataset.annotation.kappa2")}</div>
+                        <div>{t("dataset.annotation.kappa3")}</div>
+                        <div>{t("dataset.annotation.kappa4")}</div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div>
+                    <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">{t("dataset.annotation.whyOffensiveToToxic")}</p>
+                    <div className="mt-3 grid grid-cols-1 lg:grid-cols-2 gap-4">
+                      <Card className="border p-4 shadow-none">
+                        <span className="inline-flex rounded-md bg-background-success px-2 py-1 text-xs font-medium text-text-success">{t("dataset.annotation.offensiveBadge")}</span>
+                        <div className="mt-3 space-y-2 text-sm">
+                          <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.annotation.fields.definition")}</span><span className="text-right">{t("dataset.annotation.offensive.definition")}</span></div>
+                          <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.annotation.fields.overlap")}</span><span className="text-right">{t("dataset.annotation.offensive.overlap")}</span></div>
+                          <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.annotation.fields.annotationBoundary")}</span><span className="text-right">{t("dataset.annotation.offensive.annotationBoundary")}</span></div>
+                          <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.annotation.fields.labelNoise")}</span><span className="text-right">{t("dataset.annotation.offensive.labelNoise")}</span></div>
+                        </div>
+                        <div className="mt-4 rounded-lg border-l-4 border-l-border-success bg-background-success p-3 text-sm text-text-success">
+                          {t("dataset.annotation.offensive.note")}
+                        </div>
+                      </Card>
+
+                      <Card className="border p-4 shadow-none">
+                        <span className="inline-flex rounded-md bg-background-danger px-2 py-1 text-xs font-medium text-text-danger">{t("dataset.annotation.hateBadge")}</span>
+                        <div className="mt-3 space-y-2 text-sm">
+                          <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.annotation.fields.definition")}</span><span className="text-right">{t("dataset.annotation.hate.definition")}</span></div>
+                          <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.annotation.fields.characteristics")}</span><span className="text-right">{t("dataset.annotation.hate.characteristics")}</span></div>
+                          <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.annotation.fields.annotationBoundary")}</span><span className="text-right">{t("dataset.annotation.hate.annotationBoundary")}</span></div>
+                          <div className="flex justify-between gap-4"><span className="text-muted-foreground">{t("dataset.annotation.fields.labelNoise")}</span><span className="text-right">{t("dataset.annotation.hate.labelNoise")}</span></div>
+                        </div>
+                        <div className="mt-4 rounded-lg border-l-4 border-l-border-danger bg-background-danger p-3 text-sm text-text-danger">
+                          {t("dataset.annotation.hate.note")}
+                        </div>
+                      </Card>
+                    </div>
+                  </div>
+
+                  <div>
+                    <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">{t("dataset.annotation.faq")}</p>
+                    <div className="mt-3 space-y-4 text-sm">
+                      <div>
+                        <div className="flex items-start gap-2 font-medium">
+                          <span className="inline-flex h-5 w-5 items-center justify-center rounded-md bg-background-info text-xs text-text-info">Q</span>
+                          {t("dataset.annotation.q1")}
+                        </div>
+                        <p className="mt-2 pl-7 text-muted-foreground">
+                          {t("dataset.annotation.a1")}
+                        </p>
+                      </div>
+                      <div>
+                        <div className="flex items-start gap-2 font-medium">
+                          <span className="inline-flex h-5 w-5 items-center justify-center rounded-md bg-background-info text-xs text-text-info">Q</span>
+                          {t("dataset.annotation.q2")}
+                        </div>
+                        <p className="mt-2 pl-7 text-muted-foreground">
+                          {t("dataset.annotation.a2")}
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                </TabsContent>
+
+                <TabsContent value="limitation" className="mt-4 space-y-6">
+                  <div>
+                    <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">{t("dataset.limitation.title")}</p>
+                    <div className="mt-3 space-y-4 text-sm">
+                      <div className="flex gap-3 border-b pb-4">
+                        <div className="h-8 w-8 rounded-full bg-background-warning text-text-warning flex items-center justify-center text-xs font-semibold">L1</div>
+                        <div>
+                          <p className="font-medium">{t("dataset.limitation.l1Title")}</p>
+                          <p className="text-muted-foreground">{t("dataset.limitation.l1Desc")}</p>
+                        </div>
+                      </div>
+                      <div className="flex gap-3 border-b pb-4">
+                        <div className="h-8 w-8 rounded-full bg-background-warning text-text-warning flex items-center justify-center text-xs font-semibold">L2</div>
+                        <div>
+                          <p className="font-medium">{t("dataset.limitation.l2Title")}</p>
+                          <p className="text-muted-foreground">{t("dataset.limitation.l2Desc")}</p>
+                        </div>
+                      </div>
+                      <div className="flex gap-3 border-b pb-4">
+                        <div className="h-8 w-8 rounded-full bg-background-danger text-text-danger flex items-center justify-center text-xs font-semibold">L3</div>
+                        <div>
+                          <p className="font-medium">{t("dataset.limitation.l3Title")}</p>
+                          <p className="text-muted-foreground">{t("dataset.limitation.l3Desc")}</p>
+                        </div>
+                      </div>
+                      <div className="flex gap-3 border-b pb-4">
+                        <div className="h-8 w-8 rounded-full bg-background-danger text-text-danger flex items-center justify-center text-xs font-semibold">L4</div>
+                        <div>
+                          <p className="font-medium">{t("dataset.limitation.l4Title")}</p>
+                          <p className="text-muted-foreground">{t("dataset.limitation.l4Desc")}</p>
+                        </div>
+                      </div>
+                      <div className="flex gap-3">
+                        <div className="h-8 w-8 rounded-full bg-background-info text-text-info flex items-center justify-center text-xs font-semibold">L5</div>
+                        <div>
+                          <p className="font-medium">{t("dataset.limitation.l5Title")}</p>
+                          <p className="text-muted-foreground">{t("dataset.limitation.l5Desc")}</p>
+                        </div>
+                      </div>
+                    </div>
+                    <div className="mt-4 rounded-lg border-l-4 border-l-border-info bg-background-info p-4 text-sm text-text-info">
+                      <strong>{t("dataset.limitation.tipTitle")}</strong> {t("dataset.limitation.tipDesc")}
+                    </div>
+                  </div>
+                </TabsContent>
+
+                <TabsContent value="definition" className="mt-4 space-y-6">
+                  <div>
+                    <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">{t("dataset.definition.title")}</p>
+                    <div className="mt-3 text-sm text-muted-foreground space-y-3">
+                      <p>
+                        {t("dataset.definition.p1Prefix")}<strong>{t("dataset.definition.p1Label")}</strong>{t("dataset.definition.p1Mid")}
+                        <strong>{t("dataset.definition.p1Clean")}</strong>, <strong>{t("dataset.definition.p1Toxic")}</strong>.
+                      </p>
+                      <p>
+                        {t("dataset.definition.p2Prefix")}<strong>{t("dataset.definition.p2Constructiveness")}</strong>{t("dataset.definition.p2Suffix")}
+                      </p>
+                    </div>
+                  </div>
+                </TabsContent>
+              </>
+            )}
           </Tabs>
         </Card>
 

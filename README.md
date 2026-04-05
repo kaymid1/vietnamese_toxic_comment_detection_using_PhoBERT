@@ -72,6 +72,22 @@ flowchart TD
 - Duplicate segment feedback is deduplicated by semantic key `(context_segment_hash || segment_hash, html_tag_effective)` so rescanning/relabeling the same segment does not inflate support.
 - For each key, only the latest label is treated as active when computing learned statistics.
 
+### Crawl artifact schema (segments.jsonl)
+
+Each row in `data/raw/crawled_urls/<url_hash>/segments.jsonl` now includes:
+
+```json
+{
+  "text": "...",
+  "segment_index": 0,
+  "url_hash": "<md5_of_url>",
+  "segment_hash": "<sha256(normalized_text + '|' + html_tag_effective)>"
+}
+```
+
+At crawl time, `html_tag_effective` defaults to `"body"` (because per-segment HTML tag may not yet be available).
+`text` is preserved for backward compatibility with existing readers.
+
 ## Project Structure
 
 ```text
@@ -188,6 +204,7 @@ The repository includes research scripts for:
 
 - exporting raw ViCTSD data
 - preprocessing into `data/processed/victsd_v1`
+- preparing a deduplicated gold-base dataset into `data/processed/victsd_gold`
 - building protocol datasets A/B/C from ViCTSD + ViHSD
 - exploratory data analysis
 - training TF-IDF + Logistic Regression baseline
@@ -199,6 +216,35 @@ The repository includes research scripts for:
 - ViHSD raw: `data/raw/vihsd/{train,validation,test}.jsonl`
   - label map from `data/raw/vihsd/metadata.json`
   - OFFENSIVE is mapped to binary `toxicity=1` for protocol augmentation
+
+### Gold-base dataset builder (for retrain pipeline)
+
+Use:
+
+- `scripts/02b_prepare_gold_dataset.py`
+
+Default I/O (Colab-friendly via env):
+
+- `DATA_RAW_DIR` (default: `data/raw/victsd`)
+- `OUTPUT_DIR` (default: `data/processed/victsd_gold`)
+
+This script:
+
+- maps `Comment -> text` and `Toxicity -> toxicity`
+- applies trim + NFC + whitespace normalization while preserving case/punctuation/emoji
+- drops empty rows after cleaning
+- deduplicates exact normalized text within each split (keeps first occurrence)
+- writes:
+  - `data/processed/victsd_gold/train.jsonl`
+  - `data/processed/victsd_gold/validation.jsonl`
+  - `data/processed/victsd_gold/test.jsonl`
+  - `data/processed/victsd_gold/build_report.json`
+- prints and stores summary metrics:
+  - input/output/drop counts per split
+  - toxic ratio per split
+  - overlap counts (`train↔validation`, `train↔test`, `validation↔test`)
+
+This workflow is separate from protocol A/B/C artifacts.
 
 ### Protocol builder (A/B/C)
 

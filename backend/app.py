@@ -38,6 +38,22 @@ HARD_CASES_PATH = BASE_DIR / "data" / "processed" / "hard_case_candidates.json"
 PROTOCOL_BUILD_REPORT_PATH = BASE_DIR / "data" / "victsd" / "victsd_v1_protocol_build_report.json"
 PROTOCOL_METRICS_ROOT = BASE_DIR / "viettoxic_outputs"
 
+DEFAULT_DATASET_VERSION = os.getenv("VIETTOXIC_DATASET_VERSION", "victsd_v1")
+DEFAULT_MODEL_VERSION = os.getenv("VIETTOXIC_MODEL_VERSION", "unknown")
+DEFAULT_POLICY_VERSION = os.getenv("VIETTOXIC_POLICY_VERSION", "policy-v1")
+REQUIRED_VERSION_KEYS = ("dataset_version", "model_version", "policy_version")
+
+DATASET_VERSION_ALIASES: Dict[str, str] = {
+    "v1": "victsd_v1",
+    "victsd_v1": "victsd_v1",
+    "latest": "victsd_gold",
+    "victsd_gold": "victsd_gold",
+}
+DATASET_VERSION_DIRS: Dict[str, Path] = {
+    "victsd_v1": BASE_DIR / "data" / "victsd",
+    "victsd_gold": BASE_DIR / "data" / "processed" / "victsd_gold",
+}
+
 MODEL_TYPES = {
     "phobert": {
         "required": ("config.json",),
@@ -262,6 +278,9 @@ class DatasetExportRequest(BaseModel):
     source: Optional[List[str]] = None
     label: Optional[List[int]] = None
     split: Optional[List[str]] = None
+    dataset_version: Optional[str] = None
+    model_version: Optional[str] = None
+    policy_version: Optional[str] = None
 
 
 class FeedbackDeleteRequest(BaseModel):
@@ -1505,10 +1524,46 @@ def compute_f1(precision: float, recall: float) -> float:
 
 
 
-def iter_dataset_files() -> List[Tuple[Path, str, bool]]:
-    dataset_dir = BASE_DIR / "data" / "victsd"
+def normalize_dataset_version(value: Optional[str]) -> str:
+    normalized = (value or DEFAULT_DATASET_VERSION).strip().lower()
+    resolved = DATASET_VERSION_ALIASES.get(normalized)
+    if resolved:
+        return resolved
+    raise HTTPException(
+        status_code=400,
+        detail={
+            "message": "Unsupported dataset_version",
+            "value": value,
+            "allowed": sorted(DATASET_VERSION_ALIASES.keys()),
+        },
+    )
+
+
+def resolve_dataset_dir(dataset_version: str) -> Path:
+    dataset_dir = DATASET_VERSION_DIRS.get(dataset_version)
+    if dataset_dir is None:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": "Unsupported canonical dataset_version",
+                "value": dataset_version,
+                "allowed": sorted(DATASET_VERSION_DIRS.keys()),
+            },
+        )
     if not dataset_dir.exists():
-        return []
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": "Dataset directory does not exist",
+                "dataset_version": dataset_version,
+                "path": str(dataset_dir.relative_to(BASE_DIR)),
+            },
+        )
+    return dataset_dir
+
+
+def iter_dataset_files(dataset_version: str) -> List[Tuple[Path, str, bool]]:
+    dataset_dir = resolve_dataset_dir(dataset_version)
     files: List[Tuple[Path, str, bool]] = []
     for path in sorted(dataset_dir.glob("*.jsonl")):
         name = path.name.lower()
@@ -1536,9 +1591,9 @@ def normalize_source(value: Optional[str]) -> str:
     return cleaned
 
 
-def iter_dataset_rows() -> List[Dict[str, Any]]:
+def iter_dataset_rows(dataset_version: str) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
-    for path, split, is_augmented in iter_dataset_files():
+    for path, split, is_augmented in iter_dataset_files(dataset_version):
         try:
             with path.open("r", encoding="utf-8") as f:
                 for line in f:
@@ -1655,6 +1710,76 @@ def file_last_updated(path: Path) -> Optional[str]:
     except OSError as exc:
         logger.warning("Failed to read mtime for %s: %s", path, exc)
         return None
+
+
+def utc_timestamp_compact() -> str:
+    return datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+
+
+def slugify_token(value: str) -> str:
+    cleaned = re.sub(r"[^a-zA-Z0-9._-]+", "_", (value or "").strip())
+    cleaned = cleaned.strip("._-")
+    return cleaned or "unknown"
+
+
+def build_artifact_versions(
+    *,
+    dataset_version: Optional[str],
+    model_version: Optional[str],
+    policy_version: Optional[str],
+) -> Dict[str, str]:
+    versions = {
+        "dataset_version": (dataset_version or "").strip(),
+        "model_version": (model_version or "").strip(),
+        "policy_version": (policy_version or "").strip(),
+    }
+    return versions
+
+
+def find_missing_required_versions(versions: Dict[str, str]) -> List[str]:
+    missing: List[str] = []
+    for key in REQUIRED_VERSION_KEYS:
+        value = versions.get(key)
+        if not isinstance(value, str) or not value.strip():
+            missing.append(key)
+    return missing
+
+
+def build_domain_mismatch_note(protocol_id: str, train_stats: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    stats = train_stats if isinstance(train_stats, dict) else {}
+    sources = stats.get("sources") if isinstance(stats, dict) else {}
+    source_map = {str(k): int(v) for k, v in (sources or {}).items() if isinstance(v, (int, float))}
+    total = sum(source_map.values())
+    vihsd_total = source_map.get("UIT-ViHSD", 0)
+    vihsd_ratio = (vihsd_total / total) if total else 0.0
+
+    if protocol_id == "a":
+        summary = "ViCTSD-only training set (closest to clean benchmark anchor)."
+    elif protocol_id == "b":
+        summary = (
+            "Train includes ViHSD OFFENSIVE injections while validation/test stay ViCTSD; "
+            "watch for social-style toxic bias against formal news text."
+        )
+    elif protocol_id == "c":
+        summary = (
+            "Merged benchmark across ViCTSD+ViHSD with global dedup/split; "
+            "still requires caution when deploying to formal news domain."
+        )
+    else:
+        summary = "Domain mismatch risk unknown."
+
+    risk_level = "low"
+    if vihsd_ratio >= 0.40:
+        risk_level = "high"
+    elif vihsd_ratio >= 0.20:
+        risk_level = "medium"
+
+    return {
+        "risk_level": risk_level,
+        "vihsd_train_ratio": vihsd_ratio,
+        "train_source_mix": source_map,
+        "summary": summary,
+    }
 
 
 def filter_dataset_rows(
@@ -2938,9 +3063,11 @@ def dataset_preview(
     label: Optional[int] = Query(default=None, ge=0, le=1),
     split: Optional[str] = None,
     include_stats: bool = False,
+    dataset_version: Optional[str] = None,
 ) -> Dict[str, Any]:
+    resolved_dataset_version = normalize_dataset_version(dataset_version)
     include_feedback = (split or "").strip().lower() == "feedback" or (source or "").strip().lower() == "new_collected"
-    rows = iter_dataset_rows() + (iter_feedback_rows() if include_feedback else [])
+    rows = iter_dataset_rows(resolved_dataset_version) + (iter_feedback_rows() if include_feedback else [])
     sources = [source] if source else None
     labels = [label] if label is not None else None
     splits = [split] if split else None
@@ -2956,6 +3083,7 @@ def dataset_preview(
         "total": total,
         "total_pages": total_pages,
         "items": items,
+        "dataset_version": resolved_dataset_version,
     }
     if include_stats:
         payload["stats"] = build_dataset_stats(filtered)
@@ -2964,21 +3092,72 @@ def dataset_preview(
 
 @app.post("/api/dataset/export")
 def dataset_export(request: DatasetExportRequest) -> Dict[str, Any]:
-    rows = iter_dataset_rows() + iter_feedback_rows()
+    resolved_dataset_version = normalize_dataset_version(request.dataset_version)
+    rows = iter_dataset_rows(resolved_dataset_version) + iter_feedback_rows()
     filtered = filter_dataset_rows(
         rows,
         sources=request.source,
         labels=request.label,
         splits=request.split,
     )
+
+    model_version = request.model_version or DEFAULT_MODEL_VERSION
+    policy_version = request.policy_version or DEFAULT_POLICY_VERSION
+
+    versions = build_artifact_versions(
+        dataset_version=resolved_dataset_version,
+        model_version=model_version,
+        policy_version=policy_version,
+    )
+    missing_versions = find_missing_required_versions(versions)
+    if missing_versions:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": "Missing required version metadata",
+                "missing": missing_versions,
+                "required": list(REQUIRED_VERSION_KEYS),
+            },
+        )
+
     out_dir = BASE_DIR / "data" / "processed"
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / "combined_dataset.jsonl"
+
+    timestamp = utc_timestamp_compact()
+    short_id = uuid.uuid4().hex[:8]
+    dataset_token = slugify_token(versions["dataset_version"])
+    out_path = out_dir / f"combined_dataset_{dataset_token}_{timestamp}_{short_id}.jsonl"
+
     with out_path.open("w", encoding="utf-8") as f:
         for row in filtered:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
     stats = build_dataset_stats(filtered)
-    return {"path": str(out_path.relative_to(BASE_DIR)), "count": len(filtered), "stats": stats}
+    manifest = {
+        "artifact_type": "dataset_export",
+        "artifact_path": str(out_path.relative_to(BASE_DIR)),
+        "created_at": datetime.utcnow().isoformat() + "Z",
+        "filters": {
+            "source": request.source or [],
+            "label": request.label or [],
+            "split": request.split or [],
+        },
+        "record_count": len(filtered),
+        **versions,
+    }
+
+    manifest_path = out_dir / f"combined_dataset_{dataset_token}_{timestamp}_{short_id}.manifest.json"
+    with manifest_path.open("w", encoding="utf-8") as f:
+        json.dump(manifest, f, ensure_ascii=False, indent=2)
+
+    return {
+        "path": str(out_path.relative_to(BASE_DIR)),
+        "artifact_path": str(out_path.relative_to(BASE_DIR)),
+        "manifest_path": str(manifest_path.relative_to(BASE_DIR)),
+        "count": len(filtered),
+        "stats": stats,
+        "artifact_versions": versions,
+    }
 
 
 @app.post("/api/dataset/synthetic/generate")
@@ -3366,7 +3545,20 @@ def protocol_summary() -> Dict[str, Any]:
     report = load_json_file(PROTOCOL_BUILD_REPORT_PATH, {})
     report_protocols = report.get("protocols") if isinstance(report, dict) else {}
 
+    dataset_version = (
+        (report.get("config") or {}).get("dataset_prefix") if isinstance(report, dict) else None
+    ) or DEFAULT_DATASET_VERSION
+    versions = build_artifact_versions(
+        dataset_version=dataset_version,
+        model_version=DEFAULT_MODEL_VERSION,
+        policy_version=DEFAULT_POLICY_VERSION,
+    )
+    missing_versions = find_missing_required_versions(versions)
+
     warnings: List[str] = []
+    if missing_versions:
+        warnings.append(f"Missing required version metadata: {missing_versions}")
+
     protocols: List[Dict[str, Any]] = []
 
     for protocol_id in ["a", "b", "c"]:
@@ -3395,6 +3587,28 @@ def protocol_summary() -> Dict[str, Any]:
             float(run["f1_toxic"]) for run in seed_runs if isinstance(run.get("f1_toxic"), (int, float))
         ]
 
+        train_stats = stats.get("train") if isinstance(stats, dict) else None
+        source_mix_by_split = {
+            "train": (train_stats.get("sources") if isinstance(train_stats, dict) else {}) or {},
+            "validation": ((stats.get("validation") or {}).get("sources") if isinstance(stats, dict) else {}) or {},
+            "test": ((stats.get("test") or {}).get("sources") if isinstance(stats, dict) else {}) or {},
+        }
+
+        overlap_exact = overlap if isinstance(overlap, dict) else {}
+        train_validation_overlap = int(overlap_exact.get("train_validation") or 0)
+        train_test_overlap = int(overlap_exact.get("train_test") or 0)
+        validation_test_overlap = int(overlap_exact.get("validation_test") or 0)
+
+        leakage_evidence = {
+            "train_validation": train_validation_overlap,
+            "train_test": train_test_overlap,
+            "validation_test": validation_test_overlap,
+            "has_train_test_leakage": train_test_overlap > 0,
+            "has_any_overlap": (train_validation_overlap + train_test_overlap + validation_test_overlap) > 0,
+        }
+
+        domain_mismatch = build_domain_mismatch_note(protocol_id, train_stats if isinstance(train_stats, dict) else None)
+
         protocols.append(
             {
                 "id": protocol_id,
@@ -3411,11 +3625,15 @@ def protocol_summary() -> Dict[str, Any]:
                     "support_toxic": final_metrics.get("support_toxic"),
                 },
                 "stats": {
-                    "train": stats.get("train") if isinstance(stats, dict) else None,
+                    "train": train_stats,
                     "validation": stats.get("validation") if isinstance(stats, dict) else None,
                     "test": stats.get("test") if isinstance(stats, dict) else None,
                 },
-                "overlap_exact": overlap if isinstance(overlap, dict) else {},
+                "source_mix_by_split": source_mix_by_split,
+                "overlap_exact": overlap_exact,
+                "leakage_evidence": leakage_evidence,
+                "domain_mismatch": domain_mismatch,
+                "artifact_versions": versions,
                 "metrics_last_updated": file_last_updated(metrics_path),
                 "seed_runs": seed_runs,
                 "seed_summary": {
@@ -3449,10 +3667,17 @@ def protocol_summary() -> Dict[str, Any]:
             warnings.extend(str(w) for w in report_warnings)
 
     return {
-        "dataset_version": (report.get("config") or {}).get("dataset_prefix") if isinstance(report, dict) else None,
+        "dataset_version": dataset_version,
+        "model_version": versions["model_version"],
+        "policy_version": versions["policy_version"],
+        "artifact_versions": versions,
+        "missing_required_versions": missing_versions,
         "build_report_last_updated": file_last_updated(PROTOCOL_BUILD_REPORT_PATH),
         "protocols": protocols,
         "winner": best_protocol,
         "warnings": warnings,
-        "source_note": "Source: viettoxic_outputs/protocol_{a,b,c}/results/metrics.json (final_test_rich), run date 2026-03-31",
+        "source_note": (
+            "Source: data/victsd/*_protocol_build_report.json + "
+            "viettoxic_outputs/protocol_{a,b,c}/results/metrics.json (final_test_rich)"
+        ),
     }

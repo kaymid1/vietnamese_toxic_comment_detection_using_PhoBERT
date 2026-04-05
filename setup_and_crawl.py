@@ -330,6 +330,36 @@ def make_driver(timeout: int = 90, headless: bool = True):
 def hash_url(url: str) -> str:
     return hashlib.md5(url.encode()).hexdigest()
 
+
+def normalize_segment_text(text: str) -> str:
+    return " ".join((text or "").strip().split()).lower()
+
+
+def build_segment_hash(text: str, html_tag: str) -> str:
+    # Keep this IDENTICAL to backend/app.py and infer_crawled_local.py.
+    base = f"{normalize_segment_text(text)}|{(html_tag or '').strip().lower()}"
+    return hashlib.sha256(base.encode("utf-8")).hexdigest()
+
+
+def build_crawl_segment_record(
+    text: str,
+    segment_index: int,
+    url_hash: str,
+    html_tag_effective: str = "body",
+) -> dict:
+    """
+    Build one segments.jsonl record at crawl time.
+
+    At crawl time we usually do not have inferred HTML tag metadata per segment yet,
+    so html_tag_effective defaults to "body".
+    """
+    return {
+        "text": text,
+        "segment_index": segment_index,
+        "url_hash": url_hash,
+        "segment_hash": build_segment_hash(text, html_tag_effective),
+    }
+
 def _extract_youtube_id_from_url(url: str) -> Optional[str]:
     try:
         parsed = urlparse(url)
@@ -946,6 +976,7 @@ def crawl_and_save(
         duration = round(time.time() - start_total, 2)
         meta = {
             "url": url,
+            "url_hash": url_hash,
             "timestamp": datetime.now().isoformat(),
             "status": "failed",
             "method": method,
@@ -985,8 +1016,14 @@ def crawl_and_save(
         f.write(text.strip())
 
     with open(os.path.join(save_folder, "segments.jsonl"), "w", encoding="utf-8") as f:
-        for seg in cleaned_segments:
-            f.write(json.dumps({"text": seg}, ensure_ascii=False) + "\n")
+        for idx, seg in enumerate(cleaned_segments):
+            row = build_crawl_segment_record(
+                text=seg,
+                segment_index=idx,
+                url_hash=url_hash,
+                html_tag_effective="body",
+            )
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
     if enable_video and html_for_video:
         try:
@@ -1145,6 +1182,7 @@ def crawl_and_save(
     duration = round(time.time() - start_total, 2)
     meta = {
         "url": url,
+        "url_hash": url_hash,
         "timestamp": datetime.now().isoformat(),
         "num_segments": len(cleaned_segments),
         "duration_sec": duration,

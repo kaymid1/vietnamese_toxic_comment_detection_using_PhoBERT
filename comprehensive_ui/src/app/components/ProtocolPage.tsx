@@ -51,6 +51,27 @@ interface ProtocolSeedSummary {
   f1_toxic_std?: number | null;
 }
 
+interface ArtifactVersions {
+  dataset_version?: string;
+  model_version?: string;
+  policy_version?: string;
+}
+
+interface LeakageEvidence {
+  train_validation?: number;
+  train_test?: number;
+  validation_test?: number;
+  has_train_test_leakage?: boolean;
+  has_any_overlap?: boolean;
+}
+
+interface DomainMismatchEvidence {
+  risk_level?: string;
+  vihsd_train_ratio?: number;
+  train_source_mix?: Record<string, number>;
+  summary?: string;
+}
+
 interface ProtocolSummaryItem {
   id: string;
   name: string;
@@ -61,11 +82,19 @@ interface ProtocolSummaryItem {
     validation?: SplitStats | null;
     test?: SplitStats | null;
   };
+  source_mix_by_split?: {
+    train?: Record<string, number>;
+    validation?: Record<string, number>;
+    test?: Record<string, number>;
+  };
   overlap_exact?: {
     train_validation?: number;
     train_test?: number;
     validation_test?: number;
   };
+  leakage_evidence?: LeakageEvidence;
+  domain_mismatch?: DomainMismatchEvidence;
+  artifact_versions?: ArtifactVersions;
   metrics_last_updated?: string | null;
   seed_runs?: ProtocolSeedRun[];
   seed_summary?: ProtocolSeedSummary;
@@ -73,6 +102,10 @@ interface ProtocolSummaryItem {
 
 interface ProtocolSummaryResponse {
   dataset_version?: string | null;
+  model_version?: string | null;
+  policy_version?: string | null;
+  artifact_versions?: ArtifactVersions;
+  missing_required_versions?: string[];
   build_report_last_updated?: string | null;
   protocols: ProtocolSummaryItem[];
   winner?: string | null;
@@ -92,13 +125,7 @@ const buildApiUrl = (path: string) => {
 
 const formatScore = (v?: number | null) => (typeof v === "number" ? v.toFixed(3) : "--");
 const formatPercent = (v?: number | null) => (typeof v === "number" ? `${(v * 100).toFixed(1)}%` : "--");
-
-const decisionLabel = (id: string, winner?: string | null) => {
-  if (id === winner) return "Selected";
-  if (id === "a") return "Anchor Baseline";
-  if (id === "b") return "Deploy-comparable candidate";
-  return "Candidate";
-};
+const formatSeed = (seed?: number | null) => (typeof seed === "number" ? `seed=${seed}` : "seed=?");
 
 const metricBarWidth = (value?: number | null) => {
   if (typeof value !== "number") return "0%";
@@ -106,22 +133,24 @@ const metricBarWidth = (value?: number | null) => {
   return `${(clipped * 100).toFixed(1)}%`;
 };
 
-const formatSeed = (seed?: number | null) => (typeof seed === "number" ? `seed=${seed}` : "seed=42");
+const decisionLabel = (id: string, winner: string | null | undefined, t: (key: string) => string) => {
+  if (id === winner) return t("protocol.labels.selected");
+  if (id === "a") return t("protocol.labels.anchor");
+  if (id === "b") return t("protocol.labels.deployCandidate");
+  return t("protocol.labels.candidate");
+};
 
-const SIDEBAR_ITEMS = [
-  { id: "preprocessing", label: "Preprocessing" },
-  { id: "protocol-building", label: "Protocol Building" },
-  { id: "training", label: "Training" },
-  { id: "evaluation", label: "Evaluation" },
-  { id: "decision", label: "Decision" },
-] as const;
+const renderSourceMix = (sources?: Record<string, number>) => {
+  const entries = Object.entries(sources || {});
+  if (!entries.length) return "--";
+  return entries.map(([name, count]) => `${name}: ${count}`).join(" · ");
+};
 
 export function ProtocolPage() {
   const { t } = useI18n();
   const [data, setData] = useState<ProtocolSummaryResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [activeSection, setActiveSection] = useState<string>("decision");
 
   const fetchSummary = async () => {
     setLoading(true);
@@ -144,34 +173,6 @@ export function ProtocolPage() {
     void fetchSummary();
   }, [t]);
 
-  useEffect(() => {
-    const sections = SIDEBAR_ITEMS
-      .map((item) => document.getElementById(item.id))
-      .filter((el): el is HTMLElement => el instanceof HTMLElement);
-
-    if (!sections.length) return;
-
-    const observer = new IntersectionObserver(
-      (entries) => {
-        const topVisible = entries
-          .filter((entry) => entry.isIntersecting)
-          .sort((a, b) => b.intersectionRatio - a.intersectionRatio)[0];
-
-        if (!topVisible?.target?.id) return;
-        const id = topVisible.target.id;
-        setActiveSection((prev) => (prev === id ? prev : id));
-      },
-      {
-        root: null,
-        rootMargin: "-20% 0px -55% 0px",
-        threshold: [0.15, 0.35, 0.6],
-      },
-    );
-
-    sections.forEach((section) => observer.observe(section));
-    return () => observer.disconnect();
-  }, [data]);
-
   const protocols = useMemo(() => data?.protocols ?? [], [data]);
 
   const rankedProtocols = useMemo(() => {
@@ -186,14 +187,6 @@ export function ProtocolPage() {
   }, [protocols]);
 
   const winner = rankedProtocols.find((p) => p.id === data?.winner) ?? rankedProtocols[0];
-
-  const jumpToSection = (sectionId: string) => {
-    setActiveSection(sectionId);
-    const el = document.getElementById(sectionId);
-    if (el) {
-      el.scrollIntoView({ behavior: "smooth", block: "start" });
-    }
-  };
 
   if (loading) {
     return (
@@ -213,251 +206,194 @@ export function ProtocolPage() {
   }
 
   return (
-    <div className="max-w-[1450px] mx-auto px-4 sm:px-6 lg:px-8 py-10">
-      <div className="flex items-start gap-6">
-        <aside className="hidden xl:block w-60 shrink-0 sticky top-24 bg-background-secondary rounded-xl p-4">
-          <div className="mb-4">
-            <h2 className="text-base font-bold text-foreground">The Precision Lab</h2>
-            <p className="text-[11px] text-muted-foreground">VNToxic-Pipeline v1.0</p>
+    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-10 space-y-6">
+      <section className="space-y-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <Badge className="bg-background-info text-text-info">{t("protocol.tags.victsd")}</Badge>
+          <Badge variant="secondary" className="bg-muted text-muted-foreground">{t("protocol.tags.vihsd")}</Badge>
+          <Badge variant="secondary" className="bg-muted text-muted-foreground">{t("protocol.tags.toxicity")}</Badge>
+          <Badge variant="secondary" className="bg-muted text-muted-foreground">{t("protocol.tags.leakage")}</Badge>
+        </div>
+        <h1 className="text-3xl font-bold text-foreground">{t("protocol.title")}</h1>
+        <p className="text-muted-foreground">{t("protocol.subtitle")}</p>
+      </section>
+
+      <Card className="p-4 bg-background-secondary border border-border/40">
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-3 text-sm">
+          <div>
+            <p className="text-muted-foreground">{t("protocol.version.dataset")}</p>
+            <p className="font-medium">{data?.artifact_versions?.dataset_version || data?.dataset_version || "--"}</p>
           </div>
-          <nav className="space-y-1 text-sm">
-            {SIDEBAR_ITEMS.map((item) => {
-              const active = activeSection === item.id;
+          <div>
+            <p className="text-muted-foreground">{t("protocol.version.model")}</p>
+            <p className="font-medium">{data?.artifact_versions?.model_version || data?.model_version || "--"}</p>
+          </div>
+          <div>
+            <p className="text-muted-foreground">{t("protocol.version.policy")}</p>
+            <p className="font-medium">{data?.artifact_versions?.policy_version || data?.policy_version || "--"}</p>
+          </div>
+          <div>
+            <p className="text-muted-foreground">{t("protocol.version.updated")}</p>
+            <p className="font-medium">{data?.build_report_last_updated || "--"}</p>
+          </div>
+        </div>
+        {(data?.missing_required_versions?.length ?? 0) > 0 && (
+          <p className="text-xs text-text-warning mt-3">
+            {t("protocol.version.missing")}: {data?.missing_required_versions?.join(", ")}
+          </p>
+        )}
+      </Card>
+
+      <Card className="p-5 bg-card border border-border/40 shadow-sm">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-xl font-semibold">{t("protocol.matrix.title")}</h2>
+          <Badge variant="outline" className="text-text-info">{t("protocol.matrix.rankedBy")}</Badge>
+        </div>
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>{t("protocol.matrix.columns.rank")}</TableHead>
+              <TableHead>{t("protocol.matrix.columns.protocol")}</TableHead>
+              <TableHead>{t("protocol.matrix.columns.f1Toxic")}</TableHead>
+              <TableHead>{t("protocol.matrix.columns.macroF1")}</TableHead>
+              <TableHead>{t("protocol.matrix.columns.ece")}</TableHead>
+              <TableHead>{t("protocol.matrix.columns.brier")}</TableHead>
+              <TableHead>{t("protocol.matrix.columns.decision")}</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {rankedProtocols.map((p) => (
+              <TableRow key={p.id}>
+                <TableCell className="font-medium">#{p.rank}</TableCell>
+                <TableCell>{p.name}</TableCell>
+                <TableCell>{formatScore(p.metrics.f1_toxic)}</TableCell>
+                <TableCell>{formatScore(p.metrics.macro_f1)}</TableCell>
+                <TableCell>{formatScore(p.metrics.ece)}</TableCell>
+                <TableCell>{formatScore(p.metrics.brier)}</TableCell>
+                <TableCell>
+                  <Badge variant={p.id === data?.winner ? "default" : "secondary"}>
+                    {decisionLabel(p.id, data?.winner, t)}
+                  </Badge>
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </Card>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {protocols.map((p) => (
+          <Card key={p.id} className="p-5 bg-card border border-border/40">
+            <div className="flex items-center justify-between gap-3 mb-3">
+              <h3 className="text-lg font-semibold">{p.name}</h3>
+              <Badge variant={(p.leakage_evidence?.has_train_test_leakage ?? false) ? "destructive" : "secondary"}>
+                {(p.leakage_evidence?.has_train_test_leakage ?? false)
+                  ? t("protocol.evidence.leakageCheck")
+                  : t("protocol.evidence.leakagePass")}
+              </Badge>
+            </div>
+
+            <div className="space-y-2 text-sm">
+              <p>
+                <span className="text-muted-foreground">{t("protocol.evidence.trainSourceMix")}: </span>
+                {renderSourceMix(p.source_mix_by_split?.train)}
+              </p>
+              <p>
+                <span className="text-muted-foreground">{t("protocol.evidence.overlapTrainTest")}: </span>
+                {p.leakage_evidence?.train_test ?? p.overlap_exact?.train_test ?? 0}
+              </p>
+              <p>
+                <span className="text-muted-foreground">{t("protocol.evidence.vihsdRatio")}: </span>
+                {formatPercent(p.domain_mismatch?.vihsd_train_ratio ?? null)}
+              </p>
+              <p>
+                <span className="text-muted-foreground">{t("protocol.evidence.risk")}: </span>
+                {(p.domain_mismatch?.risk_level || "--").toUpperCase()}
+              </p>
+            </div>
+
+            <div className="mt-3 rounded-lg border-l-4 border-l-border-info bg-background-info p-3 text-sm text-text-info">
+              {p.domain_mismatch?.summary || t("protocol.evidence.noSummary")}
+            </div>
+          </Card>
+        ))}
+      </div>
+
+      <Card className="p-5 bg-card border border-border/40 shadow-sm">
+        <h2 className="text-lg font-semibold mb-3">{t("protocol.seed.title")}</h2>
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>{t("protocol.seed.protocol")}</TableHead>
+              <TableHead>{t("protocol.seed.samples")}</TableHead>
+              <TableHead>{t("protocol.seed.f1ToxicMean")}</TableHead>
+              <TableHead>{t("protocol.seed.seedRuns")}</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {protocols.map((p) => {
+              const seedRuns = p.seed_runs ?? [];
+              const seedSummary = p.seed_summary;
               return (
-                <button
-                  key={item.id}
-                  onClick={() => jumpToSection(item.id)}
-                  className={`w-full text-left px-3 py-2 rounded-lg transition ${
-                    active
-                      ? "bg-card text-text-info font-semibold border-r-2 border-border-info"
-                      : "text-muted-foreground hover:bg-card/70"
-                  }`}
-                >
-                  {item.label}
-                </button>
+                <TableRow key={`${p.id}-seed`}>
+                  <TableCell>{p.name}</TableCell>
+                  <TableCell>{seedSummary?.n_runs ?? 0}</TableCell>
+                  <TableCell>{formatScore(seedSummary?.f1_toxic_mean)}</TableCell>
+                  <TableCell>
+                    {seedRuns.length ? (
+                      <div className="flex items-center gap-1.5">
+                        {seedRuns.slice(0, 8).map((run, idx) => (
+                          <Tooltip key={`${p.id}-${run.run_key || run.run_id || idx}`}>
+                            <TooltipTrigger asChild>
+                              <button
+                                type="button"
+                                className="h-8 w-4 rounded-sm bg-background-info overflow-hidden border border-border-info"
+                                aria-label={`${p.name} ${formatSeed(run.seed)} F1_toxic ${formatScore(run.f1_toxic)}`}
+                              >
+                                <span
+                                  className="block w-full bg-primary"
+                                  style={{ height: metricBarWidth(run.f1_toxic) }}
+                                />
+                              </button>
+                            </TooltipTrigger>
+                            <TooltipContent side="top" className="max-w-xs">
+                              <div className="space-y-0.5">
+                                <div className="font-semibold">{run.run_id || run.run_key || "run"}</div>
+                                <div>{formatSeed(run.seed)}</div>
+                                <div>F1_toxic: {formatScore(run.f1_toxic)}</div>
+                                <div>Macro-F1: {formatScore(run.macro_f1)}</div>
+                              </div>
+                            </TooltipContent>
+                          </Tooltip>
+                        ))}
+                      </div>
+                    ) : (
+                      <span className="text-xs text-muted-foreground">{t("protocol.seed.noData")}</span>
+                    )}
+                  </TableCell>
+                </TableRow>
               );
             })}
-          </nav>
-          <div className="mt-5 pt-4 border-t border-border">
-            <p className="text-sm font-semibold text-foreground">Nguyen Van A</p>
-            <p className="text-xs text-muted-foreground">Thesis Candidate</p>
-          </div>
-        </aside>
+          </TableBody>
+        </Table>
+      </Card>
 
-        <div className="flex-1 space-y-6">
-          <section className="space-y-3" id="decision">
-            <div className="flex flex-wrap items-center gap-2">
-              <Badge className="bg-background-info text-text-info hover:bg-background-info">ViCTSD</Badge>
-              <Badge variant="secondary" className="bg-muted text-muted-foreground">ViHSD</Badge>
-              <Badge variant="secondary" className="bg-muted text-muted-foreground">Toxicity</Badge>
-              <Badge variant="secondary" className="bg-muted text-muted-foreground">Preprocessing</Badge>
-            </div>
-            <h1 className="text-3xl font-bold text-foreground">
-              Protocol Evaluation & Decision Dashboard
-            </h1>
-            <p className="text-muted-foreground">
-              Compare ViCTSD/ViHSD protocols and choose the final thesis protocol for production deployment.
-            </p>
-          </section>
+      <Card className="p-6 bg-gradient-to-r from-text-info to-primary text-white border-0 shadow-lg">
+        <h2 className="text-2xl font-bold mb-2">
+          {t("protocol.selection.title", { protocol: winner?.name || "--" })}
+        </h2>
+        <p className="text-background-info mb-3">{t("protocol.selection.subtitle")}</p>
+        <p className="text-sm text-background-info">{data?.source_note || t("protocol.selection.sourceFallback")}</p>
+      </Card>
 
-          <div className="grid grid-cols-12 gap-6 items-start">
-            <div className="col-span-12 lg:col-span-8 space-y-6">
-              <section id="evaluation">
-                <Card className="p-5 bg-card border border-border/40 shadow-sm">
-                  <div className="flex items-center justify-between mb-4">
-                    <h2 className="text-xl font-semibold">Weighted Decision Matrix</h2>
-                    <Badge variant="outline" className="text-text-info">Calculated 2:15 PM</Badge>
-                  </div>
-                  <Table>
-                    <TableHeader>
-                      <TableRow>
-                        <TableHead>Rank</TableHead>
-                        <TableHead>Protocol</TableHead>
-                        <TableHead>F1_toxic</TableHead>
-                        <TableHead>Macro-F1</TableHead>
-                        <TableHead>ECE ↓</TableHead>
-                        <TableHead>Brier ↓</TableHead>
-                        <TableHead>Decision</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {rankedProtocols.map((p) => (
-                        <TableRow key={p.id}>
-                          <TableCell className="font-medium">#{p.rank}</TableCell>
-                          <TableCell>{p.name}</TableCell>
-                          <TableCell>{formatScore(p.metrics.f1_toxic)}</TableCell>
-                          <TableCell>{formatScore(p.metrics.macro_f1)}</TableCell>
-                          <TableCell>{formatScore(p.metrics.ece)}</TableCell>
-                          <TableCell>{formatScore(p.metrics.brier)}</TableCell>
-                          <TableCell>
-                            <Badge variant={p.id === data?.winner ? "default" : "secondary"}>
-                              {decisionLabel(p.id, data?.winner)}
-                            </Badge>
-                          </TableCell>
-                        </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
-                </Card>
-              </section>
-
-              <section id="protocol-building">
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                  <Card className="p-4 bg-card border border-border/40">
-                    <h3 className="font-semibold mb-2">Data Leakage Check</h3>
-                    <ul className="space-y-1 text-sm text-muted-foreground">
-                      {protocols.map((p) => (
-                        <li key={p.id} className="flex items-center justify-between">
-                          <span>{p.name}</span>
-                          <span className={p.overlap_exact?.train_test ? "text-text-warning" : "text-text-success"}>
-                            {(p.overlap_exact?.train_test ?? 0) === 0 ? "PASS" : "CHECK"}
-                          </span>
-                        </li>
-                      ))}
-                    </ul>
-                  </Card>
-                  <Card className="p-4 bg-card border border-border/40">
-                    <h3 className="font-semibold mb-2">Reproducibility</h3>
-                    <p className="text-sm text-muted-foreground">Training artifacts available with consistent schema and finalized metrics outputs.</p>
-                  </Card>
-                  <Card className="p-4 bg-card border border-border/40">
-                    <h3 className="font-semibold mb-2">Deploy Feasibility</h3>
-                    <p className="text-sm text-muted-foreground">All protocols provide deployable metrics bundles; Protocol C leads final score.</p>
-                  </Card>
-                </div>
-              </section>
-
-              <section id="decision">
-                <Card className="p-6 bg-gradient-to-r from-text-info to-primary text-white border-0 shadow-lg">
-                  <h2 className="text-2xl font-bold mb-2">Selected protocol: {winner?.name || "--"}</h2>
-                  <p className="text-background-info mb-4">
-                    Based on weighted analysis and gating checks, this protocol shows the strongest balance of toxicity detection and overall stability.
-                  </p>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
-                    <div>
-                      <p className="font-semibold mb-1">Selection rationale</p>
-                      <ul className="list-disc pl-5 space-y-1 text-background-info">
-                        <li>Highest F1_toxic among evaluated protocols</li>
-                        <li>Strong Macro-F1 consistency</li>
-                        <li>Better calibration profile (ECE/Brier)</li>
-                      </ul>
-                    </div>
-                    <div>
-                      <p className="font-semibold mb-1">Next step</p>
-                      <ul className="list-disc pl-5 space-y-1 text-background-info">
-                        <li>Export selected artifacts for deployment handoff</li>
-                        <li>Write thesis discussion with A/B comparative error analysis</li>
-                      </ul>
-                    </div>
-                  </div>
-                  <div className="mt-5 flex flex-wrap gap-2">
-                    <Button variant="secondary">Export Protocol</Button>
-                    <Button variant="outline" className="text-white border-white/40 hover:bg-card/10">Share Results</Button>
-                  </div>
-                </Card>
-              </section>
-            </div>
-
-            <div className="col-span-12 lg:col-span-4 space-y-6" id="preprocessing">
-              <Card className="p-5 bg-card border border-border/40 shadow-sm">
-                <h3 className="text-lg font-semibold mb-4">Scoring Configuration</h3>
-                <div className="space-y-3 text-sm">
-                  <div className="flex items-center justify-between"><span>F1_toxic weight</span><span className="font-semibold">30%</span></div>
-                  <div className="flex items-center justify-between"><span>Macro-F1 weight</span><span className="font-semibold">20%</span></div>
-                  <div className="flex items-center justify-between"><span>Calibration (ECE)</span><span className="font-semibold">15%</span></div>
-                  <div className="flex items-center justify-between"><span>Robustness</span><span className="font-semibold">20%</span></div>
-                  <div className="flex items-center justify-between"><span>Efficiency</span><span className="font-semibold">15%</span></div>
-                </div>
-                <Button className="w-full mt-4 bg-primary hover:bg-primary/90">Recalculate Winner</Button>
-              </Card>
-
-              <Card className="p-5 bg-card border border-border/40 shadow-sm" id="training">
-                <h3 className="text-lg font-semibold mb-3">Training Snapshot</h3>
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>Protocol</TableHead>
-                      <TableHead>Acc</TableHead>
-                      <TableHead>Toxic support</TableHead>
-                      <TableHead>Seeds (hover)</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {protocols.map((p) => {
-                      const seedRuns = p.seed_runs ?? [];
-                      const seedSummary = p.seed_summary;
-                      return (
-                        <TableRow key={p.id}>
-                          <TableCell>{p.name}</TableCell>
-                          <TableCell>{formatScore(p.metrics.accuracy)}</TableCell>
-                          <TableCell>{p.metrics.support_toxic ?? "--"}</TableCell>
-                          <TableCell>
-                            {seedRuns.length > 0 ? (
-                              <div className="space-y-1">
-                                <div className="flex items-center gap-1.5">
-                                  {seedRuns.slice(0, 8).map((run, idx) => (
-                                    <Tooltip key={`${p.id}-${run.run_key || run.run_id || idx}`}>
-                                      <TooltipTrigger asChild>
-                                        <button
-                                          type="button"
-                                          className="h-8 w-4 rounded-sm bg-background-info overflow-hidden border border-border-info"
-                                          aria-label={`${p.name} ${formatSeed(run.seed)} F1_toxic ${formatScore(run.f1_toxic)}`}
-                                        >
-                                          <span
-                                            className="block w-full bg-primary"
-                                            style={{ height: metricBarWidth(run.f1_toxic) }}
-                                          />
-                                        </button>
-                                      </TooltipTrigger>
-                                      <TooltipContent side="top" className="max-w-xs">
-                                        <div className="space-y-0.5">
-                                          <div className="font-semibold">{run.run_id || run.run_key || "run"}</div>
-                                          <div>{formatSeed(run.seed)}</div>
-                                          <div>F1_toxic: {formatScore(run.f1_toxic)}</div>
-                                          <div>Macro-F1: {formatScore(run.macro_f1)}</div>
-                                          <div>ECE: {formatScore(run.ece)}</div>
-                                          <div>Brier: {formatScore(run.brier)}</div>
-                                        </div>
-                                      </TooltipContent>
-                                    </Tooltip>
-                                  ))}
-                                </div>
-                                <div className="text-[11px] text-muted-foreground">
-                                  n={seedSummary?.n_runs ?? seedRuns.length}
-                                  {typeof seedSummary?.f1_toxic_mean === "number" && ` · μ=${seedSummary.f1_toxic_mean.toFixed(3)}`}
-                                  {typeof seedSummary?.f1_toxic_std === "number" && ` · σ=${seedSummary.f1_toxic_std.toFixed(3)}`}
-                                </div>
-                              </div>
-                            ) : (
-                              <span className="text-xs text-muted-foreground">No multi-seed data yet</span>
-                            )}
-                          </TableCell>
-                        </TableRow>
-                      );
-                    })}
-                  </TableBody>
-                </Table>
-              </Card>
-
-              <Card className="p-5 bg-background-secondary border border-border/30">
-                <div className="text-xs uppercase tracking-wide text-muted-foreground mb-2">System status</div>
-                <div className="text-2xl font-bold text-foreground mb-1">0.832</div>
-                <div className="text-sm text-muted-foreground">Average metric snapshot</div>
-                <div className="mt-4 text-xs text-muted-foreground">{data?.source_note || "Source artifacts loaded from local protocol outputs."}</div>
-              </Card>
-            </div>
-          </div>
-
-          {(data?.warnings?.length ?? 0) > 0 && (
-            <Card className="p-5">
-              <h3 className="font-semibold mb-2">Warnings</h3>
-              <ul className="list-disc pl-5 space-y-1 text-sm text-foreground">
-                {data?.warnings?.map((w, idx) => <li key={idx}>{w}</li>)}
-              </ul>
-            </Card>
-          )}
-        </div>
-      </div>
+      {(data?.warnings?.length ?? 0) > 0 && (
+        <Card className="p-5">
+          <h3 className="font-semibold mb-2">{t("protocol.warnings.title")}</h3>
+          <ul className="list-disc pl-5 space-y-1 text-sm text-foreground">
+            {data?.warnings?.map((w, idx) => <li key={idx}>{w}</li>)}
+          </ul>
+        </Card>
+      )}
     </div>
   );
 }

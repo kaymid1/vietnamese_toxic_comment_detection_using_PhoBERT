@@ -102,7 +102,10 @@ const RAW_API_BASE = import.meta.env.VITE_API_BASE_URL?.trim() ?? "";
 const SCAN_HISTORY_KEY = "viettoxic:scan-history";
 const THEME_KEY = "viettoxic:theme";
 const LANGUAGE_KEY = "viettoxic:language";
+const DATASET_VERSION_KEY = "viettoxic:dataset-version";
 const MAX_SCAN_HISTORY = 120;
+
+type DatasetVersion = "v1" | "latest";
 const API_BASE = RAW_API_BASE.replace(/\/+$/, "");
 
 const buildApiUrl = (path: string) => {
@@ -199,6 +202,7 @@ export default function App() {
   const [analysisProgress, setAnalysisProgress] = useState<number | null>(null);
   const [theme, setTheme] = useState<"light" | "dark">("light");
   const [language, setLanguage] = useState<Language>("vi");
+  const [datasetVersion, setDatasetVersion] = useState<DatasetVersion>("v1");
   const [fallbackPrompt, setFallbackPrompt] = useState<{
     items: PendingFallbackUrl[];
     decisions: Record<string, "use_selenium" | "skip">;
@@ -228,6 +232,13 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    const storedDatasetVersion = window.localStorage.getItem(DATASET_VERSION_KEY);
+    if (storedDatasetVersion === "v1" || storedDatasetVersion === "latest") {
+      setDatasetVersion(storedDatasetVersion);
+    }
+  }, []);
+
+  useEffect(() => {
     document.documentElement.classList.toggle("dark", theme === "dark");
     window.localStorage.setItem(THEME_KEY, theme);
   }, [theme]);
@@ -235,6 +246,10 @@ export default function App() {
   useEffect(() => {
     window.localStorage.setItem(LANGUAGE_KEY, language);
   }, [language]);
+
+  useEffect(() => {
+    window.localStorage.setItem(DATASET_VERSION_KEY, datasetVersion);
+  }, [datasetVersion]);
 
   const t = useMemo(() => createTranslator(language), [language]);
 
@@ -546,6 +561,8 @@ export default function App() {
           onToggleTheme={handleToggleTheme}
           language={language}
           onSetLanguage={handleSetLanguage}
+          datasetVersion={datasetVersion}
+          onSetDatasetVersion={setDatasetVersion}
         />
 
       {currentPage === "home" && (
@@ -665,7 +682,7 @@ export default function App() {
         />
       )}
 
-      {currentPage === "dataset" && <DatasetPage />}
+      {currentPage === "dataset" && <DatasetPage datasetVersion={datasetVersion} />}
 
       {currentPage === "dataset_synthetic" && (
         <SyntheticGenerationPage onBack={() => setCurrentPage("dataset")} />

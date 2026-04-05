@@ -172,6 +172,8 @@ def main() -> None:
     parser.add_argument("--vihsd-dir", default="data/raw/vihsd")
     parser.add_argument("--output-root", default="data/victsd")
     parser.add_argument("--dataset-prefix", default="victsd_v1")
+    parser.add_argument("--model-version", default="unknown")
+    parser.add_argument("--policy-version", default="policy-v1")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--b-toxic-min", type=float, default=0.30)
     parser.add_argument("--b-toxic-max", type=float, default=0.40)
@@ -234,6 +236,9 @@ def main() -> None:
             "vihsd_dir": str(vihsd_dir),
             "output_root": str(output_root),
             "dataset_prefix": args.dataset_prefix,
+            "dataset_version": args.dataset_prefix,
+            "model_version": args.model_version,
+            "policy_version": args.policy_version,
             "seed": args.seed,
             "b_toxic_min": args.b_toxic_min,
             "b_toxic_max": args.b_toxic_max,
@@ -293,6 +298,11 @@ def main() -> None:
 
         report["protocols"]["a"] = {
             "mode": args.protocol_a_mode,
+            "artifact_versions": {
+                "dataset_version": args.dataset_prefix,
+                "model_version": args.model_version,
+                "policy_version": args.policy_version,
+            },
             "leakage_filter": {
                 "removed_train_rows": removed_train_rows,
                 "removed_train_unique_keys": removed_train_unique_keys,
@@ -364,6 +374,11 @@ def main() -> None:
             write_jsonl(b_paths[split], protocol_b_rows[split])
 
         report["protocols"]["b"] = {
+            "artifact_versions": {
+                "dataset_version": args.dataset_prefix,
+                "model_version": args.model_version,
+                "policy_version": args.policy_version,
+            },
             "files": {k: str(v) for k, v in b_paths.items()},
             "stats": {split: split_stats(protocol_b_rows[split]) for split in SPLITS},
             "merge": {
@@ -394,6 +409,11 @@ def main() -> None:
             write_jsonl(c_paths[split], c_split[split])
 
         report["protocols"]["c"] = {
+            "artifact_versions": {
+                "dataset_version": args.dataset_prefix,
+                "model_version": args.model_version,
+                "policy_version": args.policy_version,
+            },
             "files": {k: str(v) for k, v in c_paths.items()},
             "stats": {split: split_stats(c_split[split]) for split in SPLITS},
             "pool_size_after_global_dedup": len(c_pool),

@@ -268,6 +268,7 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
     [registry.runs],
   );
 
+  const hasRealTrainingCurve = Array.isArray(baselineRun?.hyperparameters?.training_curve);
   const trainingData = useMemo(() => {
     const curve = baselineRun?.hyperparameters?.training_curve;
     if (Array.isArray(curve)) return curve as { epoch: number; loss: number; f1: number }[];
@@ -727,9 +728,14 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
 
         {/* Training Visualization */}
         <Card className="bg-card p-8 mb-8 shadow-lg">
-          <h2 className="text-2xl mb-6" style={{ color: "var(--primary)" }}>
-            {t("model.training.title")}
-          </h2>
+          <div className="flex flex-wrap items-center justify-between gap-3 mb-6">
+            <h2 className="text-2xl" style={{ color: "var(--primary)" }}>
+              {t("model.training.title")}
+            </h2>
+            <Badge className={hasRealTrainingCurve ? "bg-background-success text-text-success" : "bg-background-warning text-text-warning"}>
+              {hasRealTrainingCurve ? t("model.training.curveSourceReal") : t("model.training.curveSourceIllustrative")}
+            </Badge>
+          </div>
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
             {/* Training Loss Curve */}
             <div>

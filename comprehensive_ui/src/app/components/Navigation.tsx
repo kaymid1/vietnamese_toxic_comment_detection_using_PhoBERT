@@ -1,6 +1,9 @@
 import { Moon, Shield, Sun } from "lucide-react";
+import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/app/components/ui/hover-card";
 import type { Language } from "@/app/i18n/messages";
 import { useI18n } from "@/app/i18n/context";
+
+type DatasetVersion = "v1" | "latest";
 
 interface NavigationProps {
   currentPage: string;
@@ -9,9 +12,20 @@ interface NavigationProps {
   onToggleTheme: () => void;
   language: Language;
   onSetLanguage: (language: Language) => void;
+  datasetVersion: DatasetVersion;
+  onSetDatasetVersion: (version: DatasetVersion) => void;
 }
 
-export function Navigation({ currentPage, onNavigate, theme, onToggleTheme, language, onSetLanguage }: NavigationProps) {
+export function Navigation({
+  currentPage,
+  onNavigate,
+  theme,
+  onToggleTheme,
+  language,
+  onSetLanguage,
+  datasetVersion,
+  onSetDatasetVersion,
+}: NavigationProps) {
   const { t } = useI18n();
   const navItems = [
     { name: t("nav.home"), id: "home" },
@@ -36,21 +50,71 @@ export function Navigation({ currentPage, onNavigate, theme, onToggleTheme, lang
 
           <div className="flex items-center gap-3">
             <div className="hidden md:flex items-center gap-8">
-              {navItems.map((item) => (
-                <button
-                  key={item.id}
-                  onClick={() => onNavigate(item.id)}
-                  className={`rounded-lg px-3 py-2 transition-colors ${
-                    currentPage === item.id ? "font-medium" : "text-foreground/80 hover:bg-accent"
-                  }`}
-                  style={{
-                    color: currentPage === item.id ? "var(--primary)" : undefined,
-                    backgroundColor: currentPage === item.id ? "color-mix(in srgb, var(--primary) 14%, transparent)" : "transparent",
-                  }}
-                >
-                  {item.name}
-                </button>
-              ))}
+              {navItems.map((item) => {
+                const isActive = currentPage === item.id;
+                const buttonClass = `rounded-lg px-3 py-2 transition-colors ${
+                  isActive ? "font-medium" : "text-foreground/80 hover:bg-accent"
+                }`;
+                const buttonStyle = {
+                  color: isActive ? "var(--primary)" : undefined,
+                  backgroundColor: isActive ? "color-mix(in srgb, var(--primary) 14%, transparent)" : "transparent",
+                };
+
+                if (item.id === "dataset") {
+                  return (
+                    <HoverCard key={item.id} openDelay={120} closeDelay={100}>
+                      <HoverCardTrigger asChild>
+                        <button
+                          type="button"
+                          onClick={() => onNavigate(item.id)}
+                          className={buttonClass}
+                          style={buttonStyle}
+                        >
+                          {item.name}
+                        </button>
+                      </HoverCardTrigger>
+                      <HoverCardContent align="start" className="w-56 p-2">
+                        <p className="px-2 py-1 text-xs text-muted-foreground">{t("nav.datasetVersionLabel")}</p>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            onSetDatasetVersion("v1");
+                            onNavigate("dataset");
+                          }}
+                          className={`w-full rounded-md px-2 py-1.5 text-left text-sm transition-colors ${
+                            datasetVersion === "v1" ? "bg-accent" : "hover:bg-accent"
+                          }`}
+                        >
+                          {t("nav.datasetVersionV1Deprecated")}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            onSetDatasetVersion("latest");
+                            onNavigate("dataset");
+                          }}
+                          className={`w-full rounded-md px-2 py-1.5 text-left text-sm transition-colors ${
+                            datasetVersion === "latest" ? "bg-accent" : "hover:bg-accent"
+                          }`}
+                        >
+                          {t("nav.datasetVersionLatest")}
+                        </button>
+                      </HoverCardContent>
+                    </HoverCard>
+                  );
+                }
+
+                return (
+                  <button
+                    key={item.id}
+                    onClick={() => onNavigate(item.id)}
+                    className={buttonClass}
+                    style={buttonStyle}
+                  >
+                    {item.name}
+                  </button>
+                );
+              })}
             </div>
 
             <div className="inline-flex items-center gap-1 rounded-full border border-border bg-muted/70 p-1" aria-label={t("nav.language")}>

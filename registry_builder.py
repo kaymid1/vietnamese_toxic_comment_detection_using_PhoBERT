@@ -127,6 +127,10 @@ def build_registry_from_models(
 
                 dataset_version = run_config.get("dataset_version") if isinstance(run_config, dict) else None
                 dataset_version = dataset_version or "unknown"
+                model_version = run_config.get("model_version") if isinstance(run_config, dict) else None
+                model_version = model_version or model_id
+                policy_version = run_config.get("policy_version") if isinstance(run_config, dict) else None
+                policy_version = policy_version or "policy-v1"
 
                 hyperparameters = run_config.get("hyperparameters") if isinstance(run_config, dict) else None
                 hyperparameters = hyperparameters if isinstance(hyperparameters, dict) else {}
@@ -139,6 +143,13 @@ def build_registry_from_models(
                     "run_id": run_id,
                     "model_name": model_id,
                     "dataset_version": dataset_version,
+                    "model_version": model_version,
+                    "policy_version": policy_version,
+                    "artifact_versions": {
+                        "dataset_version": dataset_version,
+                        "model_version": model_version,
+                        "policy_version": policy_version,
+                    },
                     "created_at": created_at,
                     "checkpoint_path": to_relative(model_dir, base_dir),
                     "hyperparameters": hyperparameters,

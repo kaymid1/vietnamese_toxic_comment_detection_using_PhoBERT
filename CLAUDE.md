@@ -1,5 +1,13 @@
 # CLAUDE.md
 
+## MCP & Context Optimization
+- **Priority Tooling**: Always prioritize using the `serena` MCP server for context gathering, project indexing, and code search.
+- **Token Efficiency**: Before reading multiple files manually with `ls` or `cat`, use `serena`'s search/indexing tools to identify and fetch only the relevant code snippets.
+- **Workflow**:
+  1. Use `serena` to get a high-level overview of the project structure.
+  2. Use `serena` to locate specific logic or variable definitions instead of broad file reads.
+  3. Only request full file content if summaries are insufficient.
+
 ## Purpose of this file
 
 This file is the "base knowledge" guide so Claude can work in the right direction inside this repository.
@@ -59,6 +67,8 @@ When editing code, prioritize these files:
   - export raw ViCTSD
 - `scripts/02_preprocess.py`
   - preprocess dataset into `data/processed/victsd_v1`
+- `scripts/02b_prepare_gold_dataset.py`
+  - build leakage-aware gold base from raw ViCTSD into `data/processed/victsd_gold`
 - `scripts/02a_build_protocol_datasets.py`
   - build protocol A/B/C datasets from ViCTSD + ViHSD raw (includes offensive-only ViHSD preprocessing + merge)
 - `scripts/03_eda.py`
@@ -199,6 +209,14 @@ The raw schema in this repo includes fields such as:
 - `data/processed/victsd_v1/validation.jsonl`
 - `data/processed/victsd_v1/test.jsonl`
 
+For gold-base retraining input (separate from protocol artifacts),
+`scripts/02b_prepare_gold_dataset.py` reads the same raw files and writes:
+
+- `data/processed/victsd_gold/train.jsonl`
+- `data/processed/victsd_gold/validation.jsonl`
+- `data/processed/victsd_gold/test.jsonl`
+- `data/processed/victsd_gold/build_report.json`
+
 Schema:
 
 ```json
@@ -222,6 +240,14 @@ Schema:
 - do not aggressively remove punctuation
 - do not remove emojis
 - do not remove toxic keywords
+
+For `scripts/02b_prepare_gold_dataset.py`, additional constraints are applied:
+
+- map `text <- Comment`, `toxicity <- Toxicity` (cast to int, expect binary 0/1)
+- drop rows with empty text after cleaning
+- deduplicate exact normalized text within each split (keep first occurrence)
+- print split-level summary and overlap counts (`train↔validation`, `train↔test`, `validation↔test`)
+- persist all summary metrics to `data/processed/victsd_gold/build_report.json`
 
 Why:
 
@@ -465,8 +491,18 @@ Main file: `infer_crawled_local.py`
 `segments.jsonl` schema:
 
 ```json
-{"text": "..."}
+{
+  "text": "...",
+  "segment_index": 0,
+  "url_hash": "<md5_of_url>",
+  "segment_hash": "<sha256(normalized_text + '|' + html_tag_effective)>"
+}
 ```
+
+Notes:
+
+- `text` remains the compatibility field consumed by older readers.
+- At crawl/segmentation time, `html_tag_effective` defaults to `"body"` for `segment_hash` generation (same hash formula as `backend/app.py` + `infer_crawled_local.py`).
 
 ### Device selection
 
@@ -933,7 +969,9 @@ When asked to make changes, Claude should:
    - align model paths if needed
 
 6. For crawling tasks:
-   - preserve `data/raw/crawled_urls/<hash>/meta.json` + `segments.jsonl` format
+   - preserve compatibility for `data/raw/crawled_urls/<hash>/segments.jsonl` (`text` must remain available)
+   - current segment rows include `text`, `segment_index`, `url_hash`, `segment_hash` (with crawl-time default html tag `body`)
+   - ensure `meta.json` includes `url_hash` for cross-reference
    - be careful with system dependencies like Java, Chrome, yt-dlp, and ffmpeg
 
 7. If information conflicts:

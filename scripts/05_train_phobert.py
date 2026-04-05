@@ -8,7 +8,7 @@ Refactored to match the LoRA script data source + export layout.
 # -----------------------
 # !pip -q install -U transformers datasets scikit-learn torch accelerate
 
-import os, json, random, time
+import os, json, random, time, uuid
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -33,6 +33,17 @@ from sklearn.metrics import (
 # Logging
 # -----------------------
 t0 = time.time()
+
+ENABLE_MLFLOW = os.environ.get("ENABLE_MLFLOW", "0").strip().lower() in {"1", "true", "yes", "on"}
+MLFLOW_EXPERIMENT = os.environ.get("MLFLOW_EXPERIMENT", "viettoxic-self-learning")
+POLICY_VERSION = os.environ.get("POLICY_VERSION", "policy-v1")
+MODEL_VERSION = os.environ.get("MODEL_VERSION", "phobert/baseline")
+RUN_TIMESTAMP = time.strftime("%Y%m%d_%H%M%S")
+RUN_SUFFIX = uuid.uuid4().hex[:8]
+RUN_ID = ""
+
+mlflow = None
+mlflow_active = False
 
 def log(msg):
     print(f"[{time.time()-t0:8.1f}s] {msg}", flush=True)
@@ -76,6 +87,20 @@ SEED = int(os.environ.get("SEED", "42"))
 
 OUTPUT_BASE = os.environ.get("OUTPUT_BASE", f"models/phobert/{DATASET_PREFIX}")
 RESULTS_BASE = os.environ.get("RESULTS_BASE", f"results/phobert/{DATASET_PREFIX}")
+
+RUN_ID = f"{DATASET_PREFIX}_{RUN_TIMESTAMP}_{RUN_SUFFIX}"
+
+if ENABLE_MLFLOW:
+    try:
+        import mlflow as _mlflow
+
+        mlflow = _mlflow
+        mlflow.set_experiment(MLFLOW_EXPERIMENT)
+        mlflow.start_run(run_name=RUN_ID)
+        mlflow_active = True
+        print(f"[MLflow] started run {RUN_ID} in experiment {MLFLOW_EXPERIMENT}", flush=True)
+    except Exception as exc:
+        print(f"[MLflow] disabled due to error: {exc}", flush=True)
 
 PRIMARY_METRIC = "f1_toxic"
 
@@ -687,7 +712,7 @@ log("Done. Saved model + metrics + calibration + error analysis.")
 # ================================================================
 from datetime import datetime
 
-MODEL_ID = "phobert/baseline"
+MODEL_ID = MODEL_VERSION
 DATASET_VERSION = DATASET_PREFIX
 IS_BASELINE = True
 
@@ -706,9 +731,11 @@ for row in trainer.state.log_history:
         curve.append(curve_row)
 
 run_config = {
-    "run_id": f"{MODEL_ID}_run",
+    "run_id": RUN_ID,
     "model_name": MODEL_ID,
     "dataset_version": DATASET_VERSION,
+    "model_version": MODEL_VERSION,
+    "policy_version": POLICY_VERSION,
     "created_at": datetime.now().isoformat(),
     "is_baseline": IS_BASELINE,
     "hyperparameters": {
@@ -751,6 +778,43 @@ with open(f"{best_model_path}/metrics.json", "w", encoding="utf-8") as f:
 
 with open(f"{best_model_path}/training_curve.json", "w", encoding="utf-8") as f:
     json.dump(curve, f, ensure_ascii=False, indent=2)
+
+if mlflow_active and mlflow is not None:
+    try:
+        mlflow.log_params({
+            "dataset_version": DATASET_VERSION,
+            "model_version": MODEL_VERSION,
+            "policy_version": POLICY_VERSION,
+            "model_name": MODEL_NAME,
+            "batch_size": BATCH_SIZE,
+            "epochs": EPOCHS,
+            "learning_rate": LR,
+            "seed": SEED,
+            "run_id": RUN_ID,
+        })
+        mlflow.log_metrics({
+            "macro_f1": float(metrics_out.get("macro_f1") or 0.0),
+            "f1_toxic": float(metrics_out.get("f1_toxic") or 0.0),
+            "precision": float(metrics_out.get("precision") or 0.0),
+            "recall": float(metrics_out.get("recall") or 0.0),
+            "accuracy": float(metrics_out.get("accuracy") or 0.0),
+        })
+        for artifact in [
+            f"{RESULTS_BASE}/metrics.json",
+            f"{RESULTS_BASE}/calibration_summary.json",
+            f"{best_model_path}/run_config.json",
+            f"{best_model_path}/metrics.json",
+            f"{best_model_path}/training_curve.json",
+        ]:
+            if os.path.exists(artifact):
+                mlflow.log_artifact(artifact)
+    except Exception as exc:
+        log(f"MLflow logging warning: {exc}")
+    finally:
+        try:
+            mlflow.end_run()
+        except Exception:
+            pass
 
 # ================================================================
 # ZIP EXPORT
