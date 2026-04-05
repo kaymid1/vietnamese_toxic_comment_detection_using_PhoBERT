@@ -18,3 +18,21 @@ viettoxic_outputs_extract/
 **/.env
 **/.env.local
 **/.env.*
+
+# IDE & Tool configs
+.claude/
+.serena/
+.mcp.json
+
+# Build outputs
+comprehensive_ui/dist/
+
+# MLflow & Experiment runs
+mlruns_smoke_mlflow/
+mlruns_smoke_mlflow_v2/
+
+# Generated/Output data
+data/pseudo_labels/
+results/
+experiments/retrain_runs/
+experiments/crawler_audit.md
