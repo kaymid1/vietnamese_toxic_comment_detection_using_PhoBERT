@@ -28,7 +28,6 @@ import {
   Cpu,
   LineChart,
   FileText,
-  Download,
 } from "lucide-react";
 import {
   LineChart as RechartsLine,
@@ -43,6 +42,9 @@ import {
   Bar,
 } from "recharts";
 import { useI18n } from "@/app/i18n/context";
+import { TrainingChecklist } from "../../components/TrainingChecklist";
+import { TrainingResults } from "../../components/TrainingResults";
+import { TrainingStoreProvider } from "../../hooks/useTrainingStore";
 
 interface ModelPageProps {
   onTryNow: () => void;
@@ -89,14 +91,6 @@ interface ErrorResponse {
   last_updated?: string | null;
 }
 
-interface HardCaseRow extends ErrorRow {
-  candidate_reason?: string;
-}
-
-interface HardCaseResponse {
-  items: HardCaseRow[];
-  last_updated?: string | null;
-}
 
 interface PreprocessStep {
   id: string;
@@ -155,8 +149,6 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
   const [policy, setPolicy] = useState<EvalPolicyResponse | null>(null);
   const [errorRows, setErrorRows] = useState<ErrorRow[]>([]);
   const [errorLastUpdated, setErrorLastUpdated] = useState<string | null>(null);
-  const [hardCases, setHardCases] = useState<HardCaseRow[]>([]);
-  const [hardCaseLastUpdated, setHardCaseLastUpdated] = useState<string | null>(null);
   const [errorFilter, setErrorFilter] = useState("all");
   const [sourceFilter, setSourceFilter] = useState("all");
   const [subsetFilter, setSubsetFilter] = useState("all");
@@ -223,24 +215,10 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
       }
     };
 
-    const fetchHardCases = async () => {
-      try {
-        const response = await fetch(buildApiUrl("/api/eval/hard-cases"));
-        const data = (await response.json()) as HardCaseResponse;
-        if (!response.ok) throw new Error(JSON.stringify(data));
-        setHardCases(data.items || []);
-        setHardCaseLastUpdated(data.last_updated ?? null);
-      } catch {
-        setHardCases([]);
-        setHardCaseLastUpdated(null);
-      }
-    };
-
     void fetchRegistry();
     void fetchSteps();
     void fetchPolicy();
     void fetchErrors();
-    void fetchHardCases();
   }, []);
 
   useEffect(() => {
@@ -328,25 +306,6 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
     errorRows.forEach((row) => row.subset_tag && subsets.add(row.subset_tag));
     return ["all", ...Array.from(subsets).sort((a, b) => a.localeCompare(b))];
   }, [errorRows]);
-
-  const hardCaseBreakdown = useMemo(() => {
-    const breakdown: Record<string, number> = {};
-    hardCases.forEach((row) => {
-      const reason = row.candidate_reason || "unknown";
-      breakdown[reason] = (breakdown[reason] ?? 0) + 1;
-    });
-    return breakdown;
-  }, [hardCases]);
-
-  const downloadHardCases = () => {
-    const blob = new Blob([JSON.stringify(hardCases, null, 2)], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = "hard_case_candidates.json";
-    link.click();
-    URL.revokeObjectURL(url);
-  };
 
   return (
     <div style={{ backgroundColor: "var(--background)" }} className="min-h-screen py-12 px-4 sm:px-6 lg:px-8">
@@ -496,6 +455,25 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
             </Table>
           </div>
         </Card>
+
+        {/* Training Checklist & Results */}
+        <TrainingStoreProvider>
+          <Card className="bg-card p-8 mb-8 shadow-lg">
+            <div className="mb-6">
+              <h2 className="text-2xl mb-2" style={{ color: "var(--primary)" }}>
+                Training Checklist & Results
+              </h2>
+              <p className="text-sm text-muted-foreground">
+                Theo dõi tiến độ checklist thí nghiệm và lưu kết quả metric cho từng kịch bản train.
+              </p>
+            </div>
+
+            <div className="space-y-5">
+              <TrainingChecklist />
+              <TrainingResults />
+            </div>
+          </Card>
+        </TrainingStoreProvider>
 
         {/* Pipeline Demo */}
         <Card className="bg-card p-8 mb-8 shadow-lg">
@@ -889,75 +867,6 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
                   <TableRow>
                     <TableCell colSpan={6} className="text-center text-sm text-muted-foreground">
                       {t("model.error.noRows")}
-                    </TableCell>
-                  </TableRow>
-                )}
-              </TableBody>
-            </Table>
-          </div>
-        </Card>
-
-        {/* Hard-case Candidates */}
-        <Card className="bg-card p-8 mb-8 shadow-lg">
-          <div className="flex flex-wrap items-center justify-between gap-4 mb-6">
-            <div>
-              <h2 className="text-2xl mb-1" style={{ color: "var(--primary)" }}>
-                {t("model.hardCase.title")}
-              </h2>
-              <p className="text-sm text-muted-foreground">{t("model.hardCase.subtitle")}</p>
-            </div>
-            <div className="flex flex-wrap items-center gap-3">
-              <Badge className="bg-background-info text-text-info">{t("model.common.lastUpdated", { value: hardCaseLastUpdated ?? t("model.common.na") })}</Badge>
-              <Button variant="outline" onClick={downloadHardCases} disabled={!hardCases.length}>
-                <Download className="w-4 h-4 mr-2" />
-                {t("model.hardCase.exportForAnnotation")}
-              </Button>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-            <Card className="border p-4">
-              <p className="text-sm text-muted-foreground">{t("model.hardCase.candidateCount")}</p>
-              <p className="text-2xl" style={{ color: "var(--primary)" }}>{hardCases.length}</p>
-            </Card>
-            <Card className="border p-4 md:col-span-2">
-              <p className="text-sm text-muted-foreground mb-2">{t("model.hardCase.breakdownByReason")}</p>
-              <div className="flex flex-wrap gap-2">
-                {Object.entries(hardCaseBreakdown).map(([reason, count]) => (
-                  <Badge key={reason} className="bg-background-info text-text-info">
-                    {reason}: {count}
-                  </Badge>
-                ))}
-                {!Object.keys(hardCaseBreakdown).length && <span className="text-sm text-muted-foreground">{t("model.common.na")}</span>}
-              </div>
-            </Card>
-          </div>
-
-          <div className="border rounded-lg overflow-hidden">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>{t("model.table.text")}</TableHead>
-                  <TableHead>{t("model.hardCase.reason")}</TableHead>
-                  <TableHead>{t("model.table.source")}</TableHead>
-                  <TableHead>{t("model.table.subset")}</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {hardCases.slice(0, 6).map((row, idx) => (
-                  <TableRow key={`${row.text.slice(0, 16)}-${idx}`}>
-                    <TableCell className="max-w-[320px] truncate" title={row.text}>
-                      {row.text}
-                    </TableCell>
-                    <TableCell>{row.candidate_reason ?? t("model.common.na")}</TableCell>
-                    <TableCell>{row.source_dataset ?? t("model.common.na")}</TableCell>
-                    <TableCell>{row.subset_tag ?? t("model.common.na")}</TableCell>
-                  </TableRow>
-                ))}
-                {!hardCases.length && (
-                  <TableRow>
-                    <TableCell colSpan={4} className="text-center text-sm text-muted-foreground">
-                      {t("model.hardCase.noCandidates")}
                     </TableCell>
                   </TableRow>
                 )}

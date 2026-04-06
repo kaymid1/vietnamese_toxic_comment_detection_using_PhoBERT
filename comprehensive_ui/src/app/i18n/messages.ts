@@ -187,7 +187,7 @@ export const messages = {
       status: { cannotLoadRegistry: "Không thể tải experiment registry" },
       hero: { title: "Mô hình & Hiệu năng", subtitle: "Theo dõi pipeline tiền xử lý, chỉ số huấn luyện và phân tích lỗi để cải thiện hệ thống." },
       about: {
-        title: "Tổng quan mô hình", description: "Mô hình hiện tại tập trung phát hiện toxicity tiếng Việt trong ngữ cảnh social media.", preprocessTitle: "Tiền xử lý", preprocessDesc: "Giữ pipeline tối giản để bảo toàn tín hiệu ngôn ngữ tự nhiên.", keepCaseTitle: "Giữ nguyên case", keepCaseDesc: "Không ép lowercase để tránh mất ngữ nghĩa trong một số trường hợp.", datasetTitle: "Nguồn dữ liệu", datasetDesc: "Huấn luyện trên tập merge ViCTSD + ViHSD OFFENSIVE.", transferTitle: "Khả năng tổng quát", transferDesc: "Đánh giá liên tục qua hard cases và phản hồi thực tế.",
+        title: "Tổng quan mô hình", description: "Mô hình hiện tại tập trung phát hiện toxicity tiếng Việt trong ngữ cảnh social media.", preprocessTitle: "Tiền xử lý", preprocessDesc: "Giữ pipeline tối giản để bảo toàn tín hiệu ngôn ngữ tự nhiên.", keepCaseTitle: "Giữ nguyên case", keepCaseDesc: "Không ép lowercase để tránh mất ngữ nghĩa trong một số trường hợp.", datasetTitle: "Nguồn dữ liệu", datasetDesc: "Huấn luyện trên tập ViCTSD", transferTitle: "Khả năng tổng quát", transferDesc: "Đánh giá liên tục qua hard cases và phản hồi thực tế.",
       },
       registry: {
         title: "Experiment Registry", subtitle: "Danh sách run gần nhất và checkpoint tương ứng.", refresh: "Làm mới", baselineLabel: "Baseline: {name}", dataset: "Dataset: {value}", checkpoint: "Checkpoint: {value}", noExperiments: "Chưa có run nào.", table: { runId: "Run ID", model: "Model", dataset: "Dataset", created: "Thời gian" },

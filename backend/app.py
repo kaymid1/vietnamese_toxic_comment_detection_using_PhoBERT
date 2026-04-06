@@ -65,6 +65,133 @@ MODEL_TYPES = {
     },
 }
 
+TRAINING_TRACKER_DEFAULT_PHASES: List[Dict[str, Any]] = [
+    {
+        "id": "phase_0",
+        "title": "Giai đoạn 0 — Cố định baseline",
+        "tasks": [
+            {"id": "p0_task_1", "label": "Giữ nguyên dataset split hiện tại"},
+            {"id": "p0_task_2", "label": "Giữ nguyên seed cố định"},
+            {"id": "p0_task_3", "label": "Record metric: macro_f1"},
+            {"id": "p0_task_4", "label": "Record metric: f1_toxic"},
+            {"id": "p0_task_5", "label": "Record metric: precision_toxic"},
+            {"id": "p0_task_6", "label": "Record metric: recall_toxic"},
+            {"id": "p0_task_7", "label": "Record metric: confusion matrix"},
+            {"id": "p0_task_8", "label": "Record metric: best threshold theo macro_f1"},
+            {"id": "p0_task_9", "label": "Record metric: best threshold theo f1_toxic"},
+            {"id": "p0_task_10", "label": "Save metrics.json"},
+            {"id": "p0_task_11", "label": "Save threshold_sweep_validation_raw.json"},
+            {"id": "p0_task_12", "label": "Save error_analysis.json"},
+            {"id": "p0_task_13", "label": "Save training_manifest.json"},
+        ],
+    },
+    {
+        "id": "phase_1",
+        "title": "Giai đoạn 1 — Thử nghiệm nhanh",
+        "groups": [
+            {
+                "id": "p1_group_11",
+                "title": "1.1 Threshold tuning",
+                "tasks": [
+                    {"id": "p1_11_task_1", "label": "Chạy với PRIMARY_THRESHOLD_OBJECTIVE=macro_f1", "param": "PRIMARY_THRESHOLD_OBJECTIVE=macro_f1"},
+                    {"id": "p1_11_task_2", "label": "Chạy với PRIMARY_THRESHOLD_OBJECTIVE=f1_toxic", "param": "PRIMARY_THRESHOLD_OBJECTIVE=f1_toxic"},
+                    {"id": "p1_11_task_3", "label": "So sánh macro_f1, f1_toxic, precision_toxic, recall_toxic"},
+                ],
+            },
+            {
+                "id": "p1_group_12",
+                "title": "1.2 Toxic weight scale",
+                "tasks": [
+                    {"id": "p1_12_task_1", "label": "Test TOXIC_WEIGHT_SCALE=0.5", "param": "TOXIC_WEIGHT_SCALE=0.5"},
+                    {"id": "p1_12_task_2", "label": "Test TOXIC_WEIGHT_SCALE=0.75", "param": "TOXIC_WEIGHT_SCALE=0.75"},
+                    {"id": "p1_12_task_3", "label": "Test TOXIC_WEIGHT_SCALE=1.0", "param": "TOXIC_WEIGHT_SCALE=1.0"},
+                ],
+            },
+            {
+                "id": "p1_group_13",
+                "title": "1.3 Focal gamma",
+                "tasks": [
+                    {"id": "p1_13_task_1", "label": "Test FOCAL_GAMMA=1.5", "param": "FOCAL_GAMMA=1.5"},
+                    {"id": "p1_13_task_2", "label": "Test FOCAL_GAMMA=2.0", "param": "FOCAL_GAMMA=2.0"},
+                    {"id": "p1_13_task_3", "label": "Test FOCAL_GAMMA=2.5", "param": "FOCAL_GAMMA=2.5"},
+                ],
+            },
+            {
+                "id": "p1_group_14",
+                "title": "1.4 Learning rate LoRA",
+                "tasks": [
+                    {"id": "p1_14_task_1", "label": "Test LR=2e-5", "param": "LEARNING_RATE=2e-5"},
+                    {"id": "p1_14_task_2", "label": "Test LR=5e-5", "param": "LEARNING_RATE=5e-5"},
+                    {"id": "p1_14_task_3", "label": "Test LR=1e-4", "param": "LEARNING_RATE=1e-4"},
+                ],
+            },
+        ],
+    },
+    {
+        "id": "phase_2",
+        "title": "Giai đoạn 2 — Pseudo-label",
+        "tasks": [
+            {"id": "p2_task_1", "label": "Chạy seed model trên unlabeled data, lưu prob_toxic"},
+            {"id": "p2_task_2", "label": "Chia mẫu: low confidence toxic (0.50–0.60)"},
+            {"id": "p2_task_3", "label": "Chia mẫu: medium confidence toxic (0.60–0.75)"},
+            {"id": "p2_task_4", "label": "Chia mẫu: upper-medium toxic (0.75–0.85)"},
+            {"id": "p2_task_5", "label": "Chia mẫu: very high confidence toxic (>0.85)"},
+            {"id": "p2_task_6", "label": "Spot-check thủ công một phần nhỏ"},
+            {"id": "p2_task_7", "label": "Loại mẫu quá ngắn, spam, url-only, duplicate"},
+            {"id": "p2_task_8", "label": "Test PSEUDO_LOSS_WEIGHT=0.3", "param": "PSEUDO_LOSS_WEIGHT=0.3"},
+            {"id": "p2_task_9", "label": "Test PSEUDO_LOSS_WEIGHT=0.5", "param": "PSEUDO_LOSS_WEIGHT=0.5"},
+            {"id": "p2_task_10", "label": "Test MAX_PSEUDO_RATIO=0.2", "param": "MAX_PSEUDO_RATIO=0.2"},
+            {"id": "p2_task_11", "label": "Test MAX_PSEUDO_RATIO=0.3", "param": "MAX_PSEUDO_RATIO=0.3"},
+            {"id": "p2_task_12", "label": "Test MAX_PSEUDO_RATIO=0.4", "param": "MAX_PSEUDO_RATIO=0.4"},
+        ],
+    },
+    {
+        "id": "phase_3",
+        "title": "Giai đoạn 3 — Hard toxic mining",
+        "tasks": [
+            {"id": "p3_task_1", "label": "Lấy false negatives từ error_analysis.json"},
+            {"id": "p3_task_2", "label": "Review thủ công false negatives"},
+            {"id": "p3_task_3", "label": "Tag lỗi: implicit toxic"},
+            {"id": "p3_task_4", "label": "Tag lỗi: sarcasm/irony"},
+            {"id": "p3_task_5", "label": "Tag lỗi: harassment nhẹ"},
+            {"id": "p3_task_6", "label": "Tag lỗi: profanity biến thể"},
+            {"id": "p3_task_7", "label": "Tag lỗi: slang/teencode"},
+            {"id": "p3_task_8", "label": "Tag lỗi: context-dependent toxic"},
+            {"id": "p3_task_9", "label": "Oversample hard toxic subset hoặc gán sample_weight cao hơn"},
+        ],
+    },
+    {
+        "id": "phase_4",
+        "title": "Giai đoạn 4 — Data augmentation",
+        "tasks": [
+            {"id": "p4_task_1", "label": "Chỉ augment class toxic"},
+            {"id": "p4_task_2", "label": "Augment: slang substitution"},
+            {"id": "p4_task_3", "label": "Augment: teencode normalization / denormalization"},
+            {"id": "p4_task_4", "label": "Augment: typo injection nhẹ"},
+            {"id": "p4_task_5", "label": "Augment: paraphrase nhẹ"},
+            {"id": "p4_task_6", "label": "Test: baseline không augment"},
+            {"id": "p4_task_7", "label": "Test: toxic augment x1"},
+            {"id": "p4_task_8", "label": "Test: toxic augment x2"},
+        ],
+    },
+    {
+        "id": "phase_5",
+        "title": "Giai đoạn 5 — LoRA config",
+        "tasks": [
+            {"id": "p5_task_1", "label": "Test r=8", "param": "LORA_R=8"},
+            {"id": "p5_task_2", "label": "Test r=16", "param": "LORA_R=16"},
+            {"id": "p5_task_3", "label": "Test r=32", "param": "LORA_R=32"},
+            {"id": "p5_task_4", "label": "Test lora_alpha=16", "param": "LORA_ALPHA=16"},
+            {"id": "p5_task_5", "label": "Test lora_alpha=32", "param": "LORA_ALPHA=32"},
+            {"id": "p5_task_6", "label": "Test lora_alpha=64", "param": "LORA_ALPHA=64"},
+            {"id": "p5_task_7", "label": "Test lora_dropout=0.05", "param": "LORA_DROPOUT=0.05"},
+            {"id": "p5_task_8", "label": "Test lora_dropout=0.1", "param": "LORA_DROPOUT=0.1"},
+            {"id": "p5_task_9", "label": "Test target_modules: q,v", "param": "LORA_TARGET_MODULES=q,v"},
+            {"id": "p5_task_10", "label": "Test target_modules: q,k,v", "param": "LORA_TARGET_MODULES=q,k,v"},
+        ],
+    },
+]
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -181,7 +308,7 @@ app.add_middleware(
     ],
     allow_origin_regex=r"https://.*\.ngrok-free\.app",
     allow_credentials=False,
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE"],
     allow_headers=["Content-Type", "Authorization"],
 )
 
@@ -320,6 +447,67 @@ class SyntheticExportRequest(BaseModel):
     style: Optional[SyntheticStyle] = None
     label: Optional[int] = Field(default=None, ge=0, le=1)
     accepted_only: bool = True
+
+
+class TrainingTrackerCreatePhaseRequest(BaseModel):
+    title: str = Field(min_length=1)
+
+
+class TrainingTrackerUpdatePhaseRequest(BaseModel):
+    title: str = Field(min_length=1)
+
+
+class TrainingTrackerReorderPhasesRequest(BaseModel):
+    phase_ids: List[str] = Field(min_items=1)
+
+
+class TrainingTrackerCreateGroupRequest(BaseModel):
+    phase_id: str = Field(min_length=1)
+    title: str = Field(min_length=1)
+
+
+class TrainingTrackerUpdateGroupRequest(BaseModel):
+    title: str = Field(min_length=1)
+
+
+class TrainingTrackerReorderGroupsRequest(BaseModel):
+    phase_id: str = Field(min_length=1)
+    group_ids: List[str] = Field(min_items=1)
+
+
+class TrainingTrackerCreateTaskRequest(BaseModel):
+    phase_id: str = Field(min_length=1)
+    group_id: Optional[str] = None
+    label: str = Field(min_length=1)
+    param: Optional[str] = None
+
+
+class TrainingTrackerUpdateTaskRequest(BaseModel):
+    label: str = Field(min_length=1)
+    param: Optional[str] = None
+
+
+class TrainingTrackerReorderTasksRequest(BaseModel):
+    phase_id: str = Field(min_length=1)
+    group_id: Optional[str] = None
+    task_ids: List[str] = Field(min_items=1)
+
+
+class TrainingTrackerTaskCheckRequest(BaseModel):
+    checked: bool
+
+
+class TrainingTrackerCreateResultRequest(BaseModel):
+    scenario_name: str = Field(min_length=1)
+    phase_id: Optional[str] = None
+    macro_f1: float
+    f1_toxic: float
+    precision_toxic: float
+    recall_toxic: float
+    val_loss: Optional[float] = None
+    best_threshold_macro_f1: Optional[float] = None
+    best_threshold_f1_toxic: Optional[float] = None
+    notes: Optional[str] = None
 
 
 class AnalyzeCompareOptions(AnalyzeOptions):
@@ -1196,9 +1384,73 @@ def ensure_table_column(conn: sqlite3.Connection, table: str, column: str, defin
     conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
+def seed_training_tracker_default(conn: sqlite3.Connection) -> None:
+    row = conn.execute("SELECT COUNT(1) FROM training_tracker_phase").fetchone()
+    if row and int(row[0]) > 0:
+        return
+
+    for phase_index, phase in enumerate(TRAINING_TRACKER_DEFAULT_PHASES):
+        phase_id = phase.get("id") or uuid.uuid4().hex
+        conn.execute(
+            """
+            INSERT INTO training_tracker_phase (id, title, sort_order, created_at, updated_at)
+            VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            """,
+            (phase_id, phase.get("title") or phase_id, phase_index),
+        )
+
+        direct_tasks = phase.get("tasks") or []
+        for task_index, task in enumerate(direct_tasks):
+            task_id = task.get("id") or uuid.uuid4().hex
+            conn.execute(
+                """
+                INSERT INTO training_tracker_task (
+                    id, phase_id, group_id, label, param, sort_order, checked, created_at, updated_at
+                ) VALUES (?, ?, NULL, ?, ?, ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                """,
+                (
+                    task_id,
+                    phase_id,
+                    task.get("label") or task_id,
+                    task.get("param"),
+                    task_index,
+                ),
+            )
+
+        groups = phase.get("groups") or []
+        for group_index, group in enumerate(groups):
+            group_id = group.get("id") or uuid.uuid4().hex
+            conn.execute(
+                """
+                INSERT INTO training_tracker_group (
+                    id, phase_id, title, sort_order, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                """,
+                (group_id, phase_id, group.get("title") or group_id, group_index),
+            )
+            for task_index, task in enumerate(group.get("tasks") or []):
+                task_id = task.get("id") or uuid.uuid4().hex
+                conn.execute(
+                    """
+                    INSERT INTO training_tracker_task (
+                        id, phase_id, group_id, label, param, sort_order, checked, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                    """,
+                    (
+                        task_id,
+                        phase_id,
+                        group_id,
+                        task.get("label") or task_id,
+                        task.get("param"),
+                        task_index,
+                    ),
+                )
+
+
 def init_feedback_db() -> None:
     FEEDBACK_DIR.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+        conn.execute("PRAGMA foreign_keys = ON")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS feedback_page (
@@ -1274,6 +1526,107 @@ def init_feedback_db() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_synth_row_batch ON synthetic_dataset_row(batch_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_synth_row_accept ON synthetic_dataset_row(is_accepted)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_synth_row_dims ON synthetic_dataset_row(domain, style, label)")
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS training_tracker_phase (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS training_tracker_group (
+                id TEXT PRIMARY KEY,
+                phase_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(phase_id) REFERENCES training_tracker_phase(id) ON DELETE CASCADE
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS training_tracker_task (
+                id TEXT PRIMARY KEY,
+                phase_id TEXT NOT NULL,
+                group_id TEXT,
+                label TEXT NOT NULL,
+                param TEXT,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                checked INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(phase_id) REFERENCES training_tracker_phase(id) ON DELETE CASCADE,
+                FOREIGN KEY(group_id) REFERENCES training_tracker_group(id) ON DELETE CASCADE
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS training_tracker_result (
+                id TEXT PRIMARY KEY,
+                scenario_name TEXT NOT NULL,
+                phase_id TEXT,
+                macro_f1 REAL NOT NULL,
+                f1_toxic REAL NOT NULL,
+                precision_toxic REAL NOT NULL,
+                recall_toxic REAL NOT NULL,
+                val_loss REAL,
+                best_threshold_macro_f1 REAL,
+                best_threshold_f1_toxic REAL,
+                notes TEXT,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_training_phase_order ON training_tracker_phase(sort_order)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_training_group_phase_order ON training_tracker_group(phase_id, sort_order)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_training_task_phase_group_order ON training_tracker_task(phase_id, group_id, sort_order)")
+
+        result_columns = conn.execute("PRAGMA table_info(training_tracker_result)").fetchall()
+        phase_id_column = next((row for row in result_columns if row[1] == "phase_id"), None)
+        if phase_id_column and int(phase_id_column[3]) == 1:
+            conn.execute("ALTER TABLE training_tracker_result RENAME TO training_tracker_result_old")
+            conn.execute(
+                """
+                CREATE TABLE training_tracker_result (
+                    id TEXT PRIMARY KEY,
+                    scenario_name TEXT NOT NULL,
+                    phase_id TEXT,
+                    macro_f1 REAL NOT NULL,
+                    f1_toxic REAL NOT NULL,
+                    precision_toxic REAL NOT NULL,
+                    recall_toxic REAL NOT NULL,
+                    val_loss REAL,
+                    best_threshold_macro_f1 REAL,
+                    best_threshold_f1_toxic REAL,
+                    notes TEXT,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO training_tracker_result (
+                    id, scenario_name, phase_id, macro_f1, f1_toxic, precision_toxic, recall_toxic,
+                    val_loss, best_threshold_macro_f1, best_threshold_f1_toxic, notes, created_at
+                )
+                SELECT id, scenario_name, phase_id, macro_f1, f1_toxic, precision_toxic, recall_toxic,
+                       val_loss, best_threshold_macro_f1, best_threshold_f1_toxic, notes, created_at
+                FROM training_tracker_result_old
+                """
+            )
+            conn.execute("DROP TABLE training_tracker_result_old")
+
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_training_result_created ON training_tracker_result(created_at DESC)")
+
         ensure_table_column(conn, "feedback_page", "html_tag", "TEXT")
         ensure_table_column(conn, "feedback_page", "html_tag_override", "TEXT")
         ensure_table_column(conn, "feedback_segment", "html_tag", "TEXT")
@@ -1288,6 +1641,394 @@ def init_feedback_db() -> None:
         ensure_table_column(conn, "synthetic_dataset_row", "validation_flags", "TEXT")
         ensure_table_column(conn, "synthetic_dataset_row", "meta_json", "TEXT")
         ensure_table_column(conn, "synthetic_dataset_row", "reviewed_at", "TEXT")
+
+        seed_training_tracker_default(conn)
+        conn.commit()
+
+
+def fetch_training_tracker_payload() -> Dict[str, Any]:
+    init_feedback_db()
+    with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        phases = conn.execute(
+            """
+            SELECT id, title, sort_order, created_at, updated_at
+            FROM training_tracker_phase
+            ORDER BY sort_order ASC, created_at ASC
+            """
+        ).fetchall()
+        groups = conn.execute(
+            """
+            SELECT id, phase_id, title, sort_order, created_at, updated_at
+            FROM training_tracker_group
+            ORDER BY phase_id ASC, sort_order ASC, created_at ASC
+            """
+        ).fetchall()
+        tasks = conn.execute(
+            """
+            SELECT id, phase_id, group_id, label, param, sort_order, checked, created_at, updated_at
+            FROM training_tracker_task
+            ORDER BY phase_id ASC, COALESCE(group_id, ''), sort_order ASC, created_at ASC
+            """
+        ).fetchall()
+        results = conn.execute(
+            """
+            SELECT id, scenario_name, phase_id, macro_f1, f1_toxic, precision_toxic, recall_toxic,
+                   val_loss, best_threshold_macro_f1, best_threshold_f1_toxic, notes, created_at
+            FROM training_tracker_result
+            ORDER BY created_at DESC
+            """
+        ).fetchall()
+
+    groups_by_phase: Dict[str, List[Dict[str, Any]]] = {}
+    for row in groups:
+        groups_by_phase.setdefault(row["phase_id"], []).append(
+            {
+                "id": row["id"],
+                "title": row["title"],
+                "sort_order": row["sort_order"],
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+            }
+        )
+
+    grouped_tasks: Dict[Tuple[str, Optional[str]], List[Dict[str, Any]]] = {}
+    for row in tasks:
+        key = (row["phase_id"], row["group_id"])
+        grouped_tasks.setdefault(key, []).append(
+            {
+                "id": row["id"],
+                "label": row["label"],
+                "param": row["param"],
+                "sort_order": row["sort_order"],
+                "checked": bool(row["checked"]),
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+            }
+        )
+
+    phase_items: List[Dict[str, Any]] = []
+    for phase in phases:
+        phase_id = phase["id"]
+        phase_groups = groups_by_phase.get(phase_id, [])
+        groups_payload: List[Dict[str, Any]] = []
+        for group in phase_groups:
+            task_items = grouped_tasks.get((phase_id, group["id"]), [])
+            groups_payload.append({
+                **group,
+                "tasks": task_items,
+            })
+
+        direct_tasks = grouped_tasks.get((phase_id, None), [])
+        phase_items.append(
+            {
+                "id": phase_id,
+                "title": phase["title"],
+                "sort_order": phase["sort_order"],
+                "created_at": phase["created_at"],
+                "updated_at": phase["updated_at"],
+                "groups": groups_payload,
+                "tasks": direct_tasks,
+            }
+        )
+
+    result_items = []
+    for row in results:
+        result_items.append(
+            {
+                "id": row["id"],
+                "scenario_name": row["scenario_name"],
+                "macro_f1": row["macro_f1"],
+                "f1_toxic": row["f1_toxic"],
+                "precision_toxic": row["precision_toxic"],
+                "recall_toxic": row["recall_toxic"],
+                "val_loss": row["val_loss"],
+                "best_threshold_macro_f1": row["best_threshold_macro_f1"],
+                "best_threshold_f1_toxic": row["best_threshold_f1_toxic"],
+                "notes": row["notes"] or "",
+                "created_at": row["created_at"],
+            }
+        )
+
+    return {"phases": phase_items, "results": result_items}
+
+
+def create_training_phase(title: str) -> Dict[str, Any]:
+    init_feedback_db()
+    phase_id = uuid.uuid4().hex
+    clean_title = title.strip()
+    with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+        current_max = conn.execute("SELECT COALESCE(MAX(sort_order), -1) FROM training_tracker_phase").fetchone()
+        next_order = int(current_max[0]) + 1 if current_max else 0
+        conn.execute(
+            """
+            INSERT INTO training_tracker_phase (id, title, sort_order, created_at, updated_at)
+            VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            """,
+            (phase_id, clean_title, next_order),
+        )
+        conn.commit()
+    return {"id": phase_id, "title": clean_title, "sort_order": next_order}
+
+
+def update_training_phase_title(phase_id: str, title: str) -> int:
+    init_feedback_db()
+    with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+        cursor = conn.execute(
+            """
+            UPDATE training_tracker_phase
+            SET title = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (title.strip(), phase_id),
+        )
+        conn.commit()
+        return cursor.rowcount or 0
+
+
+def reorder_training_phases(phase_ids: List[str]) -> int:
+    init_feedback_db()
+    with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+        existing = [row[0] for row in conn.execute("SELECT id FROM training_tracker_phase").fetchall()]
+        existing_set = set(existing)
+        if set(phase_ids) != existing_set:
+            raise HTTPException(status_code=400, detail="phase_ids must include all existing phases")
+        for idx, phase_id in enumerate(phase_ids):
+            conn.execute(
+                "UPDATE training_tracker_phase SET sort_order = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (idx, phase_id),
+            )
+        conn.commit()
+    return len(phase_ids)
+
+
+def delete_training_phase(phase_id: str) -> int:
+    init_feedback_db()
+    with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+        conn.execute("DELETE FROM training_tracker_task WHERE phase_id = ?", (phase_id,))
+        conn.execute("DELETE FROM training_tracker_group WHERE phase_id = ?", (phase_id,))
+        cursor = conn.execute("DELETE FROM training_tracker_phase WHERE id = ?", (phase_id,))
+        conn.commit()
+        return cursor.rowcount or 0
+
+
+def create_training_group(phase_id: str, title: str) -> Dict[str, Any]:
+    init_feedback_db()
+    group_id = uuid.uuid4().hex
+    clean_title = title.strip()
+    with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+        exists = conn.execute("SELECT COUNT(1) FROM training_tracker_phase WHERE id = ?", (phase_id,)).fetchone()
+        if not exists or int(exists[0]) == 0:
+            raise HTTPException(status_code=404, detail="Phase not found")
+        current_max = conn.execute(
+            "SELECT COALESCE(MAX(sort_order), -1) FROM training_tracker_group WHERE phase_id = ?",
+            (phase_id,),
+        ).fetchone()
+        next_order = int(current_max[0]) + 1 if current_max else 0
+        conn.execute(
+            """
+            INSERT INTO training_tracker_group (id, phase_id, title, sort_order, created_at, updated_at)
+            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            """,
+            (group_id, phase_id, clean_title, next_order),
+        )
+        conn.commit()
+    return {"id": group_id, "phase_id": phase_id, "title": clean_title, "sort_order": next_order}
+
+
+def update_training_group_title(group_id: str, title: str) -> int:
+    init_feedback_db()
+    with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+        cursor = conn.execute(
+            """
+            UPDATE training_tracker_group
+            SET title = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (title.strip(), group_id),
+        )
+        conn.commit()
+        return cursor.rowcount or 0
+
+
+def reorder_training_groups(phase_id: str, group_ids: List[str]) -> int:
+    init_feedback_db()
+    with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+        existing = [
+            row[0]
+            for row in conn.execute(
+                "SELECT id FROM training_tracker_group WHERE phase_id = ? ORDER BY sort_order ASC",
+                (phase_id,),
+            ).fetchall()
+        ]
+        if set(existing) != set(group_ids):
+            raise HTTPException(status_code=400, detail="group_ids must include all groups in phase")
+        for idx, group_id in enumerate(group_ids):
+            conn.execute(
+                "UPDATE training_tracker_group SET sort_order = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (idx, group_id),
+            )
+        conn.commit()
+    return len(group_ids)
+
+
+def delete_training_group(group_id: str) -> int:
+    init_feedback_db()
+    with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+        cursor = conn.execute("DELETE FROM training_tracker_group WHERE id = ?", (group_id,))
+        conn.commit()
+        return cursor.rowcount or 0
+
+
+def create_training_task(phase_id: str, group_id: Optional[str], label: str, param: Optional[str]) -> Dict[str, Any]:
+    init_feedback_db()
+    task_id = uuid.uuid4().hex
+    clean_label = label.strip()
+    clean_param = (param or "").strip() or None
+    with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+        phase_exists = conn.execute("SELECT COUNT(1) FROM training_tracker_phase WHERE id = ?", (phase_id,)).fetchone()
+        if not phase_exists or int(phase_exists[0]) == 0:
+            raise HTTPException(status_code=404, detail="Phase not found")
+        if group_id:
+            group_exists = conn.execute(
+                "SELECT COUNT(1) FROM training_tracker_group WHERE id = ? AND phase_id = ?",
+                (group_id, phase_id),
+            ).fetchone()
+            if not group_exists or int(group_exists[0]) == 0:
+                raise HTTPException(status_code=404, detail="Group not found")
+        current_max = conn.execute(
+            """
+            SELECT COALESCE(MAX(sort_order), -1)
+            FROM training_tracker_task
+            WHERE phase_id = ? AND (
+                (group_id IS NULL AND ? IS NULL) OR group_id = ?
+            )
+            """,
+            (phase_id, group_id, group_id),
+        ).fetchone()
+        next_order = int(current_max[0]) + 1 if current_max else 0
+        conn.execute(
+            """
+            INSERT INTO training_tracker_task (
+                id, phase_id, group_id, label, param, sort_order, checked, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            """,
+            (task_id, phase_id, group_id, clean_label, clean_param, next_order),
+        )
+        conn.commit()
+    return {
+        "id": task_id,
+        "phase_id": phase_id,
+        "group_id": group_id,
+        "label": clean_label,
+        "param": clean_param,
+        "sort_order": next_order,
+    }
+
+
+def update_training_task(task_id: str, label: str, param: Optional[str]) -> int:
+    init_feedback_db()
+    with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+        cursor = conn.execute(
+            """
+            UPDATE training_tracker_task
+            SET label = ?, param = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (label.strip(), (param or "").strip() or None, task_id),
+        )
+        conn.commit()
+        return cursor.rowcount or 0
+
+
+def reorder_training_tasks(phase_id: str, group_id: Optional[str], task_ids: List[str]) -> int:
+    init_feedback_db()
+    with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+        existing = [
+            row[0]
+            for row in conn.execute(
+                """
+                SELECT id FROM training_tracker_task
+                WHERE phase_id = ? AND ((group_id IS NULL AND ? IS NULL) OR group_id = ?)
+                ORDER BY sort_order ASC
+                """,
+                (phase_id, group_id, group_id),
+            ).fetchall()
+        ]
+        if set(existing) != set(task_ids):
+            raise HTTPException(status_code=400, detail="task_ids must include all tasks in target scope")
+        for idx, task_id in enumerate(task_ids):
+            conn.execute(
+                "UPDATE training_tracker_task SET sort_order = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (idx, task_id),
+            )
+        conn.commit()
+    return len(task_ids)
+
+
+def set_training_task_checked(task_id: str, checked: bool) -> int:
+    init_feedback_db()
+    with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+        cursor = conn.execute(
+            """
+            UPDATE training_tracker_task
+            SET checked = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (1 if checked else 0, task_id),
+        )
+        conn.commit()
+        return cursor.rowcount or 0
+
+
+def delete_training_task(task_id: str) -> int:
+    init_feedback_db()
+    with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+        cursor = conn.execute("DELETE FROM training_tracker_task WHERE id = ?", (task_id,))
+        conn.commit()
+        return cursor.rowcount or 0
+
+
+def create_training_result(item: TrainingTrackerCreateResultRequest) -> Dict[str, Any]:
+    init_feedback_db()
+    result_id = uuid.uuid4().hex
+    with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+        conn.execute(
+            """
+            INSERT INTO training_tracker_result (
+                id, scenario_name, phase_id, macro_f1, f1_toxic, precision_toxic, recall_toxic,
+                val_loss, best_threshold_macro_f1, best_threshold_f1_toxic, notes, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """,
+            (
+                result_id,
+                item.scenario_name.strip(),
+                item.phase_id,
+                item.macro_f1,
+                item.f1_toxic,
+                item.precision_toxic,
+                item.recall_toxic,
+                item.val_loss,
+                item.best_threshold_macro_f1,
+                item.best_threshold_f1_toxic,
+                (item.notes or "").strip(),
+            ),
+        )
+        conn.commit()
+
+    payload = fetch_training_tracker_payload()
+    result = next((r for r in payload["results"] if r["id"] == result_id), None)
+    if not result:
+        raise HTTPException(status_code=500, detail="Failed to read inserted result")
+    return result
+
+
+def delete_training_result(result_id: str) -> int:
+    init_feedback_db()
+    with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+        cursor = conn.execute("DELETE FROM training_tracker_result WHERE id = ?", (result_id,))
+        conn.commit()
+        return cursor.rowcount or 0
 
 
 def insert_feedback_page(items: List[Dict[str, Any]]) -> int:
@@ -2536,6 +3277,117 @@ def get_models() -> Dict[str, Any]:
         }
     except (PermissionError, OSError, NotADirectoryError) as exc:
         raise HTTPException(status_code=500, detail=f"Failed to list models: {exc}") from exc
+
+
+@app.get("/api/training-tracker")
+def get_training_tracker() -> Dict[str, Any]:
+    return fetch_training_tracker_payload()
+
+
+@app.post("/api/training-tracker/phases")
+def api_create_training_phase(request: TrainingTrackerCreatePhaseRequest) -> Dict[str, Any]:
+    create_training_phase(request.title)
+    return fetch_training_tracker_payload()
+
+
+@app.patch("/api/training-tracker/phases/{phase_id}")
+def api_update_training_phase(phase_id: str, request: TrainingTrackerUpdatePhaseRequest) -> Dict[str, Any]:
+    updated = update_training_phase_title(phase_id, request.title)
+    if updated == 0:
+        raise HTTPException(status_code=404, detail="Phase not found")
+    return fetch_training_tracker_payload()
+
+
+@app.delete("/api/training-tracker/phases/{phase_id}")
+def api_delete_training_phase(phase_id: str) -> Dict[str, Any]:
+    deleted = delete_training_phase(phase_id)
+    if deleted == 0:
+        raise HTTPException(status_code=404, detail="Phase not found")
+    return fetch_training_tracker_payload()
+
+
+@app.post("/api/training-tracker/phases/reorder")
+def api_reorder_training_phases(request: TrainingTrackerReorderPhasesRequest) -> Dict[str, Any]:
+    reorder_training_phases(request.phase_ids)
+    return fetch_training_tracker_payload()
+
+
+@app.post("/api/training-tracker/groups")
+def api_create_training_group(request: TrainingTrackerCreateGroupRequest) -> Dict[str, Any]:
+    create_training_group(request.phase_id, request.title)
+    return fetch_training_tracker_payload()
+
+
+@app.patch("/api/training-tracker/groups/{group_id}")
+def api_update_training_group(group_id: str, request: TrainingTrackerUpdateGroupRequest) -> Dict[str, Any]:
+    updated = update_training_group_title(group_id, request.title)
+    if updated == 0:
+        raise HTTPException(status_code=404, detail="Group not found")
+    return fetch_training_tracker_payload()
+
+
+@app.delete("/api/training-tracker/groups/{group_id}")
+def api_delete_training_group(group_id: str) -> Dict[str, Any]:
+    deleted = delete_training_group(group_id)
+    if deleted == 0:
+        raise HTTPException(status_code=404, detail="Group not found")
+    return fetch_training_tracker_payload()
+
+
+@app.post("/api/training-tracker/groups/reorder")
+def api_reorder_training_groups(request: TrainingTrackerReorderGroupsRequest) -> Dict[str, Any]:
+    reorder_training_groups(request.phase_id, request.group_ids)
+    return fetch_training_tracker_payload()
+
+
+@app.post("/api/training-tracker/tasks")
+def api_create_training_task(request: TrainingTrackerCreateTaskRequest) -> Dict[str, Any]:
+    create_training_task(request.phase_id, request.group_id, request.label, request.param)
+    return fetch_training_tracker_payload()
+
+
+@app.patch("/api/training-tracker/tasks/{task_id}")
+def api_update_training_task(task_id: str, request: TrainingTrackerUpdateTaskRequest) -> Dict[str, Any]:
+    updated = update_training_task(task_id, request.label, request.param)
+    if updated == 0:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return fetch_training_tracker_payload()
+
+
+@app.post("/api/training-tracker/tasks/reorder")
+def api_reorder_training_tasks(request: TrainingTrackerReorderTasksRequest) -> Dict[str, Any]:
+    reorder_training_tasks(request.phase_id, request.group_id, request.task_ids)
+    return fetch_training_tracker_payload()
+
+
+@app.post("/api/training-tracker/tasks/{task_id}/check")
+def api_check_training_task(task_id: str, request: TrainingTrackerTaskCheckRequest) -> Dict[str, Any]:
+    updated = set_training_task_checked(task_id, request.checked)
+    if updated == 0:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return fetch_training_tracker_payload()
+
+
+@app.delete("/api/training-tracker/tasks/{task_id}")
+def api_delete_training_task(task_id: str) -> Dict[str, Any]:
+    deleted = delete_training_task(task_id)
+    if deleted == 0:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return fetch_training_tracker_payload()
+
+
+@app.post("/api/training-tracker/results")
+def api_create_training_result(request: TrainingTrackerCreateResultRequest) -> Dict[str, Any]:
+    create_training_result(request)
+    return fetch_training_tracker_payload()
+
+
+@app.delete("/api/training-tracker/results/{result_id}")
+def api_delete_training_result(result_id: str) -> Dict[str, Any]:
+    deleted = delete_training_result(result_id)
+    if deleted == 0:
+        raise HTTPException(status_code=404, detail="Result not found")
+    return fetch_training_tracker_payload()
 
 
 @app.post("/api/feedback")
