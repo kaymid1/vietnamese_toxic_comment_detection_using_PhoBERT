@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+
+  # ============================================================
+  # Backend — lint + test (runs directly, no Docker needed)
+  # ============================================================
+  backend-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b  # v5.3.0
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      # Install torch CPU-only first so we never accidentally pull CUDA wheels.
+      # CI always uses CPU regardless of the target deploy environment.
+      # TODO(gpu-upgrade): no change needed here — CI stays CPU-only.
+      - name: Install torch (CPU-only)
+        run: |
+          pip install \
+            --index-url https://download.pytorch.org/whl/cpu \
+            torch==2.9.1
+
+      - name: Install ML dependencies
+        run: pip install --no-cache-dir -r requirements-ml.txt
+
+      - name: Install base dependencies
+        run: pip install --no-cache-dir -r requirements-base.txt
+
+      - name: Lint with ruff
+        run: |
+          pip install ruff
+          ruff check backend/ --select E,W,F --ignore E501
+
+      # TODO: remove continue-on-error once a tests/ directory is created
+      - name: Run pytest
+        run: |
+          pip install pytest
+          pytest tests/ -q --tb=short
+        continue-on-error: true
+
+  # ============================================================
+  # Frontend — dependency install + production build check
+  # ============================================================
+  frontend-checks:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: comprehensive_ui
+
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af  # v4.1.0
+        with:
+          node-version: '20'
+          # TODO: commit package-lock.json to git then add: cache: 'npm'
+          # and change the install step below to: npm ci
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Build (checks for TypeScript/bundler errors)
+        run: npm run build

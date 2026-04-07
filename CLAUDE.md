@@ -59,8 +59,13 @@ When editing code, prioritize these files:
   - FastAPI backend used by the UI
 - `infer_crawled_local.py`
   - main local inference script for crawled data
-- `setup_and_crawl.py`
-  - hybrid crawler, video transcript handling, ASR
+- `comment_crawl.py` **(latest)**
+  - comment-only crawl pipeline (news site comment sections + Facebook comments)
+  - outputs segments.jsonl in the same schema as setup_and_crawl.py
+  - replaces setup_and_crawl.py for comment-focused use cases
+- `setup_and_crawl.py` **(deprecated for comment use case)**
+  - hybrid crawler for full article body, video transcript handling, ASR
+  - use `comment_crawl.py` instead for comment section crawling
 - `domain_classifier.py`
   - domain classification and threshold selection
 - `scripts/01_export_raw.py`
@@ -110,7 +115,7 @@ These files / folders are **not the main source**:
 - `mlflow`
 - `sqlite3` for feedback / threshold storage
 - `trafilatura`
-- `selenium` + `undetected-chromedriver`
+- `selenium` + `undetected-chromedriver` (Chrome fallback) / `selenium.webdriver.Edge` (Edge, via selenium-manager)
 - `vncorenlp`
 - `yt-dlp`
 - `youtube-transcript-api`
@@ -419,15 +424,67 @@ Important caveat:
 
 ---
 
-## 8. Actual crawl pipeline
+## 8. Crawl pipelines
+
+### Comment-only crawl pipeline (latest)
+
+Main file: `comment_crawl.py`
+
+#### Goal
+
+Take a URL, extract **only the comment section** (not article body), and write artifacts in the same schema as `setup_and_crawl.py`.
+
+#### Supported sources
+
+| Source type | Strategy | Status |
+|---|---|---|
+| Vietnamese news sites | Selenium + domain-specific CSS selectors | Working (VNExpress tested) |
+| Facebook posts | mbasic.facebook.com + optional cookie injection | Implemented, untested |
+| X / Twitter | Not supported | — |
+
+#### Supported news domains (dedicated CSS selectors)
+
+`vnexpress.net`, `tuoitre.vn`, `thanhnien.vn`, `dantri.com.vn`, `vietnamnet.vn`.
+Unknown news domains fall back to heuristic selectors.
+
+#### Browser detection (cross-platform)
+
+Preference order: Edge → Chrome.
+
+- **Windows**: searches known install paths + `shutil.which()`
+- **macOS**: checks `/Applications/` paths + `shutil.which()`
+- **Linux / Ubuntu VM**: `shutil.which()` for `microsoft-edge-stable`, `google-chrome-stable`, `chromium-browser`, etc.
+
+Edge uses `selenium.webdriver.Edge` (selenium-manager auto-downloads msedgedriver).
+Chrome uses `undetected_chromedriver` for anti-bot patching.
+
+#### Output
+
+- `data/raw/crawled_urls/<url_hash>/segments.jsonl`
+- `data/raw/crawled_urls/<url_hash>/extracted.txt`
+- `data/raw/crawled_urls/<url_hash>/meta.json`
+
+`html_tag_effective` defaults to `"comment"` (vs `"body"` in the article pipeline).
+
+#### CLI
+
+```bash
+python comment_crawl.py "https://vnexpress.net/some-article-123.html"
+python comment_crawl.py "https://facebook.com/..." --fb-cookies cookies.json --no-headless
+python comment_crawl.py "https://..." --max-load-more 20
+```
+
+---
+
+### Article + video crawl pipeline (deprecated for comment use case)
 
 Main file: `setup_and_crawl.py`
 
-### Goal
+#### Goal
 
 Take a web URL, crawl text, split it into segments, optionally fetch video / transcript data, and write artifacts to disk.
 
-### Text crawl logic
+#### Text crawl logic
 
 `crawl_and_save()` does the following:
 
@@ -444,7 +501,7 @@ Take a web URL, crawl text, split it into segments, optionally fetch video / tra
    - `segments.jsonl`
    - `meta.json`
 
-### Video pipeline
+#### Video pipeline
 
 Current crawler defaults:
 
@@ -463,7 +520,7 @@ Possible video artifacts:
 - `video_data.jsonl`
 - `videos/` folder if `keep_artifacts=True`
 
-### Runtime prerequisites for video / ASR
+#### Runtime prerequisites for video / ASR
 
 For the video/ASR pipeline to work well, the environment may need:
 
@@ -998,7 +1055,88 @@ Interpretation:
 - B is primary deploy candidate on ViCTSD-comparable evaluation
 - C is new benchmark contribution and should be reported alongside A/B
 
-## 18. Short summary
+## 18. Docker & CI/CD setup (added 2026-04-06)
+
+### File layout
+
+```
+CrawlingData/
+├── .dockerignore
+├── requirements-ml.txt          # torch ecosystem (heavy layer, cached separately)
+├── requirements-base.txt        # fastapi, crawling libs, mlflow, etc.
+├── docker-compose.yml
+├── backend/
+│   └── Dockerfile               # CPU-only torch; GPU notes in TODO comments
+└── comprehensive_ui/
+    ├── Dockerfile                # node:20-slim build → nginx:1.27-alpine serve
+    └── nginx.conf                # SPA fallback + /api → backend:8000 proxy
+.github/workflows/
+├── ci.yml                        # lint + build check on every PR / push
+└── build.yml                     # multi-platform image push on merge to main
+```
+
+### Requirements split rationale
+
+`requirements.txt` (the original monolith) is **not used by Docker**.
+Docker uses two files for layer-cache efficiency:
+
+- `requirements-ml.txt` — torch ecosystem, changes rarely → installed as its own layer
+- `requirements-base.txt` — fastapi, crawling, mlflow, etc.
+
+`torch==2.9.1` is installed separately before both files via:
+```
+pip install --index-url https://download.pytorch.org/whl/cpu torch==2.9.1
+```
+This forces CPU-only wheel and prevents the 2.5 GB CUDA wheel from being pulled.
+
+### Docker Compose quick reference
+
+```bash
+docker compose up --build     # first time (slow: torch ~800 MB download)
+docker compose up             # subsequent (fast: layers cached)
+docker compose down           # stop
+docker compose down -v        # stop + wipe sqlite_data volume
+```
+
+Prerequisites before first run:
+- PhoBERT weights at `./models/options/<model-name>/` (mounted read-only to `/app/models`)
+- VnCoreNLP JARs already in `./vncorenlp/` (mounted read-only)
+- SQLite feedback DB is auto-created inside `sqlite_data` named volume
+
+### CI workflow (ci.yml)
+
+Trigger: `push` or `pull_request` to `main` / `develop`
+
+Jobs:
+- `backend-checks`: Python 3.12, installs torch CPU + `requirements-ml.txt` + `requirements-base.txt`, runs `ruff` lint and `pytest` (pytest is `continue-on-error` until a `tests/` dir exists)
+- `frontend-checks`: Node 20, `npm install`, `npm run build` (verifies TypeScript/bundler errors)
+
+Caching: `actions/setup-python` with `cache: 'pip'` — after first run, pip deps are cached.
+
+### Build workflow (build.yml)
+
+Trigger: `push` to `main` only
+
+Builds and pushes multi-platform images (`linux/amd64` + `linux/arm64`) to GHCR.
+
+**Before first push**: replace `<your-github-username>` in the `env:` block of `build.yml`.
+
+Images:
+- `ghcr.io/<user>/viettoxic-backend:latest` and `:<sha>`
+- `ghcr.io/<user>/viettoxic-frontend:latest` and `:<sha>`
+
+Layer cache: `cache-from/to: type=gha` — first build ~15–20 min, subsequent ~2–3 min.
+
+### GPU upgrade path
+
+Every file that needs changing for GPU is marked with `TODO(gpu-upgrade):` comments:
+- `backend/Dockerfile` — swap base image + torch index URL
+- `docker-compose.yml` — add `deploy.resources.reservations.devices` (nvidia)
+- `.github/workflows/ci.yml` — no change needed (CI stays CPU-only)
+
+---
+
+## 19. Short summary
 
 Remember that this repo is a combination of:
 

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Navigation } from "@/app/components/Navigation";
 import { HomePage } from "@/app/components/HomePage";
 import { I18nContext, createTranslator } from "@/app/i18n/context";
@@ -42,12 +42,6 @@ interface ApiResult {
   };
 }
 
-interface PendingFallbackUrl {
-  url: string;
-  url_hash: string;
-  reason?: string;
-  trafilatura_text_len?: number;
-}
 
 interface DomainThresholds {
   news?: number;
@@ -59,8 +53,7 @@ interface DomainThresholds {
 interface AnalyzeResponse {
   job_id: string;
   source_job_id?: string;
-  flow_state?: "awaiting_user_choice" | "completed";
-  pending_fallback_urls?: PendingFallbackUrl[];
+  flow_state?: "completed";
   model_name?: string;
   thresholds?: {
     seg_threshold?: number;
@@ -82,8 +75,7 @@ interface CompareModelResponse {
 
 interface AnalyzeCompareResponse {
   job_id: string;
-  flow_state?: "awaiting_user_choice" | "completed";
-  pending_fallback_urls?: PendingFallbackUrl[];
+  flow_state?: "completed";
   models?: Record<string, CompareModelResponse>;
 }
 
@@ -92,11 +84,6 @@ interface ModelsResponse {
   default?: string | null;
 }
 
-interface FallbackDecisionPayload {
-  url: string;
-  url_hash: string;
-  action: "use_selenium" | "skip";
-}
 
 interface ScanHistoryItem {
   id: string;
@@ -216,11 +203,6 @@ export default function App() {
   const [theme, setTheme] = useState<"light" | "dark">("light");
   const [language, setLanguage] = useState<Language>("vi");
   const [datasetVersion, setDatasetVersion] = useState<DatasetVersion>("v1");
-  const [fallbackPrompt, setFallbackPrompt] = useState<{
-    items: PendingFallbackUrl[];
-    decisions: Record<string, "use_selenium" | "skip">;
-  } | null>(null);
-  const fallbackResolverRef = useRef<((value: FallbackDecisionPayload[] | null) => void) | null>(null);
 
   useEffect(() => {
     setScanHistory(readScanHistory());
@@ -344,62 +326,6 @@ export default function App() {
     });
   };
 
-  const askFallbackDecisions = (pending: PendingFallbackUrl[]): Promise<FallbackDecisionPayload[] | null> => {
-    return new Promise((resolve) => {
-      const initial: Record<string, "use_selenium" | "skip"> = {};
-      pending.forEach((item) => {
-        initial[item.url_hash] = "use_selenium";
-      });
-      setFallbackPrompt({ items: pending, decisions: initial });
-      fallbackResolverRef.current = resolve;
-    });
-  };
-
-  const handleFallbackDecisionChange = (urlHash: string, action: "use_selenium" | "skip") => {
-    setFallbackPrompt((prev) => {
-      if (!prev) return prev;
-      return {
-        ...prev,
-        decisions: {
-          ...prev.decisions,
-          [urlHash]: action,
-        },
-      };
-    });
-  };
-
-  const handleFallbackApplyAll = (action: "use_selenium" | "skip") => {
-    setFallbackPrompt((prev) => {
-      if (!prev) return prev;
-      const next: Record<string, "use_selenium" | "skip"> = {};
-      prev.items.forEach((item) => {
-        next[item.url_hash] = action;
-      });
-      return { ...prev, decisions: next };
-    });
-  };
-
-  const closeFallbackPrompt = (payload: FallbackDecisionPayload[] | null) => {
-    const resolver = fallbackResolverRef.current;
-    fallbackResolverRef.current = null;
-    setFallbackPrompt(null);
-    resolver?.(payload);
-  };
-
-  const handleFallbackConfirm = () => {
-    if (!fallbackPrompt) return;
-    const payload: FallbackDecisionPayload[] = fallbackPrompt.items.map((item) => ({
-      url: item.url,
-      url_hash: item.url_hash,
-      action: fallbackPrompt.decisions[item.url_hash] || "use_selenium",
-    }));
-    closeFallbackPrompt(payload);
-  };
-
-  const handleFallbackCancel = () => {
-    closeFallbackPrompt(null);
-  };
-
   const handleAnalyze = async (urls: string[], modelNames: string[]) => {
     try {
       setErrorMessage(null);
@@ -412,8 +338,8 @@ export default function App() {
         max_length: 256,
         page_threshold: 0.25,
         seg_threshold: 0.4,
-        enable_video: true,
-        selenium_fallback_mode: "ask",
+        enable_video: false,
+        selenium_fallback_mode: "auto",
       };
 
       if (modelNames.length >= 2) {
@@ -425,31 +351,13 @@ export default function App() {
           },
         };
 
-        let data = await parseJsonResponse<AnalyzeCompareResponse>(
+        const data = await parseJsonResponse<AnalyzeCompareResponse>(
           await fetch(buildApiUrl("/api/analyze_compare"), {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(requestBody),
           }),
         );
-
-        if (data.flow_state === "awaiting_user_choice" && data.pending_fallback_urls && data.pending_fallback_urls.length > 0) {
-          const fallbackDecisions = await askFallbackDecisions(data.pending_fallback_urls);
-          if (!fallbackDecisions) {
-            throw new Error(t("app.canceledSelenium"));
-          }
-          data = await parseJsonResponse<AnalyzeCompareResponse>(
-            await fetch(buildApiUrl("/api/analyze_compare"), {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                ...requestBody,
-                pending_job_id: data.job_id,
-                fallback_decisions: fallbackDecisions,
-              }),
-            }),
-          );
-        }
 
         const comparePayloads = data.models || {};
         const firstModel = modelNames.find((name) => comparePayloads[name]) ?? Object.keys(comparePayloads)[0] ?? null;
@@ -484,31 +392,13 @@ export default function App() {
         options: selected ? { ...baseOptions, model_name: selected } : baseOptions,
       };
 
-      let data = await parseJsonResponse<AnalyzeResponse>(
+      const data = await parseJsonResponse<AnalyzeResponse>(
         await fetch(buildApiUrl("/api/analyze"), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(requestBody),
         }),
       );
-
-      if (data.flow_state === "awaiting_user_choice" && data.pending_fallback_urls && data.pending_fallback_urls.length > 0) {
-        const fallbackDecisions = await askFallbackDecisions(data.pending_fallback_urls);
-          if (!fallbackDecisions) {
-            throw new Error(t("app.canceledSelenium"));
-          }
-        data = await parseJsonResponse<AnalyzeResponse>(
-          await fetch(buildApiUrl("/api/analyze"), {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              ...requestBody,
-              pending_job_id: data.job_id,
-              fallback_decisions: fallbackDecisions,
-            }),
-          }),
-        );
-      }
 
       const resolvedModel = data.model_name || selected || null;
       setAnalysisProgress(100);
@@ -604,87 +494,6 @@ export default function App() {
           onClearError={() => setErrorMessage(null)}
           analysisProgress={analysisProgress}
         />
-      )}
-
-      {fallbackPrompt && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4">
-          <div className="w-full max-w-2xl rounded-2xl border border-border bg-card p-5 shadow-xl">
-            <div className="mb-4">
-              <h3 className="text-lg font-semibold text-foreground">{t("app.fallbackTitle")}</h3>
-              <p className="mt-1 text-sm text-muted-foreground">{t("app.fallbackSubtitle")}</p>
-            </div>
-
-            <div className="mb-3 flex flex-wrap gap-2">
-              <button
-                type="button"
-                onClick={() => handleFallbackApplyAll("use_selenium")}
-                className="rounded-full border border-border-info bg-background-info px-3 py-1.5 text-xs text-text-info"
-              >
-                {t("app.useSeleniumAll")}
-              </button>
-              <button
-                type="button"
-                onClick={() => handleFallbackApplyAll("skip")}
-                className="rounded-full border border-border-warning bg-background-warning px-3 py-1.5 text-xs text-text-warning"
-              >
-                {t("app.skipAll")}
-              </button>
-            </div>
-
-            <div className="max-h-80 space-y-3 overflow-auto pr-1">
-              {fallbackPrompt.items.map((item) => {
-                const value = fallbackPrompt.decisions[item.url_hash] || "use_selenium";
-                return (
-                  <div key={item.url_hash} className="rounded-lg border border-border p-3">
-                    <p className="break-all text-sm text-foreground">{item.url}</p>
-                    <p className="mt-1 text-xs text-muted-foreground">{t("app.trafilaturaLength", { length: item.trafilatura_text_len ?? 0 })}</p>
-                    <div className="mt-2 flex gap-2">
-                      <button
-                        type="button"
-                        onClick={() => handleFallbackDecisionChange(item.url_hash, "use_selenium")}
-                        className={`rounded-full border px-3 py-1 text-xs ${
-                          value === "use_selenium"
-                            ? "border-border-info bg-background-info text-text-info"
-                            : "border-border bg-card text-muted-foreground"
-                        }`}
-                      >
-                        {t("app.useSelenium")}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleFallbackDecisionChange(item.url_hash, "skip")}
-                        className={`rounded-full border px-3 py-1 text-xs ${
-                          value === "skip"
-                            ? "border-border-warning bg-background-warning text-text-warning"
-                            : "border-border bg-card text-muted-foreground"
-                        }`}
-                      >
-                        {t("app.skipThisUrl")}
-                      </button>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-
-            <div className="mt-5 flex justify-end gap-2">
-              <button
-                type="button"
-                onClick={handleFallbackCancel}
-                className="rounded-md border border-border px-4 py-2 text-sm text-muted-foreground"
-              >
-                {t("app.cancel")}
-              </button>
-              <button
-                type="button"
-                onClick={handleFallbackConfirm}
-                className="rounded-md bg-primary px-4 py-2 text-sm text-primary-foreground"
-              >
-                {t("app.continue")}
-              </button>
-            </div>
-          </div>
-        </div>
       )}
 
       {currentPage === "results" && (

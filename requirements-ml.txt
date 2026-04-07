@@ -1,0 +1,52 @@
+# =============================================================================
+# ML / NLP heavyweight dependencies
+#
+# torch is intentionally NOT listed here — it is installed separately in
+# backend/Dockerfile via the PyTorch CPU-only wheel index so the wrong
+# (CUDA) wheel is never pulled by accident.
+#
+# TODO(gpu-upgrade): when moving to a GPU VM, change the torch install in
+#   backend/Dockerfile from:
+#     --index-url https://download.pytorch.org/whl/cpu  torch==2.9.1
+#   to:
+#     --index-url https://download.pytorch.org/whl/cu121  torch==2.9.1
+#   No changes to this file are needed.
+# =============================================================================
+
+# HuggingFace ecosystem (depends on torch, installed before this file)
+transformers>=4.41,<5
+tokenizers>=0.20,<0.21
+safetensors==0.7.0
+accelerate==0.26.0
+huggingface-hub==0.36.0
+hf-xet==1.2.0
+datasets==4.4.2
+
+# Scientific computing (pulled in by transformers / sklearn)
+numpy==2.4.0
+scipy==1.16.3
+scikit-learn==1.8.0
+pandas==2.3.3
+pyarrow==22.0.0
+
+# torch internal deps (sympy, networkx are imported by torch itself)
+sympy==1.14.0
+mpmath==1.3.0
+networkx==3.6.1
+filelock==3.20.1
+
+# HuggingFace datasets internals
+multiprocess==0.70.18
+dill==0.4.0
+xxhash==3.6.0
+fsspec==2025.10.0
+
+# Plotting (used in thesis scripts — not needed at inference runtime,
+# but keeping here avoids a second image variant)
+matplotlib==3.10.8
+pillow==12.0.0
+contourpy==1.3.3
+fonttools==4.61.1
+kiwisolver==1.4.9
+cycler==0.12.1
+pyparsing==3.2.5

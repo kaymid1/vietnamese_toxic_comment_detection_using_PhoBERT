@@ -85,8 +85,8 @@ def pick_device(prefer: str = "auto") -> torch.device:
 # Data loading
 # ---------------------------------------------------------------------------
 
-def load_segments_jsonl(path: Path) -> List[str]:
-    segs: List[str] = []
+def load_segments_jsonl(path: Path) -> List[Dict[str, Any]]:
+    segs: List[Dict[str, Any]] = []
     with path.open("r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
@@ -94,9 +94,17 @@ def load_segments_jsonl(path: Path) -> List[str]:
                 continue
             try:
                 obj = json.loads(line)
-                t = obj.get("text", "")
-                if isinstance(t, str) and t.strip():
-                    segs.append(t.strip())
+                text_raw = obj.get("text", "")
+                text = text_raw.strip() if isinstance(text_raw, str) else ""
+                if not text:
+                    continue
+                segs.append(
+                    {
+                        "text": text,
+                        "segment_hash": obj.get("segment_hash"),
+                        "html_tag_effective": obj.get("html_tag_effective"),
+                    }
+                )
             except json.JSONDecodeError:
                 continue
     return segs
@@ -500,9 +508,10 @@ def infer_crawled(
         url = meta.get("url", "unknown")
         url_hash = folder.name
 
-        segments = load_segments_jsonl(segs_path)
-        if not segments:
+        segment_rows = load_segments_jsonl(segs_path)
+        if not segment_rows:
             continue
+        segments = [row["text"] for row in segment_rows]
 
         html_content = None
         if html_dir:
@@ -550,10 +559,16 @@ def infer_crawled(
                 next_text = segments[global_idx + 1] if global_idx + 1 < len(segments) else ""
 
                 model_score = float(prob)
-                html_tag = (threshold_info.get("html_tags") or ["unknown"])[0]
-                html_tag_key = (html_tag or "").strip().lower()
+                segment_row = segment_rows[global_idx]
 
-                seg_hash = build_segment_hash(text, html_tag_key)
+                artifact_html_tag_raw = segment_row.get("html_tag_effective")
+                artifact_html_tag = artifact_html_tag_raw.strip().lower() if isinstance(artifact_html_tag_raw, str) else ""
+                inferred_html_tag = ((threshold_info.get("html_tags") or ["unknown"])[0] or "").strip().lower()
+                html_tag_key = artifact_html_tag or inferred_html_tag
+
+                artifact_seg_hash_raw = segment_row.get("segment_hash")
+                artifact_seg_hash = artifact_seg_hash_raw.strip() if isinstance(artifact_seg_hash_raw, str) else ""
+                seg_hash = artifact_seg_hash or build_segment_hash(text, html_tag_key)
                 context_hash = build_context_segment_hash(prev_text, text, next_text, html_tag_key)
 
                 learned_stats = (
@@ -579,6 +594,7 @@ def infer_crawled(
                     "ai_learned_mode": learned_mode,
                     "segment_hash": seg_hash,
                     "context_segment_hash": context_hash,
+                    "html_tag_effective": html_tag_key,
                     "learned_support": int((learned_stats or {}).get("support", 0)),
                     "learned_agreement": round(float((learned_stats or {}).get("agreement", 0.0)), 4),
                 })

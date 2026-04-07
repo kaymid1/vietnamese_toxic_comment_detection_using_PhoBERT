@@ -1,0 +1,69 @@
+# =============================================================================
+# docker-compose.yml — local development / single-VM deployment
+#
+# Prerequisites before running:
+#   1. PhoBERT weights at  ./models/options/<model-name>/
+#      (the app reads VIETTOXIC_MODEL_OPTIONS_DIR to find them)
+#   2. VnCoreNLP JARs are already present in ./vncorenlp/ (in repo)
+#
+# Start:        docker compose up --build
+# Rebuild only: docker compose build
+# Stop & clean: docker compose down
+# Wipe DB too:  docker compose down -v
+# =============================================================================
+
+services:
+
+  # --------------------------------------------------------------------------
+  # Backend — FastAPI + PhoBERT inference (CPU)
+  #
+  # TODO(gpu-upgrade): when running on a GPU VM, add:
+  #   deploy:
+  #     resources:
+  #       reservations:
+  #         devices:
+  #           - driver: nvidia
+  #             count: 1
+  #             capabilities: [gpu]
+  # Also update backend/Dockerfile to use the CUDA base image (see comments
+  # in that file).
+  # --------------------------------------------------------------------------
+  backend:
+    build:
+      context: .                     # repo root — modules live here (domain_classifier etc.)
+      dockerfile: backend/Dockerfile
+    ports:
+      - "8000:8000"                  # expose directly during dev for curl/Postman access
+    environment:
+      VIETTOXIC_MODEL_OPTIONS_DIR: /app/models/options
+    volumes:
+      # PhoBERT weights — outside the image so you can swap model versions
+      # without a rebuild. :ro = read-only, container cannot modify weights.
+      - ./models:/app/models:ro
+      # VnCoreNLP JARs already in the repo; reference them in-place
+      - ./vncorenlp:/app/vncorenlp:ro
+      # SQLite feedback DB — named volume keeps data across restarts / rebuilds
+      - sqlite_data:/app/data/processed/feedback
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      # Model loading takes time on first start; give it a head start
+      start_period: 90s
+
+  # --------------------------------------------------------------------------
+  # Frontend — React/Vite (served by nginx:alpine, ~30 MB image)
+  # --------------------------------------------------------------------------
+  frontend:
+    build:
+      context: ./comprehensive_ui
+      dockerfile: Dockerfile
+    ports:
+      - "80:80"                      # open http://localhost in your browser
+    depends_on:
+      backend:
+        condition: service_healthy   # wait until backend passes healthcheck
+
+volumes:
+  sqlite_data:   # persists feedback.db between container restarts

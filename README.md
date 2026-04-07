@@ -6,11 +6,10 @@ Research prototype for Vietnamese toxic content detection from URLs.
 
 The current system lets a user submit one or more URLs from the web UI. The backend then:
 
-1. Crawls content from each URL
-2. Extracts and segments the text
-3. Optionally merges page text with available video transcript text
-4. Runs a local NLP model for toxicity detection
-5. Returns page-level and segment-level results to the UI
+1. Crawls comment sections from each URL
+2. Extracts and segments comment text
+3. Runs a local NLP model for toxicity detection
+4. Returns page-level and segment-level results to the UI
 
 This repository now reflects a web app workflow. Older browser-extension and `/predict` flows are deprecated and no longer part of the active system.
 
@@ -22,9 +21,12 @@ This repository now reflects a web app workflow. Older browser-extension and `/p
   - PhoBERT fine-tuned checkpoints
   - TF-IDF + Logistic Regression baseline
 - Crawling and text extraction:
-  - `trafilatura`
-  - Selenium + `undetected-chromedriver` fallback
-  - VnCoreNLP for Vietnamese word segmentation support
+  - `comment_crawl.py` **(latest)** — comment-section-only crawling (news sites + Facebook)
+    - Selenium with Edge (selenium-manager) or Chrome (undetected-chromedriver)
+  - `setup_and_crawl.py` **(deprecated for comment use case)** — full article + video crawl
+    - `trafilatura`
+    - Selenium + `undetected-chromedriver` fallback
+    - VnCoreNLP for Vietnamese word segmentation support
 - Feedback storage: SQLite
 
 ## Main Flow
@@ -49,11 +51,7 @@ flowchart TD
 ## Features
 
 - Analyze one or more URLs from the web UI
-- Crawl real webpage content before inference
-- Interactive Selenium decision flow for hard URLs:
-  - backend can pause and ask for per-URL decision (`use_selenium` or `skip`)
-  - UI shows in-app popup choices (no browser confirm dialog)
-  - skipped URLs are preserved in results with `status: "skipped"`
+- Crawl comment-section content before inference
 - Return:
   - page-level toxicity score
   - segment-level toxicity scores
@@ -81,11 +79,12 @@ Each row in `data/raw/crawled_urls/<url_hash>/segments.jsonl` now includes:
   "text": "...",
   "segment_index": 0,
   "url_hash": "<md5_of_url>",
+  "html_tag_effective": "comment",
   "segment_hash": "<sha256(normalized_text + '|' + html_tag_effective)>"
 }
 ```
 
-At crawl time, `html_tag_effective` defaults to `"body"` (because per-segment HTML tag may not yet be available).
+Comment-crawl artifacts set `html_tag_effective` to `"comment"` and the backend/infer path now prioritizes this artifact tag/hash directly.
 `text` is preserved for backward compatibility with existing readers.
 
 ## Project Structure
@@ -94,7 +93,8 @@ At crawl time, `html_tag_effective` defaults to `"body"` (because per-segment HT
 backend/app.py                     FastAPI server and API endpoints
 comprehensive_ui/                  React + TypeScript + Vite frontend
 infer_crawled_local.py             Local inference pipeline
-setup_and_crawl.py                 URL crawling and extraction pipeline
+comment_crawl.py                   Comment-only crawl pipeline — news + Facebook (latest)
+setup_and_crawl.py                 Full article + video crawl pipeline (deprecated for comment use case)
 domain_classifier.py               Domain classification + threshold rules
 scripts/                           Data prep, EDA, training scripts
 models/options/                    Local model checkpoints
@@ -127,6 +127,40 @@ Default local URLs:
 - Backend: `http://localhost:8000`
 - Frontend: `http://localhost:5173`
 
+## Docker (CPU — works on any laptop or VM)
+
+Prerequisites:
+- PhoBERT weights in `./models/options/<model-name>/`
+- VnCoreNLP JARs already present in `./vncorenlp/`
+
+```bash
+# First run — downloads torch CPU wheel (~800 MB), expect ~15–20 min
+docker compose up --build
+
+# Subsequent runs — layers cached, ~1–2 min
+docker compose up
+```
+
+Open `http://localhost` in your browser (nginx serves the frontend and proxies `/api` to the backend).
+
+SQLite feedback data is stored in the `sqlite_data` named Docker volume and survives container restarts.
+
+```bash
+docker compose down        # stop containers
+docker compose down -v     # stop + wipe feedback DB volume
+```
+
+> **GPU upgrade**: see `TODO(gpu-upgrade):` comments in `backend/Dockerfile` and `docker-compose.yml`.
+
+## CI/CD (GitHub Actions)
+
+| Workflow | Trigger | What it does |
+|---|---|---|
+| `ci.yml` | push / PR → `main`, `develop` | ruff lint, pytest, frontend build check |
+| `build.yml` | push → `main` | builds `linux/amd64` + `linux/arm64` images, pushes to GHCR |
+
+Before first push, replace `<your-github-username>` in `.github/workflows/build.yml`.
+
 ## API
 
 Current API is defined in `backend/app.py`.
@@ -141,10 +175,8 @@ Current API is defined in `backend/app.py`.
   - list available local models and default model
 - `POST /api/analyze`
   - crawl URLs, run inference, return page-level and segment-level results
-  - supports two-step interactive flow with `selenium_fallback_mode: "ask"`
 - `POST /api/analyze_compare`
   - run the same URLs through multiple models and compare outputs
-  - also supports the same two-step interactive Selenium decision flow
 
 ### AI explanation
 
@@ -174,22 +206,10 @@ curl -X POST http://localhost:8000/api/analyze \
       "batch_size": 8,
       "max_length": 256,
       "page_threshold": 0.25,
-      "seg_threshold": 0.4,
-      "enable_video": true,
-      "selenium_fallback_mode": "ask"
+      "seg_threshold": 0.4
     }
   }'
 ```
-
-When `selenium_fallback_mode` is `"ask"`, API may first return:
-
-- `flow_state: "awaiting_user_choice"`
-- `pending_fallback_urls: [{url, url_hash, trafilatura_text_len, reason}]`
-
-Then client resumes by calling the same endpoint with:
-
-- `pending_job_id`
-- `fallback_decisions: [{url_hash, action}]` where `action` is `"use_selenium"` or `"skip"`
 
 ## Available Model Types
 
@@ -366,9 +386,9 @@ Segment-level outputs (`crawled_predictions.jsonl`) include:
 
 ## Current Status
 
+- Comment-only crawl pipeline (`comment_crawl.py`) supports news site comment sections (VNExpress tested) and Facebook comments (mbasic strategy, untested)
 - Web UI is implemented
 - URL analysis works end-to-end
-- Interactive per-URL Selenium/skip decision flow is implemented for both analyze and compare mode
 - Local model comparison is implemented
 - Feedback loop is implemented
 - Hybrid domain-aware thresholding is implemented
@@ -381,6 +401,10 @@ Segment-level outputs (`crawled_predictions.jsonl`) include:
 - An older README version contained deprecated browser-extension and `/predict` flow descriptions
 - This system is a research prototype, not a production deployment
 - Crawling reliability depends on target site structure and anti-bot behavior
+- `comment_crawl.py` news selectors are maintained per-domain; unsupported domains use heuristic CSS fallback
+- Facebook comment crawling (`comment_crawl.py`) may be blocked without valid session cookies; mbasic.facebook.com reduces but does not eliminate blocking
+- X/Twitter comment crawling is not supported
+- `setup_and_crawl.py` article/video pipeline remains in the repo for reference but is deprecated in active runtime
 - Some UI pages still contain demo or static content rather than live experiment data
 - Gemini explanation requires external API access and `GEMINI_API_KEY`
 
