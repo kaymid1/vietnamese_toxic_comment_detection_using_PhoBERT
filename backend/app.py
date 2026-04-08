@@ -12,6 +12,7 @@ import time
 import uuid
 import urllib.error
 import urllib.request
+import zipfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Tuple
@@ -42,6 +43,11 @@ DEFAULT_DATASET_VERSION = os.getenv("VIETTOXIC_DATASET_VERSION", "victsd_v1")
 DEFAULT_MODEL_VERSION = os.getenv("VIETTOXIC_MODEL_VERSION", "unknown")
 DEFAULT_POLICY_VERSION = os.getenv("VIETTOXIC_POLICY_VERSION", "policy-v1")
 REQUIRED_VERSION_KEYS = ("dataset_version", "model_version", "policy_version")
+
+MLFLOW_ACCEPT_THRESHOLD = float(os.getenv("MLFLOW_ACCEPT_THRESHOLD", "0.8"))
+MLFLOW_DISCARD_THRESHOLD = float(os.getenv("MLFLOW_DISCARD_THRESHOLD", "0.2"))
+MLFLOW_THRESHOLD_TARGET_MAX = max(1, int(os.getenv("MLFLOW_THRESHOLD_TARGET_MAX", "10")))
+MLFLOW_CLEAR_ALL_CONFIRM_TOKEN = os.getenv("MLFLOW_CLEAR_ALL_CONFIRM_TOKEN", "DELETE_ALL_MLFLOW_DATA")
 
 DATASET_VERSION_ALIASES: Dict[str, str] = {
     "v1": "victsd_v1",
@@ -493,6 +499,67 @@ class AskAIRequest(BaseModel):
     question: Optional[str] = None
 
 
+class MlflowIngestOptions(BaseModel):
+    model_name: Optional[str] = None
+    batch_size: int = Field(default=8, ge=1)
+    max_length: int = Field(default=256, ge=16)
+    page_threshold: float = Field(default=0.25, ge=0.0, le=1.0)
+    seg_threshold: float = Field(default=0.4, ge=0.0, le=1.0)
+    gate_accept_threshold: float = Field(default=MLFLOW_ACCEPT_THRESHOLD, ge=0.0, le=1.0)
+    gate_discard_threshold: float = Field(default=MLFLOW_DISCARD_THRESHOLD, ge=0.0, le=1.0)
+    persist_unused: bool = True
+
+
+class MlflowIngestRequest(BaseModel):
+    urls: List[str] = Field(min_items=1)
+    options: Optional[MlflowIngestOptions] = None
+
+
+class MlflowCandidateReviewItem(BaseModel):
+    id: int
+    action: Optional[Literal["include_toxic", "include_clean", "drop"]] = None
+    decision: Optional[Literal["accept", "reject"]] = None
+    pseudo_label: Optional[int] = Field(default=None, ge=0, le=1)
+
+
+class MlflowCandidateReviewRequest(BaseModel):
+    updates: List[MlflowCandidateReviewItem] = Field(min_items=1)
+
+
+class MlflowManualExportBundleRequest(BaseModel):
+    batch_id: str = Field(min_length=1)
+    dataset_version: Optional[str] = None
+    model_version: Optional[str] = None
+    policy_version: Optional[str] = None
+    include_unused: bool = False
+    unused_scope: Literal["all", "auto_discarded", "manual_rejected"] = "all"
+
+
+class MlflowManualImportArtifactRequest(BaseModel):
+    run_name: str = Field(min_length=1)
+    artifact_path: str = Field(min_length=1)
+    notes: Optional[str] = None
+
+
+class MlflowDOTriggerRequest(BaseModel):
+    batch_id: Optional[str] = None
+    provider: str = Field(default="digitalocean", min_length=1)
+    gpu_profile: str = Field(default="gpu-placeholder", min_length=1)
+    dry_run: bool = True
+
+
+class MlflowPromoteRequest(BaseModel):
+    candidate_model: str = Field(min_length=1)
+
+
+class MlflowClearBatchRequest(BaseModel):
+    batch_id: str = Field(min_length=1)
+
+
+class MlflowClearAllRequest(BaseModel):
+    confirm_token: str = Field(min_length=1)
+
+
 def list_model_types(model_root: Path) -> List[str]:
     if not model_root.exists():
         return []
@@ -700,6 +767,7 @@ def map_results_to_response(
             {
                 "url": url,
                 "url_hash": url_hash,
+                "domain_category": page_info.get("domain_category") if page_info else None,
                 "status": status,
                 "error": error,
                 "warnings": crawl.get("warnings") or [],
@@ -1398,6 +1466,77 @@ def init_feedback_db() -> None:
 
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS mlflow_crawl_batch (
+                batch_id TEXT PRIMARY KEY,
+                model_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                source_job_id TEXT,
+                created_at TEXT NOT NULL,
+                completed_at TEXT,
+                options_json TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS mlflow_comment_item (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                batch_id TEXT NOT NULL,
+                job_id TEXT,
+                url TEXT NOT NULL,
+                url_hash TEXT NOT NULL,
+                domain_category TEXT,
+                segment_id TEXT,
+                text TEXT NOT NULL,
+                score REAL,
+                pseudo_label INTEGER,
+                gate_bucket TEXT NOT NULL,
+                verification_status TEXT NOT NULL,
+                segment_hash TEXT,
+                context_segment_hash TEXT,
+                html_tag TEXT,
+                seg_threshold_used REAL,
+                label_source TEXT,
+                label_confidence TEXT,
+                created_at TEXT NOT NULL,
+                reviewed_at TEXT,
+                FOREIGN KEY(batch_id) REFERENCES mlflow_crawl_batch(batch_id) ON DELETE CASCADE
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS mlflow_training_artifact (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_name TEXT NOT NULL,
+                artifact_path TEXT NOT NULL,
+                notes TEXT,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS mlflow_do_run (
+                run_id TEXT PRIMARY KEY,
+                batch_id TEXT,
+                provider TEXT NOT NULL,
+                gpu_profile TEXT,
+                status TEXT NOT NULL,
+                current_stage TEXT,
+                logs_json TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_mlflow_item_batch ON mlflow_comment_item(batch_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_mlflow_item_bucket ON mlflow_comment_item(batch_id, gate_bucket)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_mlflow_item_status ON mlflow_comment_item(batch_id, verification_status)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_mlflow_item_hash ON mlflow_comment_item(context_segment_hash, segment_hash)")
+
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS training_tracker_phase (
                 id TEXT PRIMARY KEY,
                 title TEXT NOT NULL,
@@ -1510,6 +1649,9 @@ def init_feedback_db() -> None:
         ensure_table_column(conn, "synthetic_dataset_row", "validation_flags", "TEXT")
         ensure_table_column(conn, "synthetic_dataset_row", "meta_json", "TEXT")
         ensure_table_column(conn, "synthetic_dataset_row", "reviewed_at", "TEXT")
+        ensure_table_column(conn, "mlflow_comment_item", "label_source", "TEXT")
+        ensure_table_column(conn, "mlflow_comment_item", "label_confidence", "TEXT")
+        ensure_table_column(conn, "mlflow_comment_item", "domain_category", "TEXT")
 
         seed_training_tracker_default(conn)
         conn.commit()
@@ -2846,6 +2988,1058 @@ def cleanup_old_jobs(ttl_hours: float = 24.0) -> int:
                 logger.warning("Failed to remove job directory %s", path)
                 continue
     return deleted
+
+
+def resolve_mlflow_batch_id(batch_id: Optional[str], strict: bool = False) -> str:
+    init_feedback_db()
+    with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        if batch_id and batch_id.strip():
+            row = conn.execute(
+                "SELECT batch_id FROM mlflow_crawl_batch WHERE batch_id = ?",
+                (batch_id.strip(),),
+            ).fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail=f"Batch not found: {batch_id}")
+            return str(row["batch_id"])
+
+        if strict:
+            raise HTTPException(status_code=400, detail="batch_id is required when strict_batch=true")
+
+        latest = conn.execute(
+            "SELECT batch_id FROM mlflow_crawl_batch ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+        if not latest:
+            raise HTTPException(status_code=404, detail="No mlflow batch found")
+        return str(latest["batch_id"])
+
+
+def build_mlflow_gate_counts(conn: sqlite3.Connection, batch_id: str) -> Dict[str, int]:
+    rows = conn.execute(
+        """
+        SELECT gate_bucket, COUNT(1) AS c
+        FROM mlflow_comment_item
+        WHERE batch_id = ?
+        GROUP BY gate_bucket
+        """,
+        (batch_id,),
+    ).fetchall()
+    counts = {"accepted": 0, "candidate": 0, "discarded": 0}
+    for bucket, value in rows:
+        key = str(bucket or "").strip().lower()
+        if key in counts:
+            counts[key] = int(value or 0)
+    counts["total"] = counts["accepted"] + counts["candidate"] + counts["discarded"]
+    return counts
+
+
+def build_mlflow_required_bundle_contents() -> List[str]:
+    return [
+        "dataset/accepted_pseudo.jsonl",
+        "dataset/candidates_unverified.jsonl",
+        "manifest.json",
+        "config/training_config.yaml",
+        "config/gate_policy.json",
+    ]
+
+
+@app.post("/api/mlflow/ingest")
+def mlflow_ingest(request: MlflowIngestRequest) -> Dict[str, Any]:
+    try:
+        cleanup_old_jobs(float(os.getenv("JOB_RETENTION_HOURS", "24")))
+        options = request.options or MlflowIngestOptions()
+
+        urls = [u.strip() for u in request.urls if u and u.strip()]
+        if not urls:
+            raise HTTPException(status_code=400, detail="No valid URLs provided.")
+
+        accept_threshold = float(options.gate_accept_threshold)
+        discard_threshold = float(options.gate_discard_threshold)
+        if discard_threshold > accept_threshold:
+            raise HTTPException(status_code=400, detail="gate_discard_threshold must be <= gate_accept_threshold")
+
+        model_root = resolve_model_root()
+        try:
+            model_type, model_name, model_path = resolve_model_path(model_root, options.model_name)
+            model_id = f"{model_type}/{model_name}"
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except (PermissionError, OSError) as exc:
+            raise HTTPException(status_code=500, detail=f"Unable to access model directory: {exc}") from exc
+
+        source_job_id = uuid.uuid4().hex
+        out_dir = BASE_DIR / "data" / "processed" / f"job_{source_job_id}"
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        batch_id = f"mlf_{uuid.uuid4().hex[:12]}"
+        now = datetime.utcnow().isoformat() + "Z"
+
+        init_feedback_db()
+        with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+            conn.execute(
+                """
+                INSERT INTO mlflow_crawl_batch (batch_id, model_id, status, source_job_id, created_at, options_json)
+                VALUES (?, ?, 'running', ?, ?, ?)
+                """,
+                (
+                    batch_id,
+                    model_id,
+                    source_job_id,
+                    now,
+                    json.dumps(
+                        {
+                            "batch_size": options.batch_size,
+                            "max_length": options.max_length,
+                            "page_threshold": options.page_threshold,
+                            "seg_threshold": options.seg_threshold,
+                            "gate_accept_threshold": accept_threshold,
+                            "gate_discard_threshold": discard_threshold,
+                            "persist_unused": options.persist_unused,
+                        },
+                        ensure_ascii=False,
+                    ),
+                ),
+            )
+            conn.commit()
+
+        crawl_results = crawl_urls(urls, out_dir=str(DATA_DIR))
+        ok_hashes = [r["url_hash"] for r in crawl_results if r.get("status") == "ok"]
+
+        crawl_status_counts = {
+            "ok": 0,
+            "blocked": 0,
+            "no_comments": 0,
+            "unsupported": 0,
+            "error": 0,
+            "from_cache": 0,
+            "retried": 0,
+        }
+        crawl_timeout_count = 0
+        for crawl in crawl_results:
+            crawl_status = str(crawl.get("crawl_status") or "error")
+            if crawl_status in crawl_status_counts:
+                crawl_status_counts[crawl_status] += 1
+            else:
+                crawl_status_counts["error"] += 1
+            if crawl.get("from_cache"):
+                crawl_status_counts["from_cache"] += 1
+            attempts = int(crawl.get("attempts") or 1)
+            if attempts > 1:
+                crawl_status_counts["retried"] += 1
+            warnings = [str(w).lower() for w in (crawl.get("warnings") or [])]
+            if any("timeout" in w for w in warnings):
+                crawl_timeout_count += 1
+
+        save_job_meta(
+            out_dir,
+            build_job_meta(
+                job_id=source_job_id,
+                urls=urls,
+                url_hashes=ok_hashes,
+                model_ids=[model_id],
+                enable_video=False,
+                merged_used=False,
+            ),
+        )
+
+        thresholds_by_domain = get_effective_thresholds(model_id)
+        if ok_hashes:
+            infer_crawled(
+                model_path=str(model_path),
+                model_type=model_type,
+                data_dir=str(DATA_DIR),
+                out_dir=str(out_dir),
+                batch_size=options.batch_size,
+                max_length=options.max_length,
+                page_threshold=options.page_threshold,
+                seg_threshold=options.seg_threshold,
+                threshold_news=thresholds_by_domain.get("news"),
+                threshold_social=thresholds_by_domain.get("social"),
+                threshold_forum=thresholds_by_domain.get("forum"),
+                threshold_unknown=thresholds_by_domain.get("unknown"),
+                only_url_hashes=ok_hashes,
+                quiet=True,
+                learned_feedback=load_learned_segments(),
+                html_dir=str(DATA_DIR),
+            )
+
+        page_by_hash, page_by_url = load_page_results_map(out_dir)
+        segment_results = load_segment_results(out_dir)
+        seg_by_hash: Dict[str, List[Dict[str, Any]]] = {}
+        seg_by_url: Dict[str, List[Dict[str, Any]]] = {}
+        for seg in segment_results:
+            if seg.get("url_hash"):
+                seg_by_hash.setdefault(seg["url_hash"], []).append(seg)
+            if seg.get("url"):
+                seg_by_url.setdefault(seg["url"], []).append(seg)
+
+        response_results = map_results_to_response(
+            crawl_results,
+            page_by_hash,
+            page_by_url,
+            seg_by_hash,
+            seg_by_url,
+        )
+
+        rows_to_insert: List[Tuple[Any, ...]] = []
+        created_at = datetime.utcnow().isoformat() + "Z"
+        for result in response_results:
+            if result.get("status") != "ok":
+                continue
+            url = str(result.get("url") or "")
+            url_hash = str(result.get("url_hash") or hash_url(url))
+            for seg in (result.get("toxicity") or {}).get("by_segment") or []:
+                score = normalize_score(seg.get("score"))
+                if score is None:
+                    continue
+                if score <= discard_threshold:
+                    if not options.persist_unused:
+                        continue
+                    gate_bucket = "discarded"
+                    verification_status = "auto_discarded"
+                elif score >= accept_threshold:
+                    gate_bucket = "accepted"
+                    verification_status = "auto_accepted"
+                else:
+                    gate_bucket = "candidate"
+                    verification_status = "unverified"
+
+                seg_toxic_label = normalize_int(seg.get("toxic_label"))
+                seg_threshold_used = normalize_score(seg.get("seg_threshold_used"))
+
+                label_source = "fallback_0_5"
+                label_confidence = "low"
+                if seg_toxic_label in {0, 1}:
+                    pseudo_label = seg_toxic_label
+                    label_source = "auto_infer"
+                    label_confidence = "high"
+                elif seg_threshold_used is not None:
+                    pseudo_label = 1 if score >= seg_threshold_used else 0
+                    label_source = "auto_infer"
+                    label_confidence = "medium"
+                else:
+                    pseudo_label = 1 if score >= 0.5 else 0
+
+                rows_to_insert.append(
+                    (
+                        batch_id,
+                        source_job_id,
+                        url,
+                        url_hash,
+                        seg.get("segment_id"),
+                        seg.get("domain_category") or result.get("domain_category"),
+                        seg.get("text") or seg.get("text_preview") or "",
+                        score,
+                        pseudo_label,
+                        gate_bucket,
+                        verification_status,
+                        seg.get("segment_hash"),
+                        seg.get("context_segment_hash"),
+                        ((seg.get("html_tags") or [None])[0] if isinstance(seg.get("html_tags"), list) else None),
+                        seg_threshold_used,
+                        label_source,
+                        label_confidence,
+                        created_at,
+                    )
+                )
+
+        with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+            if rows_to_insert:
+                conn.executemany(
+                    """
+                    INSERT INTO mlflow_comment_item (
+                        batch_id, job_id, url, url_hash, segment_id, domain_category, text, score, pseudo_label,
+                        gate_bucket, verification_status, segment_hash, context_segment_hash,
+                        html_tag, seg_threshold_used, label_source, label_confidence, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    rows_to_insert,
+                )
+            conn.execute(
+                """
+                UPDATE mlflow_crawl_batch
+                SET status = 'completed', completed_at = ?
+                WHERE batch_id = ?
+                """,
+                (datetime.utcnow().isoformat() + "Z", batch_id),
+            )
+            counts = build_mlflow_gate_counts(conn, batch_id)
+            conn.commit()
+
+        return {
+            "batch_id": batch_id,
+            "source_job_id": source_job_id,
+            "model_name": model_id,
+            "status": "completed",
+            "gate_thresholds": {
+                "accept": accept_threshold,
+                "discard": discard_threshold,
+            },
+            "counts": counts,
+            "crawl_summary": {
+                "status_counts": crawl_status_counts,
+                "timeout_count": crawl_timeout_count,
+                "total_urls": len(crawl_results),
+            },
+            "created_at": now,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("MLFlow ingest failed")
+        raise HTTPException(status_code=500, detail=f"MLFlow ingest failed: {exc}")
+
+
+@app.get("/api/mlflow/overview")
+def mlflow_overview(
+    batch_id: Optional[str] = None,
+    strict_batch: bool = Query(default=False),
+) -> Dict[str, Any]:
+    resolved_batch_id = resolve_mlflow_batch_id(batch_id, strict=strict_batch)
+    with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        batch_row = conn.execute(
+            """
+            SELECT batch_id, model_id, status, source_job_id, created_at, completed_at
+            FROM mlflow_crawl_batch
+            WHERE batch_id = ?
+            """,
+            (resolved_batch_id,),
+        ).fetchone()
+        if not batch_row:
+            raise HTTPException(status_code=404, detail=f"Batch not found: {resolved_batch_id}")
+
+        counts = build_mlflow_gate_counts(conn, resolved_batch_id)
+
+    return {
+        "active_batch_id": resolved_batch_id,
+        "model_name": batch_row["model_id"],
+        "status": batch_row["status"],
+        "source_job_id": batch_row["source_job_id"],
+        "last_run_at": batch_row["completed_at"] or batch_row["created_at"],
+        "pipeline_counts": {
+            "crawled": counts["total"],
+            "inferred": counts["total"],
+            "accepted": counts["accepted"],
+            "candidate": counts["candidate"],
+            "discarded": counts["discarded"],
+        },
+    }
+
+
+@app.get("/api/mlflow/batches")
+def mlflow_batches(limit: int = Query(default=50, ge=1, le=200)) -> Dict[str, Any]:
+    init_feedback_db()
+    with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT batch_id, model_id, status, source_job_id, created_at, completed_at
+            FROM mlflow_crawl_batch
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+
+        items: List[Dict[str, Any]] = []
+        for row in rows:
+            batch_id = str(row["batch_id"])
+            counts = build_mlflow_gate_counts(conn, batch_id)
+            items.append(
+                {
+                    "batch_id": batch_id,
+                    "model_id": row["model_id"],
+                    "status": row["status"],
+                    "source_job_id": row["source_job_id"],
+                    "created_at": row["created_at"],
+                    "completed_at": row["completed_at"],
+                    "counts": counts,
+                }
+            )
+
+    return {"items": items, "total": len(items)}
+
+
+@app.post("/api/mlflow/clear-batch")
+def mlflow_clear_batch(request: MlflowClearBatchRequest) -> Dict[str, Any]:
+    batch_id = resolve_mlflow_batch_id(request.batch_id, strict=True)
+
+    with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+        conn.execute("PRAGMA foreign_keys = ON")
+
+        deleted_do_run = int(
+            conn.execute("DELETE FROM mlflow_do_run WHERE batch_id = ?", (batch_id,)).rowcount or 0
+        )
+        deleted_comment_item = int(
+            conn.execute("DELETE FROM mlflow_comment_item WHERE batch_id = ?", (batch_id,)).rowcount or 0
+        )
+        deleted_crawl_batch = int(
+            conn.execute("DELETE FROM mlflow_crawl_batch WHERE batch_id = ?", (batch_id,)).rowcount or 0
+        )
+
+        conn.commit()
+
+    return {
+        "scope": "batch",
+        "batch_id": batch_id,
+        "deleted_rows": {
+            "mlflow_do_run": deleted_do_run,
+            "mlflow_comment_item": deleted_comment_item,
+            "mlflow_crawl_batch": deleted_crawl_batch,
+            "mlflow_training_artifact": 0,
+        },
+    }
+
+
+@app.post("/api/mlflow/clear-all")
+def mlflow_clear_all(request: MlflowClearAllRequest) -> Dict[str, Any]:
+    confirm_token = (request.confirm_token or "").strip()
+    if confirm_token != MLFLOW_CLEAR_ALL_CONFIRM_TOKEN:
+        raise HTTPException(status_code=400, detail="Invalid confirm_token")
+
+    init_feedback_db()
+    with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+        conn.execute("PRAGMA foreign_keys = ON")
+
+        deleted_do_run = int(conn.execute("DELETE FROM mlflow_do_run").rowcount or 0)
+        deleted_training_artifact = int(conn.execute("DELETE FROM mlflow_training_artifact").rowcount or 0)
+        deleted_comment_item = int(conn.execute("DELETE FROM mlflow_comment_item").rowcount or 0)
+        deleted_crawl_batch = int(conn.execute("DELETE FROM mlflow_crawl_batch").rowcount or 0)
+
+        conn.commit()
+
+    return {
+        "scope": "all",
+        "deleted_rows": {
+            "mlflow_do_run": deleted_do_run,
+            "mlflow_training_artifact": deleted_training_artifact,
+            "mlflow_comment_item": deleted_comment_item,
+            "mlflow_crawl_batch": deleted_crawl_batch,
+        },
+    }
+
+
+@app.get("/api/mlflow/review-history")
+def mlflow_review_history(
+    batch_id: Optional[str] = None,
+    decision: str = Query(default="all"),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=25, ge=1, le=200),
+    strict_batch: bool = Query(default=False),
+) -> Dict[str, Any]:
+    resolved_batch_id = resolve_mlflow_batch_id(batch_id, strict=strict_batch)
+    offset = (page - 1) * page_size
+
+    decision_normalized = (decision or "all").strip().lower()
+    where_parts = ["batch_id = ?", "verification_status != 'unverified'"]
+    params: List[Any] = [resolved_batch_id]
+
+    if decision_normalized == "accepted":
+        where_parts.append("gate_bucket = 'accepted'")
+    elif decision_normalized == "rejected":
+        where_parts.append("verification_status = 'manual_rejected'")
+    elif decision_normalized == "discarded":
+        where_parts.append("gate_bucket = 'discarded'")
+    elif decision_normalized != "all":
+        raise HTTPException(status_code=400, detail=f"Unsupported decision filter: {decision}")
+
+    where_sql = " AND ".join(where_parts)
+
+    with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        total_row = conn.execute(
+            f"SELECT COUNT(1) FROM mlflow_comment_item WHERE {where_sql}",
+            tuple(params),
+        ).fetchone()
+        total = int(total_row[0] if total_row else 0)
+
+        rows = conn.execute(
+            f"""
+            SELECT id, batch_id, url, url_hash, segment_id, domain_category, text, score,
+                   pseudo_label, gate_bucket, verification_status,
+                   segment_hash, context_segment_hash, html_tag,
+                   seg_threshold_used, label_source, label_confidence, created_at, reviewed_at
+            FROM mlflow_comment_item
+            WHERE {where_sql}
+            ORDER BY COALESCE(reviewed_at, created_at) DESC, id DESC
+            LIMIT ? OFFSET ?
+            """,
+            tuple([*params, page_size, offset]),
+        ).fetchall()
+
+    items = [dict(row) for row in rows]
+    return {
+        "batch_id": resolved_batch_id,
+        "decision": decision_normalized,
+        "items": items,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    }
+
+
+@app.get("/api/mlflow/candidates")
+def mlflow_candidates(
+    batch_id: Optional[str] = None,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=25, ge=1, le=200),
+    strict_batch: bool = Query(default=False),
+) -> Dict[str, Any]:
+    resolved_batch_id = resolve_mlflow_batch_id(batch_id, strict=strict_batch)
+    offset = (page - 1) * page_size
+    with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        total_row = conn.execute(
+            """
+            SELECT COUNT(1)
+            FROM mlflow_comment_item
+            WHERE batch_id = ?
+              AND gate_bucket = 'candidate'
+              AND verification_status = 'unverified'
+            """,
+            (resolved_batch_id,),
+        ).fetchone()
+        total = int(total_row[0] if total_row else 0)
+
+        rows = conn.execute(
+            """
+            SELECT id, batch_id, url, url_hash, segment_id, domain_category, text, score,
+                   pseudo_label, gate_bucket, verification_status,
+                   segment_hash, context_segment_hash, html_tag,
+                   seg_threshold_used, label_source, label_confidence, created_at, reviewed_at
+            FROM mlflow_comment_item
+            WHERE batch_id = ?
+              AND gate_bucket = 'candidate'
+              AND verification_status = 'unverified'
+            ORDER BY id DESC
+            LIMIT ? OFFSET ?
+            """,
+            (resolved_batch_id, page_size, offset),
+        ).fetchall()
+
+    items = [dict(row) for row in rows]
+    return {
+        "batch_id": resolved_batch_id,
+        "items": items,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    }
+
+
+@app.post("/api/mlflow/candidates/review")
+def mlflow_candidates_review(request: MlflowCandidateReviewRequest) -> Dict[str, Any]:
+    init_feedback_db()
+    ids = [item.id for item in request.updates]
+    action_by_id = {item.id: item.action for item in request.updates}
+    decision_by_id = {item.id: item.decision for item in request.updates}
+    pseudo_label_by_id = {
+        item.id: (item.pseudo_label if item.pseudo_label in {0, 1} else None)
+        for item in request.updates
+    }
+
+    with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            f"SELECT id, batch_id, pseudo_label FROM mlflow_comment_item WHERE id IN ({', '.join(['?'] * len(ids))})",
+            tuple(ids),
+        ).fetchall()
+        if not rows:
+            raise HTTPException(status_code=404, detail="No candidate rows found for provided ids")
+
+        now = datetime.utcnow().isoformat() + "Z"
+        affected_batch_ids = {str(row["batch_id"]) for row in rows}
+        updated = 0
+        for row in rows:
+            item_id = int(row["id"])
+            manual_label = pseudo_label_by_id.get(item_id)
+            current_label = normalize_int(row["pseudo_label"])
+            final_label = manual_label if manual_label in {0, 1} else current_label
+
+            action = action_by_id.get(item_id)
+            decision = decision_by_id.get(item_id)
+            if action is None:
+                if decision == "accept":
+                    if final_label not in {0, 1}:
+                        raise HTTPException(status_code=400, detail=f"Include action requires label for item {item_id}")
+                    action = "include_toxic" if final_label == 1 else "include_clean"
+                elif decision == "reject":
+                    action = "drop"
+
+            if action not in {"include_toxic", "include_clean", "drop"}:
+                raise HTTPException(status_code=400, detail=f"Unsupported review action for item {item_id}")
+
+            if action == "include_toxic":
+                cursor = conn.execute(
+                    """
+                    UPDATE mlflow_comment_item
+                    SET verification_status = ?, gate_bucket = ?, pseudo_label = ?, label_source = ?, label_confidence = ?, reviewed_at = ?
+                    WHERE id = ?
+                    """,
+                    ("manual_accepted", "accepted", 1, "manual_override", "high", now, item_id),
+                )
+            elif action == "include_clean":
+                cursor = conn.execute(
+                    """
+                    UPDATE mlflow_comment_item
+                    SET verification_status = ?, gate_bucket = ?, pseudo_label = ?, label_source = ?, label_confidence = ?, reviewed_at = ?
+                    WHERE id = ?
+                    """,
+                    ("manual_accepted", "accepted", 0, "manual_override", "high", now, item_id),
+                )
+            elif final_label in {0, 1}:
+                cursor = conn.execute(
+                    """
+                    UPDATE mlflow_comment_item
+                    SET verification_status = ?, gate_bucket = ?, pseudo_label = ?, label_source = ?, label_confidence = ?, reviewed_at = ?
+                    WHERE id = ?
+                    """,
+                    ("manual_rejected", "discarded", final_label, "manual_override", "high", now, item_id),
+                )
+            else:
+                cursor = conn.execute(
+                    """
+                    UPDATE mlflow_comment_item
+                    SET verification_status = ?, gate_bucket = ?, label_source = ?, label_confidence = ?, reviewed_at = ?
+                    WHERE id = ?
+                    """,
+                    ("manual_rejected", "discarded", "manual_rejected_unlabeled", "low", now, item_id),
+                )
+            updated += int(cursor.rowcount or 0)
+
+        counts_by_batch: Dict[str, Dict[str, int]] = {}
+        for b_id in affected_batch_ids:
+            counts_by_batch[b_id] = build_mlflow_gate_counts(conn, b_id)
+
+        conn.commit()
+
+    primary_batch = sorted(affected_batch_ids)[0]
+    return {
+        "updated": updated,
+        "batch_id": primary_batch,
+        "counts": counts_by_batch.get(primary_batch, {"accepted": 0, "candidate": 0, "discarded": 0, "total": 0}),
+        "counts_by_batch": counts_by_batch,
+    }
+
+
+@app.get("/api/mlflow/threshold-status")
+def mlflow_threshold_status(
+    batch_id: Optional[str] = None,
+    strict_batch: bool = Query(default=False),
+) -> Dict[str, Any]:
+    resolved_batch_id = resolve_mlflow_batch_id(batch_id, strict=strict_batch)
+    with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+        accepted_total_row = conn.execute(
+            """
+            SELECT COUNT(1)
+            FROM mlflow_comment_item
+            WHERE gate_bucket = 'accepted' AND pseudo_label IN (0, 1)
+            """
+        ).fetchone()
+        accepted_count = int(accepted_total_row[0] if accepted_total_row else 0)
+
+        accepted_batch_row = conn.execute(
+            """
+            SELECT COUNT(1)
+            FROM mlflow_comment_item
+            WHERE batch_id = ? AND gate_bucket = 'accepted' AND pseudo_label IN (0, 1)
+            """,
+            (resolved_batch_id,),
+        ).fetchone()
+        accepted_count_current_batch = int(accepted_batch_row[0] if accepted_batch_row else 0)
+
+    remaining = max(MLFLOW_THRESHOLD_TARGET_MAX - accepted_count, 0)
+    return {
+        "batch_id": resolved_batch_id,
+        "scope": "all_batches",
+        "accepted_count": accepted_count,
+        "accepted_count_current_batch": accepted_count_current_batch,
+        "target_max_test_stage": MLFLOW_THRESHOLD_TARGET_MAX,
+        "remaining_to_target": remaining,
+        "is_ready": accepted_count >= MLFLOW_THRESHOLD_TARGET_MAX,
+    }
+
+
+@app.post("/api/mlflow/manual/export-bundle")
+def mlflow_manual_export_bundle(request: MlflowManualExportBundleRequest) -> Dict[str, Any]:
+    init_feedback_db()
+    batch_id = request.batch_id.strip()
+    resolved_dataset_version = normalize_dataset_version(request.dataset_version)
+
+    with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        batch_row = conn.execute(
+            "SELECT batch_id, model_id, created_at FROM mlflow_crawl_batch WHERE batch_id = ?",
+            (batch_id,),
+        ).fetchone()
+        if not batch_row:
+            raise HTTPException(status_code=404, detail=f"Batch not found: {batch_id}")
+
+        accepted_rows = conn.execute(
+            """
+            SELECT text, pseudo_label, score, url, url_hash, segment_hash, context_segment_hash, html_tag
+            FROM mlflow_comment_item
+            WHERE batch_id = ? AND gate_bucket = 'accepted' AND pseudo_label IN (0, 1)
+            ORDER BY id ASC
+            """,
+            (batch_id,),
+        ).fetchall()
+        candidate_rows = conn.execute(
+            """
+            SELECT text, pseudo_label, score, url, url_hash, segment_hash, context_segment_hash, html_tag
+            FROM mlflow_comment_item
+            WHERE batch_id = ? AND gate_bucket = 'candidate' AND verification_status = 'unverified'
+            ORDER BY id ASC
+            """,
+            (batch_id,),
+        ).fetchall()
+
+        unused_rows: List[sqlite3.Row] = []
+        if request.include_unused:
+            where_sql = "batch_id = ? AND gate_bucket = 'discarded'"
+            params: List[Any] = [batch_id]
+            if request.unused_scope == "auto_discarded":
+                where_sql += " AND verification_status = 'auto_discarded'"
+            elif request.unused_scope == "manual_rejected":
+                where_sql += " AND verification_status = 'manual_rejected'"
+
+            unused_rows = conn.execute(
+                f"""
+                SELECT text, pseudo_label, score, url, url_hash, segment_hash, context_segment_hash, html_tag, verification_status
+                FROM mlflow_comment_item
+                WHERE {where_sql}
+                ORDER BY id ASC
+                """,
+                tuple(params),
+            ).fetchall()
+
+    model_version = request.model_version or str(batch_row["model_id"])
+    policy_version = request.policy_version or DEFAULT_POLICY_VERSION
+    versions = build_artifact_versions(
+        dataset_version=resolved_dataset_version,
+        model_version=model_version,
+        policy_version=policy_version,
+    )
+
+    out_dir = BASE_DIR / "data" / "processed"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = utc_timestamp_compact()
+    out_path = out_dir / f"mlflow_bundle_{batch_id}_{timestamp}.zip"
+
+    accepted_jsonl = "\n".join(
+        json.dumps(
+            {
+                "text": row["text"],
+                "label": int(row["pseudo_label"]),
+                "meta": {
+                    "source": "mlflow_pseudo",
+                    "batch_id": batch_id,
+                    "score": row["score"],
+                    "url": row["url"],
+                    "url_hash": row["url_hash"],
+                    "segment_hash": row["segment_hash"],
+                    "context_segment_hash": row["context_segment_hash"],
+                    "html_tag": row["html_tag"],
+                },
+            },
+            ensure_ascii=False,
+        )
+        for row in accepted_rows
+    )
+    candidate_jsonl = "\n".join(
+        json.dumps(
+            {
+                "text": row["text"],
+                "label": int(row["pseudo_label"] if row["pseudo_label"] is not None else 0),
+                "meta": {
+                    "source": "mlflow_candidate",
+                    "batch_id": batch_id,
+                    "score": row["score"],
+                    "url": row["url"],
+                    "url_hash": row["url_hash"],
+                    "segment_hash": row["segment_hash"],
+                    "context_segment_hash": row["context_segment_hash"],
+                    "html_tag": row["html_tag"],
+                },
+            },
+            ensure_ascii=False,
+        )
+        for row in candidate_rows
+    )
+    unused_jsonl = "\n".join(
+        json.dumps(
+            {
+                "text": row["text"],
+                "label": int(row["pseudo_label"] if row["pseudo_label"] is not None else 0),
+                "meta": {
+                    "source": "mlflow_unused",
+                    "batch_id": batch_id,
+                    "score": row["score"],
+                    "url": row["url"],
+                    "url_hash": row["url_hash"],
+                    "segment_hash": row["segment_hash"],
+                    "context_segment_hash": row["context_segment_hash"],
+                    "html_tag": row["html_tag"],
+                    "verification_status": row["verification_status"],
+                },
+            },
+            ensure_ascii=False,
+        )
+        for row in unused_rows
+    )
+
+    training_config_yaml = (
+        "model: phobert\n"
+        f"model_version: {versions['model_version']}\n"
+        f"dataset_version: {versions['dataset_version']}\n"
+        f"policy_version: {versions['policy_version']}\n"
+        "batch_size: 16\n"
+        "epochs: 3\n"
+        "learning_rate: 2e-5\n"
+    )
+
+    gate_policy_json = {
+        "accept_threshold": MLFLOW_ACCEPT_THRESHOLD,
+        "discard_threshold": MLFLOW_DISCARD_THRESHOLD,
+        "target_max_test_stage": MLFLOW_THRESHOLD_TARGET_MAX,
+    }
+
+    manifest_json = {
+        "artifact_type": "mlflow_training_bundle",
+        "created_at": datetime.utcnow().isoformat() + "Z",
+        "batch_id": batch_id,
+        "record_count": len(accepted_rows),
+        "candidate_count": len(candidate_rows),
+        "unused_count": len(unused_rows),
+        "include_unused": request.include_unused,
+        "unused_scope": request.unused_scope,
+        **versions,
+        "required_zip_contents": build_mlflow_required_bundle_contents(),
+    }
+
+    with zipfile.ZipFile(out_path, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("dataset/accepted_pseudo.jsonl", accepted_jsonl + ("\n" if accepted_jsonl else ""))
+        zf.writestr("dataset/candidates_unverified.jsonl", candidate_jsonl + ("\n" if candidate_jsonl else ""))
+        if request.include_unused:
+            zf.writestr("dataset/unused_discarded.jsonl", unused_jsonl + ("\n" if unused_jsonl else ""))
+        zf.writestr("manifest.json", json.dumps(manifest_json, ensure_ascii=False, indent=2))
+        zf.writestr("config/training_config.yaml", training_config_yaml)
+        zf.writestr("config/gate_policy.json", json.dumps(gate_policy_json, ensure_ascii=False, indent=2))
+
+    return {
+        "bundle_path": str(out_path.relative_to(BASE_DIR)),
+        "count": len(accepted_rows),
+        "candidate_count": len(candidate_rows),
+        "unused_count": len(unused_rows),
+        "include_unused": request.include_unused,
+        "unused_scope": request.unused_scope,
+        "required_zip_contents": build_mlflow_required_bundle_contents(),
+        "artifact_versions": versions,
+    }
+
+
+@app.post("/api/mlflow/manual/import-artifact")
+def mlflow_manual_import_artifact(request: MlflowManualImportArtifactRequest) -> Dict[str, Any]:
+    init_feedback_db()
+    with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO mlflow_training_artifact (run_name, artifact_path, notes, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                request.run_name.strip(),
+                request.artifact_path.strip(),
+                request.notes.strip() if request.notes else None,
+                datetime.utcnow().isoformat() + "Z",
+            ),
+        )
+        conn.commit()
+        artifact_id = int(cursor.lastrowid)
+    return {
+        "import_id": artifact_id,
+        "status": "recorded",
+        "created_at": datetime.utcnow().isoformat() + "Z",
+    }
+
+
+@app.post("/api/mlflow/do/trigger")
+def mlflow_do_trigger(request: MlflowDOTriggerRequest) -> Dict[str, Any]:
+    init_feedback_db()
+    run_id = f"do_{uuid.uuid4().hex[:12]}"
+    stages = [
+        "trigger_vm_gpu",
+        "upload_data_and_train_files",
+        "train",
+        "save_artifact",
+        "download_or_upload_destination",
+        "destroy_vm",
+    ]
+    logs = [
+        "Placeholder flow only. No infrastructure action executed.",
+        "Configure DigitalOcean credentials before enabling real automation.",
+    ]
+    now = datetime.utcnow().isoformat() + "Z"
+    with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+        conn.execute(
+            """
+            INSERT INTO mlflow_do_run (
+                run_id, batch_id, provider, gpu_profile, status, current_stage, logs_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                request.batch_id,
+                request.provider,
+                request.gpu_profile,
+                "placeholder",
+                stages[0],
+                json.dumps(logs, ensure_ascii=False),
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+
+    return {
+        "run_id": run_id,
+        "status": "placeholder",
+        "stages": stages,
+        "dry_run": request.dry_run,
+    }
+
+
+@app.get("/api/mlflow/do/status")
+def mlflow_do_status(run_id: str = Query(..., min_length=1)) -> Dict[str, Any]:
+    init_feedback_db()
+    with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """
+            SELECT run_id, batch_id, provider, gpu_profile, status, current_stage, logs_json, created_at, updated_at
+            FROM mlflow_do_run
+            WHERE run_id = ?
+            """,
+            (run_id.strip(),),
+        ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail=f"DO run not found: {run_id}")
+
+    logs = []
+    raw_logs = row["logs_json"]
+    if raw_logs:
+        try:
+            parsed = json.loads(raw_logs)
+            if isinstance(parsed, list):
+                logs = parsed
+        except Exception:
+            logs = []
+
+    return {
+        "run_id": row["run_id"],
+        "batch_id": row["batch_id"],
+        "provider": row["provider"],
+        "gpu_profile": row["gpu_profile"],
+        "status": row["status"],
+        "current_stage": row["current_stage"],
+        "logs": logs,
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+@app.get("/api/mlflow/compare/latest")
+def mlflow_compare_latest() -> Dict[str, Any]:
+    init_feedback_db()
+    registry = load_json_file(EXPERIMENT_REGISTRY_PATH, {"runs": []})
+    runs = registry.get("runs") if isinstance(registry, dict) else []
+    current_run = runs[0] if isinstance(runs, list) and runs else {}
+
+    with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        artifact_row = conn.execute(
+            """
+            SELECT id, run_name, artifact_path, notes, created_at
+            FROM mlflow_training_artifact
+            ORDER BY created_at DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        tracker_row = conn.execute(
+            """
+            SELECT scenario_name, macro_f1, f1_toxic, val_loss, created_at
+            FROM training_tracker_result
+            ORDER BY created_at DESC
+            LIMIT 1
+            """
+        ).fetchone()
+
+    current_metrics = {
+        "f1_toxic": normalize_score((current_run or {}).get("metrics", {}).get("f1_toxic") if isinstance(current_run, dict) else None),
+        "macro_f1": normalize_score((current_run or {}).get("metrics", {}).get("f1") if isinstance(current_run, dict) else None),
+        "val_loss": None,
+    }
+    candidate_metrics = {
+        "f1_toxic": normalize_score(tracker_row["f1_toxic"]) if tracker_row else None,
+        "macro_f1": normalize_score(tracker_row["macro_f1"]) if tracker_row else None,
+        "val_loss": normalize_score(tracker_row["val_loss"]) if tracker_row else None,
+    }
+
+    f1_delta = None
+    macro_delta = None
+    if current_metrics["f1_toxic"] is not None and candidate_metrics["f1_toxic"] is not None:
+        f1_delta = float(candidate_metrics["f1_toxic"]) - float(current_metrics["f1_toxic"])
+    if current_metrics["macro_f1"] is not None and candidate_metrics["macro_f1"] is not None:
+        macro_delta = float(candidate_metrics["macro_f1"]) - float(current_metrics["macro_f1"])
+
+    gate_checks = [
+        {
+            "name": "f1_toxic delta >= 0",
+            "delta": f1_delta,
+            "passed": bool(f1_delta is not None and f1_delta >= 0.0),
+        },
+        {
+            "name": "macro delta >= -0.01",
+            "delta": macro_delta,
+            "passed": bool(macro_delta is not None and macro_delta >= -0.01),
+        },
+        {
+            "name": "candidate f1_toxic >= 0.45",
+            "delta": candidate_metrics["f1_toxic"],
+            "passed": bool(candidate_metrics["f1_toxic"] is not None and candidate_metrics["f1_toxic"] >= 0.45),
+        },
+    ]
+
+    current_model = (current_run or {}).get("model_name") if isinstance(current_run, dict) else None
+    candidate_model = artifact_row["run_name"] if artifact_row else None
+
+    return {
+        "current": {
+            "model": current_model,
+            "metrics": current_metrics,
+            "created_at": (current_run or {}).get("created_at") if isinstance(current_run, dict) else None,
+        },
+        "candidate": {
+            "model": candidate_model,
+            "artifact_path": artifact_row["artifact_path"] if artifact_row else None,
+            "notes": artifact_row["notes"] if artifact_row else None,
+            "metrics": candidate_metrics,
+            "created_at": artifact_row["created_at"] if artifact_row else None,
+        },
+        "gate_checks": gate_checks,
+        "promotion_enabled": False,
+        "promotion_mode": "placeholder",
+    }
+
+
+@app.post("/api/mlflow/promote")
+def mlflow_promote(request: MlflowPromoteRequest) -> Dict[str, Any]:
+    return {
+        "status": "placeholder",
+        "candidate_model": request.candidate_model,
+        "message": "Promotion workflow is not enabled yet.",
+    }
 
 
 @app.post("/api/analyze")

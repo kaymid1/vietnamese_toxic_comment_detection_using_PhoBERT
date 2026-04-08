@@ -27,13 +27,15 @@ export function Navigation({
   onSetDatasetVersion,
 }: NavigationProps) {
   const { t } = useI18n();
-  const navItems = [
+  const userNavItems = [
     { name: t("nav.home"), id: "home" },
     { name: t("nav.results"), id: "results" },
     { name: t("nav.dataset"), id: "dataset" },
     { name: t("nav.model"), id: "model" },
     { name: t("nav.contact"), id: "contact" },
   ];
+
+  const adminNavItems = [{ name: t("nav.adminMlflow"), id: "admin_mlflow" }];
 
   return (
     <nav className="sticky top-0 z-50 border-b border-border bg-background/95 shadow-sm backdrop-blur">
@@ -48,72 +50,97 @@ export function Navigation({
           </div>
 
           <div className="flex items-center gap-3">
-            <div className="hidden md:flex items-center gap-8">
-              {navItems.map((item) => {
-                const isActive = currentPage === item.id;
-                const buttonClass = `rounded-lg px-3 py-2 transition-colors ${
-                  isActive ? "font-medium" : "text-foreground/80 hover:bg-accent"
-                }`;
-                const buttonStyle = {
-                  color: isActive ? "var(--primary)" : undefined,
-                  backgroundColor: isActive ? "color-mix(in srgb, var(--primary) 14%, transparent)" : "transparent",
-                };
+            <div className="hidden md:flex items-center gap-3">
+              <div className="flex items-center gap-8">
+                {userNavItems.map((item) => {
+                  const isActive = currentPage === item.id;
+                  const buttonClass = `rounded-lg px-3 py-2 transition-colors ${
+                    isActive ? "font-medium" : "text-foreground/80 hover:bg-accent"
+                  }`;
+                  const buttonStyle = {
+                    color: isActive ? "var(--primary)" : undefined,
+                    backgroundColor: isActive ? "color-mix(in srgb, var(--primary) 14%, transparent)" : "transparent",
+                  };
 
-                if (item.id === "dataset") {
+                  if (item.id === "dataset") {
+                    return (
+                      <HoverCard key={item.id} openDelay={120} closeDelay={100}>
+                        <HoverCardTrigger asChild>
+                          <button
+                            type="button"
+                            onClick={() => onNavigate(item.id)}
+                            className={buttonClass}
+                            style={buttonStyle}
+                          >
+                            {item.name}
+                          </button>
+                        </HoverCardTrigger>
+                        <HoverCardContent align="start" className="w-56 p-2">
+                          <p className="px-2 py-1 text-xs text-muted-foreground">{t("nav.datasetVersionLabel")}</p>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              onSetDatasetVersion("v1");
+                              onNavigate("dataset");
+                            }}
+                            className={`w-full rounded-md px-2 py-1.5 text-left text-sm transition-colors ${
+                              datasetVersion === "v1" ? "bg-accent" : "hover:bg-accent"
+                            }`}
+                          >
+                            {t("nav.datasetVersionV1Deprecated")}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              onSetDatasetVersion("latest");
+                              onNavigate("dataset");
+                            }}
+                            className={`w-full rounded-md px-2 py-1.5 text-left text-sm transition-colors ${
+                              datasetVersion === "latest" ? "bg-accent" : "hover:bg-accent"
+                            }`}
+                          >
+                            {t("nav.datasetVersionLatest")}
+                          </button>
+                        </HoverCardContent>
+                      </HoverCard>
+                    );
+                  }
+
                   return (
-                    <HoverCard key={item.id} openDelay={120} closeDelay={100}>
-                      <HoverCardTrigger asChild>
-                        <button
-                          type="button"
-                          onClick={() => onNavigate(item.id)}
-                          className={buttonClass}
-                          style={buttonStyle}
-                        >
-                          {item.name}
-                        </button>
-                      </HoverCardTrigger>
-                      <HoverCardContent align="start" className="w-56 p-2">
-                        <p className="px-2 py-1 text-xs text-muted-foreground">{t("nav.datasetVersionLabel")}</p>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            onSetDatasetVersion("v1");
-                            onNavigate("dataset");
-                          }}
-                          className={`w-full rounded-md px-2 py-1.5 text-left text-sm transition-colors ${
-                            datasetVersion === "v1" ? "bg-accent" : "hover:bg-accent"
-                          }`}
-                        >
-                          {t("nav.datasetVersionV1Deprecated")}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            onSetDatasetVersion("latest");
-                            onNavigate("dataset");
-                          }}
-                          className={`w-full rounded-md px-2 py-1.5 text-left text-sm transition-colors ${
-                            datasetVersion === "latest" ? "bg-accent" : "hover:bg-accent"
-                          }`}
-                        >
-                          {t("nav.datasetVersionLatest")}
-                        </button>
-                      </HoverCardContent>
-                    </HoverCard>
+                    <button
+                      key={item.id}
+                      onClick={() => onNavigate(item.id)}
+                      className={buttonClass}
+                      style={buttonStyle}
+                    >
+                      {item.name}
+                    </button>
                   );
-                }
+                })}
+              </div>
 
-                return (
-                  <button
-                    key={item.id}
-                    onClick={() => onNavigate(item.id)}
-                    className={buttonClass}
-                    style={buttonStyle}
-                  >
-                    {item.name}
-                  </button>
-                );
-              })}
+              <div className="h-6 w-px bg-border" aria-hidden="true" />
+
+              <div className="flex items-center gap-2">
+                <span className="text-xs uppercase tracking-wide text-muted-foreground">{t("nav.adminSection")}</span>
+                {adminNavItems.map((item) => {
+                  const isActive = currentPage === item.id || (item.id === "admin_mlflow" && currentPage === "mlflow");
+                  return (
+                    <button
+                      key={item.id}
+                      type="button"
+                      onClick={() => onNavigate(item.id)}
+                      className={`rounded-lg px-3 py-2 text-sm transition-colors ${
+                        isActive
+                          ? "bg-primary/15 text-primary font-medium"
+                          : "text-foreground/80 hover:bg-accent"
+                      }`}
+                    >
+                      {item.name}
+                    </button>
+                  );
+                })}
+              </div>
             </div>
 
             <div className="inline-flex items-center gap-1 rounded-full border border-border bg-muted/70 p-1" aria-label={t("nav.language")}>

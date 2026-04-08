@@ -229,7 +229,26 @@ def _trim_transcript_segments(segments: List[dict], max_seconds: Optional[int]) 
 
 def preprocess_text(text: str) -> str:
     text = unicodedata.normalize("NFC", text)
-    return " ".join(text.strip().split())
+    text = " ".join(text.strip().split())
+
+    # Strip common comment-widget tail noise when include_comments=True returns UI footer text.
+    time_suffix = (
+        r"(?:"
+        r"\d+\s*(?:phút|giờ|ngày|tuần|tháng|năm)\s+trước"
+        r"|\d+h\s+trước"
+        r"|\d{1,2}:\d{2}(?:\s+\d{1,2}/\d{1,2}(?:/\d{2,4})?)?"
+        r")"
+    )
+    tail_patterns = [
+        rf"(?:\s+(?:thích|like|ngạc nhiên|buồn|haha|yêu thích|phẫn nộ|sad|wow|angry|love|\d+)){{0,30}}\s+trả lời(?:\s+báo vi phạm)?(?:\s+{time_suffix})?\s*$",
+        rf"(?:\s+\d+){{0,8}}\s+trả lời(?:\s+báo vi phạm)?(?:\s+{time_suffix})?\s*$",
+        rf"\s+báo vi phạm(?:\s+{time_suffix})?\s*$",
+    ]
+    cleaned = text
+    for pattern in tail_patterns:
+        cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE)
+
+    return cleaned.strip(" |·-\t")
 
 
 def _is_legacy_ssl_renegotiation_error(exc: Exception) -> bool:

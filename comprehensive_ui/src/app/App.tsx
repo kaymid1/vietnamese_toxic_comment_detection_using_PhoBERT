@@ -9,6 +9,8 @@ import { SyntheticGenerationPage } from "@/app/components/SyntheticGenerationPag
 import { ModelPage } from "@/app/components/ModelPage";
 import { ProtocolPage } from "@/app/components/ProtocolPage";
 import { ContactPage } from "@/app/components/ContactPage";
+import { MLFlowPage } from "@/app/components/MLFlowPage";
+import { Toaster } from "@/app/components/ui/sonner";
 
 interface ApiSegment {
   segment_id: string;
@@ -525,9 +527,12 @@ export default function App() {
 
       {currentPage === "protocol" && <ProtocolPage />}
 
+      {(currentPage === "admin_mlflow" || currentPage === "mlflow") && <MLFlowPage availableModels={availableModels} />}
+
       {currentPage === "model" && <ModelPage onTryNow={handleTryNow} />}
 
       {currentPage === "contact" && <ContactPage />}
+        <Toaster position="top-right" />
       </I18nContext.Provider>
     </div>
   );
