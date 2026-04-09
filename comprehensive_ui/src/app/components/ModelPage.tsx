@@ -18,22 +18,15 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/app/components/ui/dialog";
-import { Label } from "@/app/components/ui/label";
 import {
   ArrowRight,
   CheckCircle,
-  XCircle,
   TrendingUp,
   Database,
   Cpu,
-  LineChart,
   FileText,
 } from "lucide-react";
 import {
-  LineChart as RechartsLine,
-  Line,
-  XAxis,
-  YAxis,
   CartesianGrid,
   Tooltip,
   Legend,
@@ -76,21 +69,6 @@ interface EvalPolicyResponse {
   };
   last_updated?: string | null;
 }
-
-interface ErrorRow {
-  text: string;
-  true_label: number;
-  predicted_label: number;
-  confidence?: number;
-  source_dataset?: string;
-  subset_tag?: string;
-}
-
-interface ErrorResponse {
-  items: ErrorRow[];
-  last_updated?: string | null;
-}
-
 
 interface PreprocessStep {
   id: string;
@@ -147,11 +125,6 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
   const [registryError, setRegistryError] = useState<string | null>(null);
   const [preprocessSteps, setPreprocessSteps] = useState<PreprocessStep[]>([]);
   const [policy, setPolicy] = useState<EvalPolicyResponse | null>(null);
-  const [errorRows, setErrorRows] = useState<ErrorRow[]>([]);
-  const [errorLastUpdated, setErrorLastUpdated] = useState<string | null>(null);
-  const [errorFilter, setErrorFilter] = useState("all");
-  const [sourceFilter, setSourceFilter] = useState("all");
-  const [subsetFilter, setSubsetFilter] = useState("all");
   const [demoStepIndex, setDemoStepIndex] = useState(0);
   const [demoExampleIndex, setDemoExampleIndex] = useState(0);
 
@@ -202,23 +175,9 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
       }
     };
 
-    const fetchErrors = async () => {
-      try {
-        const response = await fetch(buildApiUrl("/api/eval/errors"));
-        const data = (await response.json()) as ErrorResponse;
-        if (!response.ok) throw new Error(JSON.stringify(data));
-        setErrorRows(data.items || []);
-        setErrorLastUpdated(data.last_updated ?? null);
-      } catch {
-        setErrorRows([]);
-        setErrorLastUpdated(null);
-      }
-    };
-
     void fetchRegistry();
     void fetchSteps();
     void fetchPolicy();
-    void fetchErrors();
   }, []);
 
   useEffect(() => {
@@ -246,19 +205,6 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
     [registry.runs],
   );
 
-  const hasRealTrainingCurve = Array.isArray(baselineRun?.hyperparameters?.training_curve);
-  const trainingData = useMemo(() => {
-    const curve = baselineRun?.hyperparameters?.training_curve;
-    if (Array.isArray(curve)) return curve as { epoch: number; loss: number; f1: number }[];
-    return [
-      { epoch: 1, loss: 0.68, f1: 0.42 },
-      { epoch: 2, loss: 0.55, f1: 0.52 },
-      { epoch: 3, loss: 0.48, f1: 0.61 },
-      { epoch: 4, loss: 0.42, f1: 0.68 },
-      { epoch: 5, loss: 0.38, f1: 0.71 },
-    ];
-  }, [baselineRun]);
-
   const pipelineSteps = preprocessSteps.length
     ? preprocessSteps
     : [
@@ -274,38 +220,6 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
   const activeSteps = pipelineSteps.filter((step) => step.active);
   const demoInput = demoExamples[demoExampleIndex];
   const demoOutput = applyActiveSteps(demoInput, pipelineSteps);
-
-  const filteredErrors = useMemo(() => {
-    return errorRows.filter((row) => {
-      const mismatch = row.true_label === 1 && row.predicted_label === 0 ? "fn" : "fp";
-      const matchesType = errorFilter === "all" || mismatch === errorFilter;
-      const matchesSource = sourceFilter === "all" || row.source_dataset === sourceFilter;
-      const matchesSubset = subsetFilter === "all" || row.subset_tag === subsetFilter;
-      return matchesType && matchesSource && matchesSubset;
-    });
-  }, [errorRows, errorFilter, sourceFilter, subsetFilter]);
-
-  const errorStats = useMemo(() => {
-    let fp = 0;
-    let fn = 0;
-    errorRows.forEach((row) => {
-      if (row.true_label === 1 && row.predicted_label === 0) fn += 1;
-      if (row.true_label === 0 && row.predicted_label === 1) fp += 1;
-    });
-    return { fp, fn };
-  }, [errorRows]);
-
-  const errorSources = useMemo(() => {
-    const sources = new Set<string>();
-    errorRows.forEach((row) => row.source_dataset && sources.add(row.source_dataset));
-    return ["all", ...Array.from(sources).sort((a, b) => a.localeCompare(b))];
-  }, [errorRows]);
-
-  const errorSubsets = useMemo(() => {
-    const subsets = new Set<string>();
-    errorRows.forEach((row) => row.subset_tag && subsets.add(row.subset_tag));
-    return ["all", ...Array.from(subsets).sort((a, b) => a.localeCompare(b))];
-  }, [errorRows]);
 
   return (
     <div style={{ backgroundColor: "var(--background)" }} className="min-h-screen py-12 px-4 sm:px-6 lg:px-8">
@@ -541,95 +455,6 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
           </div>
         </Card>
 
-        {/* Performance Metrics */}
-        <Card className="bg-card p-8 mb-8 shadow-lg">
-          <div className="flex items-start gap-4 mb-6">
-            <div className="w-12 h-12 rounded-lg flex items-center justify-center flex-shrink-0 bg-background-info">
-              <LineChart className="w-6 h-6" style={{ color: "var(--primary)" }} />
-            </div>
-            <div className="flex-1">
-              <h2 className="text-2xl mb-3" style={{ color: "var(--primary)" }}>
-                {t("model.metrics.title")}
-              </h2>
-              <p className="text-foreground mb-6">{t("model.metrics.qualityByRegistry")}</p>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
-            <div className="bg-background-info p-6 rounded-xl">
-              <h4 className="text-sm text-muted-foreground mb-2">{t("model.metrics.macroF1")}</h4>
-              <div className="flex items-end gap-2">
-                <span className="text-4xl" style={{ color: "var(--primary)" }}>
-                  {formatScore(baselineRun?.metrics?.f1, t)}
-                </span>
-                <Badge className="mb-2" style={{ backgroundColor: "var(--success)" }}>
-                  {t("model.common.baseline")}
-                </Badge>
-              </div>
-              <p className="text-sm text-muted-foreground mt-2">{t("model.metrics.avgF1AllClasses")}</p>
-            </div>
-
-            <div className="bg-background-danger p-6 rounded-xl">
-              <h4 className="text-sm text-muted-foreground mb-2">{t("model.metrics.precision")}</h4>
-              <div className="flex items-end gap-2">
-                <span className="text-4xl" style={{ color: "var(--destructive)" }}>
-                  {formatScore(baselineRun?.metrics?.precision, t)}
-                </span>
-                <Badge className="mb-2 bg-text-warning">{t("model.common.baseline")}</Badge>
-              </div>
-              <p className="text-sm text-muted-foreground mt-2">{t("model.metrics.precisionDesc")}</p>
-            </div>
-
-            <div className="bg-background-success p-6 rounded-xl">
-              <h4 className="text-sm text-muted-foreground mb-2">{t("model.metrics.recall")}</h4>
-              <div className="flex items-end gap-2">
-                <span className="text-4xl" style={{ color: "var(--success)" }}>
-                  {formatScore(baselineRun?.metrics?.recall, t)}
-                </span>
-                <Badge className="mb-2" style={{ backgroundColor: "var(--success)" }}>
-                  {t("model.common.baseline")}
-                </Badge>
-              </div>
-              <p className="text-sm text-muted-foreground mt-2">{t("model.metrics.recallDesc")}</p>
-            </div>
-          </div>
-
-          {/* Detailed Metrics Table */}
-          <div className="mb-6">
-            <h3 className="text-xl mb-4" style={{ color: "var(--primary)" }}>
-              {t("model.metrics.detailsTitle")}
-            </h3>
-            <div className="border rounded-lg overflow-hidden">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>{t("model.metrics.metric")}</TableHead>
-                    <TableHead className="text-right">{t("model.common.baseline")}</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  <TableRow>
-                    <TableCell>{t("model.metrics.precision")}</TableCell>
-                    <TableCell className="text-right">{formatScore(baselineRun?.metrics?.precision, t)}</TableCell>
-                  </TableRow>
-                  <TableRow>
-                    <TableCell>{t("model.metrics.recall")}</TableCell>
-                    <TableCell className="text-right">{formatScore(baselineRun?.metrics?.recall, t)}</TableCell>
-                  </TableRow>
-                  <TableRow>
-                    <TableCell>{t("model.metrics.f1Score")}</TableCell>
-                    <TableCell className="text-right font-medium">{formatScore(baselineRun?.metrics?.f1, t)}</TableCell>
-                  </TableRow>
-                  <TableRow>
-                    <TableCell>{t("model.metrics.accuracy")}</TableCell>
-                    <TableCell className="text-right">{formatScore(baselineRun?.metrics?.accuracy, t)}</TableCell>
-                  </TableRow>
-                </TableBody>
-              </Table>
-            </div>
-          </div>
-        </Card>
-
         {/* Model Comparison */}
         <Card className="bg-card p-8 mb-8 shadow-lg">
           <h2 className="text-2xl mb-6" style={{ color: "var(--primary)" }}>
@@ -701,177 +526,6 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
                 </div>
               </DialogContent>
             </Dialog>
-          </div>
-        </Card>
-
-        {/* Training Visualization */}
-        <Card className="bg-card p-8 mb-8 shadow-lg">
-          <div className="flex flex-wrap items-center justify-between gap-3 mb-6">
-            <h2 className="text-2xl" style={{ color: "var(--primary)" }}>
-              {t("model.training.title")}
-            </h2>
-            <Badge className={hasRealTrainingCurve ? "bg-background-success text-text-success" : "bg-background-warning text-text-warning"}>
-              {hasRealTrainingCurve ? t("model.training.curveSourceReal") : t("model.training.curveSourceIllustrative")}
-            </Badge>
-          </div>
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-            {/* Training Loss Curve */}
-            <div>
-              <h3 className="mb-4">{t("model.training.trainingLoss")}</h3>
-              <ResponsiveContainer width="100%" height={250}>
-                <RechartsLine data={trainingData}>
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis dataKey="epoch" label={{ value: t("model.training.epoch"), position: "insideBottom", offset: -5 }} />
-                  <YAxis label={{ value: t("model.training.loss"), angle: -90, position: "insideLeft" }} />
-                  <Tooltip />
-                  <Line 
-                    type="monotone" 
-                    dataKey="loss" 
-                    stroke="var(--destructive)" 
-                    strokeWidth={2}
-                    name={t("model.training.validationLoss")}
-                  />
-                </RechartsLine>
-              </ResponsiveContainer>
-              <p className="text-sm text-muted-foreground mt-2 text-center">
-                {t("model.training.lossTrend")}
-              </p>
-            </div>
-
-            {/* F1 Score Curve */}
-            <div>
-              <h3 className="mb-4">{t("model.training.validationF1")}</h3>
-              <ResponsiveContainer width="100%" height={250}>
-                <RechartsLine data={trainingData}>
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis dataKey="epoch" label={{ value: t("model.training.epoch"), position: "insideBottom", offset: -5 }} />
-                  <YAxis domain={[0, 1]} label={{ value: t("model.training.f1Score"), angle: -90, position: "insideLeft" }} />
-                  <Tooltip />
-                  <Line 
-                    type="monotone" 
-                    dataKey="f1" 
-                    stroke="var(--success)" 
-                    strokeWidth={2}
-                    name={t("model.training.macroF1")}
-                  />
-                </RechartsLine>
-              </ResponsiveContainer>
-              <p className="text-sm text-muted-foreground mt-2 text-center">
-                {t("model.training.f1Trend")}
-              </p>
-            </div>
-          </div>
-        </Card>
-
-        {/* Error Analysis */}
-        <Card className="bg-card p-8 mb-8 shadow-lg">
-          <div className="flex flex-wrap items-center justify-between gap-4 mb-6">
-            <div>
-              <h2 className="text-2xl mb-1" style={{ color: "var(--primary)" }}>
-                {t("model.error.title")}
-              </h2>
-              <p className="text-sm text-muted-foreground">{t("model.error.subtitle")}</p>
-            </div>
-            <Badge className="bg-background-info text-text-info">{t("model.common.lastUpdated", { value: errorLastUpdated ?? t("model.common.na") })}</Badge>
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
-            <Card className="border p-5">
-              <div className="flex items-center gap-2 mb-2">
-                <XCircle className="w-5 h-5" style={{ color: "var(--destructive)" }} />
-                <h3 style={{ color: "var(--primary)" }}>{t("model.error.falsePositives")}</h3>
-              </div>
-              <p className="text-3xl" style={{ color: "var(--primary)" }}>{errorStats.fp}</p>
-            </Card>
-            <Card className="border p-5">
-              <div className="flex items-center gap-2 mb-2">
-                <XCircle className="w-5 h-5" style={{ color: "var(--success)" }} />
-                <h3 style={{ color: "var(--primary)" }}>{t("model.error.falseNegatives")}</h3>
-              </div>
-              <p className="text-3xl" style={{ color: "var(--primary)" }}>{errorStats.fn}</p>
-            </Card>
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-            <div>
-              <Label className="text-sm text-muted-foreground">{t("model.error.mismatchType")}</Label>
-              <select
-                className="mt-2 w-full border rounded-lg px-3 py-2 text-sm"
-                value={errorFilter}
-                onChange={(event) => setErrorFilter(event.target.value)}
-              >
-                <option value="all">{t("model.common.all")}</option>
-                <option value="fp">{t("model.error.falsePositive")}</option>
-                <option value="fn">{t("model.error.falseNegative")}</option>
-              </select>
-            </div>
-            <div>
-              <Label className="text-sm text-muted-foreground">{t("model.error.sourceDataset")}</Label>
-              <select
-                className="mt-2 w-full border rounded-lg px-3 py-2 text-sm"
-                value={sourceFilter}
-                onChange={(event) => setSourceFilter(event.target.value)}
-              >
-                {errorSources.map((source) => (
-                  <option key={source} value={source}>
-                    {source}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <Label className="text-sm text-muted-foreground">{t("model.error.subsetTag")}</Label>
-              <select
-                className="mt-2 w-full border rounded-lg px-3 py-2 text-sm"
-                value={subsetFilter}
-                onChange={(event) => setSubsetFilter(event.target.value)}
-              >
-                {errorSubsets.map((subset) => (
-                  <option key={subset} value={subset}>
-                    {subset}
-                  </option>
-                ))}
-              </select>
-            </div>
-          </div>
-
-          <div className="border rounded-lg overflow-hidden">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>{t("model.table.text")}</TableHead>
-                  <TableHead className="text-right">{t("model.error.true")}</TableHead>
-                  <TableHead className="text-right">{t("model.error.pred")}</TableHead>
-                  <TableHead className="text-right">{t("model.error.confidence")}</TableHead>
-                  <TableHead>{t("model.table.source")}</TableHead>
-                  <TableHead>{t("model.table.subset")}</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {filteredErrors.map((row, idx) => (
-                  <TableRow key={`${row.text.slice(0, 16)}-${idx}`}>
-                    <TableCell className="max-w-[360px]">
-                      <details>
-                        <summary className="cursor-pointer truncate">{row.text}</summary>
-                        <p className="mt-2 text-sm text-muted-foreground">{row.text}</p>
-                      </details>
-                    </TableCell>
-                    <TableCell className="text-right">{row.true_label}</TableCell>
-                    <TableCell className="text-right">{row.predicted_label}</TableCell>
-                    <TableCell className="text-right">{row.confidence?.toFixed(2) ?? t("model.common.na")}</TableCell>
-                    <TableCell>{row.source_dataset ?? t("model.common.na")}</TableCell>
-                    <TableCell>{row.subset_tag ?? t("model.common.na")}</TableCell>
-                  </TableRow>
-                ))}
-                {!filteredErrors.length && (
-                  <TableRow>
-                    <TableCell colSpan={6} className="text-center text-sm text-muted-foreground">
-                      {t("model.error.noRows")}
-                    </TableCell>
-                  </TableRow>
-                )}
-              </TableBody>
-            </Table>
           </div>
         </Card>
 

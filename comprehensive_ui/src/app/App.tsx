@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Navigation } from "@/app/components/Navigation";
 import { HomePage } from "@/app/components/HomePage";
 import { I18nContext, createTranslator } from "@/app/i18n/context";
@@ -115,6 +115,17 @@ const buildApiUrl = (path: string) => {
 };
 
 const normalizeModelId = (value: string) => value.toLowerCase().replace(/[^a-z0-9]/g, "");
+const isDeprecatedModel = (model: string) => model.toLowerCase().includes("deprecated");
+
+const sortModelsForSelection = (models: string[]) =>
+  [...models].sort((a, b) => {
+    const aDeprecated = isDeprecatedModel(a);
+    const bDeprecated = isDeprecatedModel(b);
+    if (aDeprecated !== bDeprecated) {
+      return aDeprecated ? 1 : -1;
+    }
+    return a.localeCompare(b);
+  });
 
 const pickPreferredModel = (models: string[]): string | null => {
   if (models.length === 0) return null;
@@ -205,6 +216,7 @@ export default function App() {
   const [theme, setTheme] = useState<"light" | "dark">("light");
   const [language, setLanguage] = useState<Language>("vi");
   const [datasetVersion, setDatasetVersion] = useState<DatasetVersion>("v1");
+  const [mlflowMounted, setMlflowMounted] = useState(false);
 
   useEffect(() => {
     setScanHistory(readScanHistory());
@@ -250,66 +262,73 @@ export default function App() {
 
   const t = useMemo(() => createTranslator(language), [language]);
 
-  useEffect(() => {
-    let isMounted = true;
+  const loadModels = useCallback(async () => {
+    setModelsLoading(true);
+    setModelsError(null);
+    try {
+      const response = await fetch(buildApiUrl("/api/models"));
+      const data = await parseJsonResponse<ModelsResponse>(response);
+      const models = Array.isArray(data.models)
+        ? data.models.filter((name): name is string => typeof name === "string")
+        : [];
 
-    const loadModels = async () => {
-      setModelsLoading(true);
-      setModelsError(null);
+      const sortedModels = sortModelsForSelection(models);
+      const nonDeprecatedModels = sortedModels.filter((model) => !isDeprecatedModel(model));
+      const apiDefault = data.default && sortedModels.includes(data.default) ? data.default : null;
+      const preferred = pickPreferredModel(nonDeprecatedModels);
+      const resolvedDefault =
+        preferred ||
+        (apiDefault && !isDeprecatedModel(apiDefault) ? apiDefault : null) ||
+        nonDeprecatedModels[0] ||
+        sortedModels[0] ||
+        null;
+
+      setAvailableModels(sortedModels);
+      const stored = window.localStorage.getItem("viettoxic:models");
+      const legacyStored = window.localStorage.getItem("viettoxic:model");
+      let parsedStored: unknown = null;
       try {
-        const response = await fetch(buildApiUrl("/api/models"));
-        const data = await parseJsonResponse<ModelsResponse>(response);
-        const models = Array.isArray(data.models)
-          ? data.models.filter((name): name is string => typeof name === "string")
-          : [];
-
-        const sortedModels = [...models].sort((a, b) => a.localeCompare(b));
-        const apiDefault = data.default && sortedModels.includes(data.default) ? data.default : null;
-        const preferred = pickPreferredModel(sortedModels);
-        const resolvedDefault = preferred || apiDefault || sortedModels[0] || null;
-
-        if (!isMounted) return;
-
-        setAvailableModels(sortedModels);
-        const stored = window.localStorage.getItem("viettoxic:models");
-        const legacyStored = window.localStorage.getItem("viettoxic:model");
-        let parsedStored: unknown = null;
-        try {
-          parsedStored = stored ? JSON.parse(stored) : null;
-        } catch {
-          parsedStored = null;
-        }
-
-        const fromArray = Array.isArray(parsedStored)
-          ? parsedStored.filter((name): name is string => typeof name === "string" && sortedModels.includes(name))
-          : [];
-        const fromLegacy = legacyStored && sortedModels.includes(legacyStored) ? [legacyStored] : [];
-        const selected = (fromArray.length > 0 ? fromArray : fromLegacy).slice(0, 2);
-        const fallback = resolvedDefault ? [resolvedDefault] : [];
-        setSelectedModels(selected.length > 0 ? selected : fallback);
-      } catch (error) {
-        if (!isMounted) return;
-        const message = error instanceof Error ? error.message : t("app.cannotLoadModels");
-        setModelsError(message);
-        setAvailableModels([]);
-        setSelectedModels([]);
-      } finally {
-        if (isMounted) {
-          setModelsLoading(false);
-        }
+        parsedStored = stored ? JSON.parse(stored) : null;
+      } catch {
+        parsedStored = null;
       }
-    };
 
-    void loadModels();
-
-    return () => {
-      isMounted = false;
-    };
+      const fromArray = Array.isArray(parsedStored)
+        ? parsedStored.filter(
+            (name): name is string =>
+              typeof name === "string" && sortedModels.includes(name) && !isDeprecatedModel(name),
+          )
+        : [];
+      const fromLegacy =
+        legacyStored && sortedModels.includes(legacyStored) && !isDeprecatedModel(legacyStored)
+          ? [legacyStored]
+          : [];
+      const selected = (fromArray.length > 0 ? fromArray : fromLegacy).slice(0, 2);
+      const fallback = resolvedDefault ? [resolvedDefault] : [];
+      setSelectedModels(selected.length > 0 ? selected : fallback);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : t("app.cannotLoadModels");
+      setModelsError(message);
+      setAvailableModels([]);
+      setSelectedModels([]);
+    } finally {
+      setModelsLoading(false);
+    }
   }, [t]);
+
+  useEffect(() => {
+    void loadModels();
+  }, [loadModels]);
 
   const handleNavigate = (page: string) => {
     setCurrentPage(page);
   };
+
+  useEffect(() => {
+    if (currentPage === "mlflow" || currentPage === "admin_mlflow") {
+      setMlflowMounted(true);
+    }
+  }, [currentPage]);
 
   const handleToggleTheme = () => {
     setTheme((prev) => (prev === "light" ? "dark" : "light"));
@@ -483,7 +502,9 @@ export default function App() {
           availableModels={availableModels}
           selectedModels={selectedModels}
           onSelectModels={(modelNames: string[]) => {
-            const sanitized = Array.from(new Set(modelNames)).slice(0, 2);
+            const sanitized = Array.from(new Set(modelNames))
+              .filter((name) => !isDeprecatedModel(name))
+              .slice(0, 2);
             setSelectedModels(sanitized);
             window.localStorage.setItem("viettoxic:models", JSON.stringify(sanitized));
             if (sanitized[0]) {
@@ -527,7 +548,11 @@ export default function App() {
 
       {currentPage === "protocol" && <ProtocolPage />}
 
-      {(currentPage === "admin_mlflow" || currentPage === "mlflow") && <MLFlowPage availableModels={availableModels} />}
+      {mlflowMounted && (
+        <div className={currentPage === "admin_mlflow" || currentPage === "mlflow" ? "" : "hidden"}>
+          <MLFlowPage availableModels={availableModels} onModelsChanged={loadModels} />
+        </div>
+      )}
 
       {currentPage === "model" && <ModelPage onTryNow={handleTryNow} />}
 

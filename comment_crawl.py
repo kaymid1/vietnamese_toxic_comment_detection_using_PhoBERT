@@ -90,6 +90,9 @@ def _is_transient_crawl_error(exc: Exception) -> bool:
         "disconnected",
         "session deleted",
         "target window already closed",
+        "no such window",
+        "web view not found",
+        "invalid session id",
         "chrome not reachable",
     ]
     return any(token in text for token in transient_tokens)
@@ -133,6 +136,10 @@ def _clean_comment_text(text: str) -> str:
     cleaned = txt
     for pattern in tail_patterns:
         cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE)
+
+    # Strip pure reaction-chip tails such as "Thích Thích Vui".
+    reaction_token = r"(?:thích|like|ngạc nhiên|buồn|haha|yêu thích|phẫn nộ|sad|wow|angry|love|vui|care|tim|heart)"
+    cleaned = re.sub(rf"(?:\s+{reaction_token}){{2,}}\s*$", "", cleaned, flags=re.IGNORECASE)
 
     return cleaned.strip(" |·-\t")
 
@@ -361,6 +368,26 @@ def _find_browser_binary() -> tuple[str | None, str]:
     return None, "chrome"
 
 
+def _find_edge_binary() -> str | None:
+    import platform
+    import shutil
+
+    system = platform.system()
+    if system == "Windows":
+        for candidate in _EDGE_SEARCH_PATHS_WINDOWS:
+            if candidate and os.path.isfile(candidate):
+                return candidate
+        return shutil.which("msedge") or shutil.which("microsoft-edge")
+
+    if system == "Darwin":
+        edge_mac = "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"
+        if os.path.isfile(edge_mac):
+            return edge_mac
+        return shutil.which("microsoft-edge")
+
+    return shutil.which("microsoft-edge") or shutil.which("microsoft-edge-stable")
+
+
 def _common_args(user_agent: str) -> list[str]:
     """Shared browser arguments."""
     return [
@@ -505,8 +532,23 @@ def _get_undetected_driver(headless: bool = True, proxy: str | None = None):
 
     if browser_type == "edge":
         return _get_driver_edge(headless, browser_bin, proxy=chosen_proxy)
-    else:
+
+    try:
         return _get_driver_chrome_uc(headless, browser_bin, proxy=chosen_proxy)
+    except Exception as exc:
+        if not _is_transient_crawl_error(exc):
+            raise
+
+        edge_bin = _find_edge_binary()
+        if not edge_bin:
+            raise
+
+        logger.warning(
+            "Chrome UC init/session failed (%s). Falling back to Edge driver: %s",
+            exc,
+            edge_bin,
+        )
+        return _get_driver_edge(headless, edge_bin, proxy=chosen_proxy)
 
 
 def _random_delay(lo: float = 1.5, hi: float = 4.0) -> None:
@@ -549,6 +591,7 @@ DOMAIN_SELECTORS: dict[str, dict[str, str]] = {
         "item": ".comment_item, .item-comment, .comment-item, [class*='comment_item'], [class*='comment-item'], [class*='item-comment']",
         "text": ".full_content, .content-comment, .comment-content, [class*='content-comment'], [class*='full_content'], p",
         "exclude": ".txt-name",
+        "comment_tab": "button, a, [role='tab'], [role='button'], [class*='tab']",
         "load_more": "a.view_more_coment, a.view_more_comment, a.btn-more-comment, .btn-load-more-comment, [class*='view_more_coment'], [class*='load-more-comment']",
     },
     "tuoitre.vn": {
@@ -648,6 +691,12 @@ _NEWS_LOAD_MORE_TEXT_KEYWORDS = [
     "load more",
     "tải thêm",
     "tai them",
+]
+
+_COMMENT_TAB_TEXT_KEYWORDS = [
+    "y kien",
+    "binh luan",
+    "comment",
 ]
 
 
@@ -791,6 +840,9 @@ class NewsSiteCommentCrawler:
             self._prime_comment_section(driver, container_css)
             _raise_if_deadline_passed("comment priming")
 
+            self._activate_comment_tab(driver, selectors)
+            _raise_if_deadline_passed("comment tab activation")
+
             self._wait_for_comment_readiness(driver, selectors)
             _raise_if_deadline_passed("comment readiness wait")
 
@@ -891,6 +943,54 @@ class NewsSiteCommentCrawler:
         except Exception:
             # Best-effort only; extraction logic below is still the source of truth.
             pass
+
+    def _activate_comment_tab(self, driver, selectors: dict[str, str]) -> bool:
+        from selenium.webdriver.common.by import By
+
+        tab_css = selectors.get("comment_tab", "")
+        if not tab_css:
+            return False
+
+        def _norm(text: str) -> str:
+            normalized = unicodedata.normalize("NFD", text or "")
+            normalized = "".join(ch for ch in normalized if unicodedata.category(ch) != "Mn")
+            return _normalize_text(normalized.lower())
+
+        candidates = []
+        container_css = selectors.get("container", "")
+        if container_css:
+            try:
+                for container in driver.find_elements(By.CSS_SELECTOR, container_css):
+                    candidates.extend(container.find_elements(By.CSS_SELECTOR, tab_css))
+            except Exception:
+                pass
+
+        if not candidates:
+            try:
+                candidates = driver.find_elements(By.CSS_SELECTOR, tab_css)
+            except Exception:
+                candidates = []
+
+        for element in candidates:
+            try:
+                if not element.is_displayed():
+                    continue
+                text = _norm(element.text or "")
+                if not text:
+                    continue
+                if not any(keyword in text for keyword in _COMMENT_TAB_TEXT_KEYWORDS):
+                    continue
+
+                if not _safe_click(driver, element):
+                    continue
+
+                logger.info("Activated comment tab/control: '%s'", text)
+                _random_delay(0.6, 1.2)
+                return True
+            except Exception:
+                continue
+
+        return False
 
     def _comment_signal_count(self, driver, selectors: dict[str, str]) -> int:
         from selenium.webdriver.common.by import By

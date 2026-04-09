@@ -6,12 +6,20 @@ import math
 import os
 import statistics
 import re
+import shlex
 import shutil
+import socket
 import sqlite3
+import sys
+import tempfile
+import threading
+import subprocess
 import time
 import uuid
 import urllib.error
+import urllib.parse
 import urllib.request
+import unicodedata
 import zipfile
 from datetime import datetime
 from pathlib import Path
@@ -19,6 +27,7 @@ from typing import Any, Dict, List, Literal, Optional, Tuple
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from domain_classifier import CATEGORY_THRESHOLDS
@@ -38,6 +47,7 @@ ERROR_ANALYSIS_PATH = BASE_DIR / "data" / "processed" / "error_analysis.json"
 HARD_CASES_PATH = BASE_DIR / "data" / "processed" / "hard_case_candidates.json"
 PROTOCOL_BUILD_REPORT_PATH = BASE_DIR / "data" / "victsd" / "victsd_v1_protocol_build_report.json"
 PROTOCOL_METRICS_ROOT = BASE_DIR / "viettoxic_outputs"
+LOCAL_M1_ARTIFACT_DIR = BASE_DIR / "data" / "processed" / "mlflow_local_artifacts"
 
 DEFAULT_DATASET_VERSION = os.getenv("VIETTOXIC_DATASET_VERSION", "victsd_v1")
 DEFAULT_MODEL_VERSION = os.getenv("VIETTOXIC_MODEL_VERSION", "unknown")
@@ -48,6 +58,34 @@ MLFLOW_ACCEPT_THRESHOLD = float(os.getenv("MLFLOW_ACCEPT_THRESHOLD", "0.8"))
 MLFLOW_DISCARD_THRESHOLD = float(os.getenv("MLFLOW_DISCARD_THRESHOLD", "0.2"))
 MLFLOW_THRESHOLD_TARGET_MAX = max(1, int(os.getenv("MLFLOW_THRESHOLD_TARGET_MAX", "10")))
 MLFLOW_CLEAR_ALL_CONFIRM_TOKEN = os.getenv("MLFLOW_CLEAR_ALL_CONFIRM_TOKEN", "DELETE_ALL_MLFLOW_DATA")
+
+DO_API_BASE = "https://api.digitalocean.com/v2"
+DO_DEFAULT_REGION = "sgp1"
+DO_DEFAULT_IMAGE = "ubuntu-24-04-x64"
+DO_DEFAULT_GPU_SIZE = "gpu-h100x1-80gb"
+DO_DEFAULT_TAG_PREFIX = "viettoxic-mlflow"
+DO_SSH_KEY_IDS: List[str] = []
+DO_SSH_PRIVATE_KEY_PATH = ""
+DO_SSH_USER = "root"
+DO_BOOTSTRAP_TIMEOUT_SEC = 600
+DO_SPACES_BUCKET = ""
+DO_SPACES_REGION = "sgp1"
+DO_SPACES_KEY = ""
+DO_SPACES_SECRET = ""
+DO_SPACES_ENDPOINT = "https://sgp1.digitaloceanspaces.com"
+DO_STAGES = [
+    "trigger_vm_gpu",
+    "upload_data_and_train_files",
+    "train",
+    "save_artifact",
+    "destroy_vm",
+]
+LOCAL_M1_STAGES = [
+    "prepare_local_bundle",
+    "train_local_m1",
+    "save_artifact",
+    "finalize_local_run",
+]
 
 DATASET_VERSION_ALIASES: Dict[str, str] = {
     "v1": "victsd_v1",
@@ -214,23 +252,67 @@ ENV_FILES = [
 
 
 def load_env_files() -> None:
-    try:
-        from dotenv import load_dotenv
-    except ImportError:
-        logger.warning("python-dotenv not installed; skipping .env/.env.local")
-        return
+    def _load_env_fallback(path: Path) -> None:
+        for raw_line in path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("export "):
+                line = line[len("export ") :].strip()
+            if "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip()
+            if not key:
+                continue
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+                value = value[1:-1]
+            os.environ[key] = value
 
     loaded_any = False
-    for env_path in ENV_FILES:
-        if env_path.exists():
-            load_dotenv(env_path, override=True)
-            loaded_any = True
+    try:
+        from dotenv import load_dotenv
+
+        for env_path in ENV_FILES:
+            if env_path.exists():
+                load_dotenv(env_path, override=True)
+                loaded_any = True
+    except ImportError:
+        logger.warning("python-dotenv not installed; using basic .env parser fallback")
+        for env_path in ENV_FILES:
+            if env_path.exists():
+                _load_env_fallback(env_path)
+                loaded_any = True
 
     if loaded_any:
         logger.info("Loaded environment variables from .env files")
 
 
 load_env_files()
+
+
+DO_API_BASE = os.getenv("DO_API_BASE", "https://api.digitalocean.com/v2").rstrip("/")
+DO_DEFAULT_REGION = os.getenv("DO_DEFAULT_REGION", "sgp1")
+DO_DEFAULT_IMAGE = os.getenv("DO_DEFAULT_IMAGE", "ubuntu-24-04-x64")
+DO_DEFAULT_GPU_SIZE = os.getenv("DO_DEFAULT_GPU_SIZE", "gpu-h100x1-80gb")
+DO_DEFAULT_TAG_PREFIX = os.getenv("DO_DEFAULT_TAG_PREFIX", "viettoxic-mlflow")
+DO_SSH_KEY_IDS = [k.strip() for k in os.getenv("DO_SSH_KEY_IDS", "").split(",") if k.strip()]
+DO_SSH_PRIVATE_KEY_PATH = os.getenv("DO_SSH_PRIVATE_KEY_PATH", "").strip()
+DO_SSH_USER = os.getenv("DO_SSH_USER", "root").strip() or "root"
+DO_BOOTSTRAP_TIMEOUT_SEC = max(60, int(os.getenv("DO_BOOTSTRAP_TIMEOUT_SEC", "600")))
+DO_SPACES_BUCKET = os.getenv("DO_SPACES_BUCKET", "")
+DO_SPACES_REGION = os.getenv("DO_SPACES_REGION", "sgp1")
+DO_SPACES_KEY = os.getenv("DO_SPACES_KEY", "").strip()
+DO_SPACES_SECRET = os.getenv("DO_SPACES_SECRET", "").strip()
+DO_SPACES_ENDPOINT = os.getenv("DO_SPACES_ENDPOINT", f"https://{DO_SPACES_REGION}.digitaloceanspaces.com").rstrip("/")
+DO_DEFAULT_CPU_SIZE = os.getenv("DO_DEFAULT_CPU_SIZE", "s-16vcpu-32gb").strip()
+DO_CPU_MIN_VCPUS = max(1, int(os.getenv("DO_CPU_MIN_VCPUS", "8")))
+DO_CPU_MIN_MEMORY_MB = max(1024, int(os.getenv("DO_CPU_MIN_MEMORY_MB", "16384")))
+DO_TRAIN_BASE_MINUTES = max(1, int(os.getenv("DO_TRAIN_BASE_MINUTES", "10")))
+DO_TRAIN_ROWS_PER_MIN_GPU = max(1, int(os.getenv("DO_TRAIN_ROWS_PER_MIN_GPU", "320")))
+DO_TRAIN_ROWS_PER_MIN_CPU = max(1, int(os.getenv("DO_TRAIN_ROWS_PER_MIN_CPU", "180")))
+DO_TELEMETRY_INTERVAL_SEC = max(10, int(os.getenv("DO_TELEMETRY_INTERVAL_SEC", "30")))
 
 
 def build_job_meta(
@@ -527,7 +609,9 @@ class MlflowCandidateReviewRequest(BaseModel):
 
 
 class MlflowManualExportBundleRequest(BaseModel):
-    batch_id: str = Field(min_length=1)
+    batch_id: Optional[str] = None
+    scope: Literal["all_batches", "batch"] = "all_batches"
+    bundle_profile: Literal["clean_victsd_gold", "full_bundle"] = "clean_victsd_gold"
     dataset_version: Optional[str] = None
     model_version: Optional[str] = None
     policy_version: Optional[str] = None
@@ -544,7 +628,11 @@ class MlflowManualImportArtifactRequest(BaseModel):
 class MlflowDOTriggerRequest(BaseModel):
     batch_id: Optional[str] = None
     provider: str = Field(default="digitalocean", min_length=1)
-    gpu_profile: str = Field(default="gpu-placeholder", min_length=1)
+    gpu_profile: str = Field(default=DO_DEFAULT_GPU_SIZE, min_length=1)
+    compute_mode: Literal["gpu", "cpu", "local_m1"] = "gpu"
+    training_mode: Literal["retrain", "finetune"] = "retrain"
+    base_model: Optional[str] = None
+    cpu_profile: Optional[str] = None
     dry_run: bool = True
 
 
@@ -609,13 +697,32 @@ def list_all_models(model_root: Path) -> List[Dict[str, str]]:
     return models
 
 
+def _is_deprecated_model_name(name: str) -> bool:
+    return "deprecated" in name.lower()
+
+
 def get_default_model_id(model_root: Path) -> Optional[str]:
     phobert_models = list_models_by_type(model_root, "phobert")
+    non_deprecated_phobert = [m for m in phobert_models if not _is_deprecated_model_name(m)]
+
+    preferred_phobert = "finetune_phobert_focalgamma_2"
+    if preferred_phobert in non_deprecated_phobert:
+        return f"phobert/{preferred_phobert}"
+
+    if non_deprecated_phobert:
+        if "v2" in non_deprecated_phobert:
+            return "phobert/v2"
+        return f"phobert/{non_deprecated_phobert[0]}"
+
     if phobert_models:
         if "v2" in phobert_models:
             return "phobert/v2"
         return f"phobert/{phobert_models[0]}"
+
     all_models = list_all_models(model_root)
+    non_deprecated_all = [m for m in all_models if not _is_deprecated_model_name(str(m.get("name") or ""))]
+    if non_deprecated_all:
+        return str(non_deprecated_all[0].get("id") or "") or None
     if not all_models:
         return None
     return all_models[0]["id"]
@@ -636,6 +743,65 @@ def validate_model_artifacts(model_type: str, model_dir: Path) -> None:
         raise FileNotFoundError(
             f"Checkpoint folder missing: {', '.join(missing)}. Files found: {files}"
         )
+
+
+MODEL_IMPORT_MAX_ZIP_BYTES = int(os.getenv("MODEL_IMPORT_MAX_ZIP_BYTES", str(512 * 1024 * 1024)))
+MODEL_IMPORT_MAX_TOTAL_UNCOMPRESSED_BYTES = int(
+    os.getenv("MODEL_IMPORT_MAX_TOTAL_UNCOMPRESSED_BYTES", str(2 * 1024 * 1024 * 1024))
+)
+MODEL_IMPORT_MAX_FILES = int(os.getenv("MODEL_IMPORT_MAX_FILES", "5000"))
+
+
+def _sanitize_import_model_name(raw_name: str) -> str:
+    name = (raw_name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="model_name is required")
+    if len(name) > 80:
+        raise HTTPException(status_code=400, detail="model_name is too long (max 80)")
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", name):
+        raise HTTPException(status_code=400, detail="model_name contains invalid characters")
+    if ".." in name or "/" in name or "\\" in name:
+        raise HTTPException(status_code=400, detail="Invalid model_name")
+    return name
+
+
+def _validate_model_import_zip(zf: zipfile.ZipFile) -> None:
+    members = zf.infolist()
+    if len(members) == 0:
+        raise HTTPException(status_code=400, detail="ZIP is empty")
+    if len(members) > MODEL_IMPORT_MAX_FILES:
+        raise HTTPException(status_code=400, detail="ZIP has too many files")
+
+    total_uncompressed = 0
+    for info in members:
+        filename = info.filename or ""
+        pure = Path(filename)
+        if not filename or pure.is_absolute() or ".." in pure.parts:
+            raise HTTPException(status_code=400, detail="ZIP contains unsafe path")
+
+        mode = (info.external_attr >> 16) & 0o170000
+        if mode == 0o120000:
+            raise HTTPException(status_code=400, detail="ZIP symlinks are not allowed")
+
+        total_uncompressed += max(0, int(info.file_size))
+        if total_uncompressed > MODEL_IMPORT_MAX_TOTAL_UNCOMPRESSED_BYTES:
+            raise HTTPException(status_code=400, detail="ZIP uncompressed size exceeds limit")
+
+
+def _find_imported_model_dir(extracted_root: Path) -> Path:
+    candidates: List[Path] = [extracted_root]
+    for child in extracted_root.iterdir():
+        if child.is_dir() and not child.name.startswith("."):
+            candidates.append(child)
+
+    for candidate in candidates:
+        try:
+            validate_model_artifacts("phobert", candidate)
+            return candidate
+        except Exception:
+            continue
+
+    raise HTTPException(status_code=400, detail="ZIP does not contain a valid PhoBERT model directory")
 
 
 def parse_model_id(model_id: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
@@ -1652,6 +1818,12 @@ def init_feedback_db() -> None:
         ensure_table_column(conn, "mlflow_comment_item", "label_source", "TEXT")
         ensure_table_column(conn, "mlflow_comment_item", "label_confidence", "TEXT")
         ensure_table_column(conn, "mlflow_comment_item", "domain_category", "TEXT")
+        ensure_table_column(conn, "mlflow_do_run", "droplet_id", "TEXT")
+        ensure_table_column(conn, "mlflow_do_run", "artifact_uri", "TEXT")
+        ensure_table_column(conn, "mlflow_do_run", "artifact_checksum", "TEXT")
+        ensure_table_column(conn, "mlflow_do_run", "spaces_bucket", "TEXT")
+        ensure_table_column(conn, "mlflow_do_run", "spaces_key", "TEXT")
+        ensure_table_column(conn, "mlflow_do_run", "error_message", "TEXT")
 
         seed_training_tracker_default(conn)
         conn.commit()
@@ -3033,14 +3205,1479 @@ def build_mlflow_gate_counts(conn: sqlite3.Connection, batch_id: str) -> Dict[st
     return counts
 
 
-def build_mlflow_required_bundle_contents() -> List[str]:
+def build_mlflow_required_bundle_contents(bundle_profile: str = "clean_victsd_gold") -> List[str]:
+    if bundle_profile == "full_bundle":
+        return [
+            "dataset/accepted_pseudo.jsonl",
+            "dataset/candidates_unverified.jsonl",
+            "dataset/victsd_gold/train.jsonl",
+            "dataset/victsd_gold/validation.jsonl",
+            "dataset/victsd_gold/test.jsonl",
+            "manifest.json",
+            "config/training_config.yaml",
+            "config/gate_policy.json",
+        ]
+
     return [
-        "dataset/accepted_pseudo.jsonl",
-        "dataset/candidates_unverified.jsonl",
-        "manifest.json",
-        "config/training_config.yaml",
-        "config/gate_policy.json",
+        "train.jsonl",
+        "validation.jsonl",
+        "test.jsonl",
+        "build_report.json",
     ]
+
+
+def normalize_training_text(text: str) -> str:
+    value = unicodedata.normalize("NFC", (text or "").strip())
+    return " ".join(value.split())
+
+
+def load_victsd_gold_split(split_name: str) -> List[Dict[str, Any]]:
+    dataset_dir = resolve_dataset_dir("victsd_gold")
+    path = dataset_dir / f"{split_name}.jsonl"
+    if not path.exists():
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": "Missing victsd_gold split file",
+                "split": split_name,
+                "path": str(path.relative_to(BASE_DIR)),
+            },
+        )
+
+    rows: List[Dict[str, Any]] = []
+    with path.open("r", encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "message": "Invalid JSONL in victsd_gold split",
+                        "split": split_name,
+                        "error": str(exc),
+                    },
+                ) from exc
+            if not isinstance(obj, dict):
+                continue
+            text_value = obj.get("text")
+            toxicity_value = obj.get("toxicity")
+            if not isinstance(text_value, str):
+                continue
+            if toxicity_value not in (0, 1):
+                continue
+            rows.append(obj)
+    return rows
+
+
+def do_headers() -> Dict[str, str]:
+    token = os.getenv("DO_API_TOKEN", "").strip()
+    if not token:
+        raise HTTPException(status_code=500, detail="DO_API_TOKEN is not configured")
+    return {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+
+
+def _do_format_http_error(exc: urllib.error.HTTPError) -> str:
+    raw_error = ""
+    try:
+        raw_error = (exc.read() or b"").decode("utf-8", errors="replace")
+    except Exception:
+        raw_error = ""
+
+    err_id = ""
+    message = ""
+    request_id = ""
+    details = ""
+    if raw_error:
+        try:
+            payload = json.loads(raw_error)
+            if isinstance(payload, dict):
+                err_id = str(payload.get("id") or "").strip()
+                message = str(payload.get("message") or "").strip()
+                request_id = str(payload.get("request_id") or "").strip()
+                details_value = payload.get("details")
+                if isinstance(details_value, str):
+                    details = details_value.strip()
+                elif isinstance(details_value, dict):
+                    details = json.dumps(details_value, ensure_ascii=False)
+                elif isinstance(details_value, list):
+                    details = json.dumps(details_value, ensure_ascii=False)
+        except json.JSONDecodeError:
+            message = raw_error.strip()
+
+    parts = [f"DigitalOcean API error {exc.code}"]
+    if err_id:
+        parts.append(f"id={err_id}")
+    if message:
+        parts.append(f"message={message}")
+    if details:
+        parts.append(f"details={details}")
+    if request_id:
+        parts.append(f"request_id={request_id}")
+
+    return " | ".join(parts)
+
+
+def do_call(method: str, path: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    if path.startswith("http://") or path.startswith("https://"):
+        url = path
+    else:
+        url = f"{DO_API_BASE}{path}"
+    body = None if payload is None else json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(url=url, method=method.upper(), headers=do_headers(), data=body)
+    try:
+        with urllib.request.urlopen(req, timeout=40) as resp:
+            raw = resp.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=_do_format_http_error(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"DigitalOcean API request failed: {exc}") from exc
+
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _do_next_page_url(payload: Dict[str, Any]) -> Optional[str]:
+    links = payload.get("links") if isinstance(payload.get("links"), dict) else None
+    pages = links.get("pages") if isinstance(links, dict) and isinstance(links.get("pages"), dict) else None
+    next_link = pages.get("next") if isinstance(pages, dict) else None
+    if not isinstance(next_link, str) or not next_link.strip():
+        return None
+    return next_link.strip()
+
+
+def _do_is_gpu_size(size_item: Dict[str, Any]) -> bool:
+    slug = str(size_item.get("slug") or "").lower()
+    description = str(size_item.get("description") or "").lower()
+    text = f"{slug} {description}"
+    gpu_markers = ["gpu", "h100", "a100", "l40", "v100", "nvidia", "tesla", "rtx"]
+    return any(marker in text for marker in gpu_markers)
+
+
+def _do_list_sizes(region: str) -> List[Dict[str, Any]]:
+    sizes: List[Dict[str, Any]] = []
+    next_url: Optional[str] = f"/sizes?per_page=200"
+    seen: set[str] = set()
+
+    while next_url:
+        if next_url in seen:
+            break
+        seen.add(next_url)
+
+        payload = do_call("GET", next_url)
+        page_sizes = payload.get("sizes") if isinstance(payload.get("sizes"), list) else []
+        for item in page_sizes:
+            if not isinstance(item, dict):
+                continue
+            regions = item.get("regions") if isinstance(item.get("regions"), list) else []
+            if region not in [str(r) for r in regions]:
+                continue
+            if not bool(item.get("available", False)):
+                continue
+            sizes.append(item)
+
+        next_link = _do_next_page_url(payload)
+        if not next_link:
+            next_url = None
+        else:
+            parsed = urllib.parse.urlparse(next_link)
+            if parsed.netloc:
+                next_url = next_link
+            elif parsed.path:
+                next_url = parsed.path + (f"?{parsed.query}" if parsed.query else "")
+            else:
+                next_url = None
+
+    return sizes
+
+
+def _do_extract_ssh_key_material(public_key: str) -> str:
+    parts = [p for p in str(public_key or "").strip().split() if p]
+    if len(parts) < 2:
+        return ""
+    return parts[1]
+
+
+def _do_read_local_public_key_material() -> str:
+    if not DO_SSH_PRIVATE_KEY_PATH:
+        return ""
+    private_path = Path(DO_SSH_PRIVATE_KEY_PATH).expanduser()
+    public_path = Path(f"{private_path}.pub")
+    if not public_path.exists() or not public_path.is_file():
+        return ""
+    try:
+        for line in public_path.read_text(encoding="utf-8").splitlines():
+            material = _do_extract_ssh_key_material(line)
+            if material:
+                return material
+    except Exception:
+        return ""
+    return ""
+
+
+def _do_list_account_ssh_keys() -> List[Dict[str, Any]]:
+    keys: List[Dict[str, Any]] = []
+    next_url: Optional[str] = "/account/keys?per_page=200"
+    seen: set[str] = set()
+
+    while next_url:
+        if next_url in seen:
+            break
+        seen.add(next_url)
+
+        payload = do_call("GET", next_url)
+        page_keys = payload.get("ssh_keys") if isinstance(payload.get("ssh_keys"), list) else []
+        for item in page_keys:
+            if not isinstance(item, dict):
+                continue
+            key_id_raw = item.get("id")
+            key_id: Optional[int] = None
+            if isinstance(key_id_raw, int):
+                key_id = key_id_raw
+            elif isinstance(key_id_raw, str) and key_id_raw.strip().isdigit():
+                key_id = int(key_id_raw.strip())
+            key_fp = str(item.get("fingerprint") or "").strip()
+            key_name = str(item.get("name") or "").strip()
+            key_material = _do_extract_ssh_key_material(str(item.get("public_key") or ""))
+            keys.append(
+                {
+                    "id": key_id,
+                    "fingerprint": key_fp,
+                    "name": key_name,
+                    "material": key_material,
+                }
+            )
+
+        next_link = _do_next_page_url(payload)
+        if not next_link:
+            next_url = None
+        else:
+            parsed = urllib.parse.urlparse(next_link)
+            if parsed.netloc:
+                next_url = next_link
+            elif parsed.path:
+                next_url = parsed.path + (f"?{parsed.query}" if parsed.query else "")
+            else:
+                next_url = None
+
+    return keys
+
+
+def _do_resolve_ssh_keys_for_droplet(configured_identifiers: List[str]) -> Dict[str, Any]:
+    account_keys = _do_list_account_ssh_keys()
+    if not account_keys:
+        raise RuntimeError(
+            "No SSH keys found in DigitalOcean account. Add at least one key in DO, then set DO_SSH_KEY_IDS to a valid id/fingerprint."
+        )
+
+    by_id: Dict[str, Dict[str, Any]] = {}
+    by_fingerprint: Dict[str, Dict[str, Any]] = {}
+    by_material: Dict[str, Dict[str, Any]] = {}
+    for key in account_keys:
+        key_id = key.get("id")
+        if key_id is not None:
+            by_id[str(key_id)] = key
+        fingerprint = str(key.get("fingerprint") or "").strip()
+        if fingerprint:
+            by_fingerprint[fingerprint] = key
+        material = str(key.get("material") or "").strip()
+        if material:
+            by_material[material] = key
+
+    invalid_identifiers: List[str] = []
+    resolved_raw: List[Any] = []
+    resolved_seen: set[str] = set()
+    for raw in configured_identifiers:
+        token = str(raw or "").strip()
+        if not token:
+            continue
+        key = by_id.get(token) or by_fingerprint.get(token)
+        if key is None:
+            invalid_identifiers.append(token)
+            continue
+
+        key_id = key.get("id")
+        identifier: Any
+        if key_id is not None:
+            identifier = int(key_id)
+        else:
+            identifier = str(key.get("fingerprint") or token)
+
+        marker = str(identifier)
+        if marker in resolved_seen:
+            continue
+        resolved_seen.add(marker)
+        resolved_raw.append(identifier)
+
+    warnings: List[str] = []
+    if invalid_identifiers:
+        warnings.append(
+            "Ignoring invalid DO_SSH_KEY_IDS entries: " + ", ".join(invalid_identifiers)
+        )
+
+    if resolved_raw:
+        return {
+            "ssh_keys": resolved_raw,
+            "selection_reason": "configured_ids",
+            "warnings": warnings,
+            "invalid_identifiers": invalid_identifiers,
+        }
+
+    local_material = _do_read_local_public_key_material()
+    if local_material and local_material in by_material:
+        key = by_material[local_material]
+        key_id = key.get("id")
+        fallback_identifier: Any = int(key_id) if key_id is not None else str(key.get("fingerprint") or "")
+        if not fallback_identifier:
+            raise RuntimeError("Local SSH key matched account key but identifier is missing")
+
+        warnings.append("Configured DO_SSH_KEY_IDS did not match account keys; using key derived from DO_SSH_PRIVATE_KEY_PATH.pub")
+        return {
+            "ssh_keys": [fallback_identifier],
+            "selection_reason": "matched_local_pubkey",
+            "warnings": warnings,
+            "invalid_identifiers": invalid_identifiers,
+        }
+
+    available_ids = [str(k.get("id")) for k in account_keys if k.get("id") is not None]
+    preview = ", ".join(available_ids[:8])
+    suffix = "..." if len(available_ids) > 8 else ""
+    raise RuntimeError(
+        "Configured DO_SSH_KEY_IDS are invalid for current DO token. "
+        f"Available key ids: {preview}{suffix}. "
+        "Update DO_SSH_KEY_IDS (or ensure DO_SSH_PRIVATE_KEY_PATH.pub matches an account key)."
+    )
+
+
+def _do_pick_cpu_size(preferred_slug: Optional[str], region: str) -> Dict[str, Any]:
+    sizes = _do_list_sizes(region)
+    cpu_sizes = [item for item in sizes if not _do_is_gpu_size(item)]
+    if not cpu_sizes:
+        raise RuntimeError(f"No CPU droplet size available in region {region}")
+
+    preferred = (preferred_slug or "").strip()
+    if preferred:
+        for item in cpu_sizes:
+            if str(item.get("slug") or "") == preferred:
+                return {
+                    "slug": preferred,
+                    "reason": "user_selected",
+                    "vcpus": int(item.get("vcpus") or 0),
+                    "memory": int(item.get("memory") or 0),
+                    "price_monthly": float(item.get("price_monthly") or 0.0),
+                }
+
+    high_tier_candidates = [
+        item
+        for item in cpu_sizes
+        if int(item.get("vcpus") or 0) >= 16 and int(item.get("memory") or 0) >= 32768
+    ]
+    if high_tier_candidates:
+        high_tier_candidates.sort(
+            key=lambda item: (
+                int(item.get("vcpus") or 0),
+                int(item.get("memory") or 0),
+                -float(item.get("price_monthly") or 10**9),
+            ),
+            reverse=True,
+        )
+        picked = high_tier_candidates[0]
+        return {
+            "slug": str(picked.get("slug") or ""),
+            "reason": "auto_high_tier",
+            "vcpus": int(picked.get("vcpus") or 0),
+            "memory": int(picked.get("memory") or 0),
+            "price_monthly": float(picked.get("price_monthly") or 0.0),
+        }
+
+    threshold_candidates = [
+        item
+        for item in cpu_sizes
+        if int(item.get("vcpus") or 0) >= DO_CPU_MIN_VCPUS and int(item.get("memory") or 0) >= DO_CPU_MIN_MEMORY_MB
+    ]
+
+    if threshold_candidates:
+        threshold_candidates.sort(
+            key=lambda item: (
+                int(item.get("vcpus") or 0),
+                int(item.get("memory") or 0),
+                -float(item.get("price_monthly") or 10**9),
+            ),
+            reverse=True,
+        )
+        picked = threshold_candidates[0]
+        return {
+            "slug": str(picked.get("slug") or ""),
+            "reason": "auto_threshold",
+            "vcpus": int(picked.get("vcpus") or 0),
+            "memory": int(picked.get("memory") or 0),
+            "price_monthly": float(picked.get("price_monthly") or 0.0),
+        }
+
+    cpu_sizes.sort(
+        key=lambda item: (
+            -int(item.get("vcpus") or 0),
+            -int(item.get("memory") or 0),
+            float(item.get("price_monthly") or 10**9),
+        )
+    )
+    fallback = cpu_sizes[0]
+    return {
+        "slug": str(fallback.get("slug") or ""),
+        "reason": "auto_best_effort",
+        "vcpus": int(fallback.get("vcpus") or 0),
+        "memory": int(fallback.get("memory") or 0),
+        "price_monthly": float(fallback.get("price_monthly") or 0.0),
+    }
+
+
+def _do_resolve_profile(request: "MlflowDOTriggerRequest") -> Dict[str, Any]:
+    compute_mode = (request.compute_mode or "gpu").strip().lower()
+    if compute_mode not in {"gpu", "cpu", "local_m1"}:
+        compute_mode = "gpu"
+
+    if compute_mode == "local_m1":
+        return {
+            "compute_mode": "local_m1",
+            "size_slug": "local-m1",
+            "selection_reason": "local_m1",
+            "vcpus": None,
+            "memory": None,
+            "price_monthly": None,
+        }
+
+    if compute_mode == "cpu":
+        preferred_cpu = (request.cpu_profile or "").strip() or DO_DEFAULT_CPU_SIZE
+        cpu_pick = _do_pick_cpu_size(preferred_cpu, DO_DEFAULT_REGION)
+        if not cpu_pick.get("slug"):
+            raise RuntimeError("Unable to resolve CPU droplet size")
+        return {
+            "compute_mode": "cpu",
+            "size_slug": str(cpu_pick.get("slug") or ""),
+            "selection_reason": str(cpu_pick.get("reason") or "auto_threshold"),
+            "vcpus": int(cpu_pick.get("vcpus") or 0),
+            "memory": int(cpu_pick.get("memory") or 0),
+            "price_monthly": float(cpu_pick.get("price_monthly") or 0.0),
+        }
+
+    gpu_size = (request.gpu_profile or "").strip()
+    if not gpu_size or "placeholder" in gpu_size.lower():
+        gpu_size = DO_DEFAULT_GPU_SIZE
+
+    return {
+        "compute_mode": "gpu",
+        "size_slug": gpu_size,
+        "selection_reason": "request_gpu_profile",
+        "vcpus": None,
+        "memory": None,
+        "price_monthly": None,
+    }
+
+
+def _do_estimate_train_minutes(train_rows: int, compute_mode: str, cpu_vcpus: Optional[int] = None) -> int:
+    if compute_mode == "gpu":
+        rate = DO_TRAIN_ROWS_PER_MIN_GPU
+    else:
+        vcpus = max(1, int(cpu_vcpus or 1))
+        rate = DO_TRAIN_ROWS_PER_MIN_CPU * vcpus
+    dynamic = int(math.ceil(max(0, train_rows) / max(1, rate)))
+    return max(1, DO_TRAIN_BASE_MINUTES + dynamic)
+
+
+def _do_extract_train_rows(bundle_meta: Dict[str, Any]) -> int:
+    merge_stats = bundle_meta.get("merge_stats") if isinstance(bundle_meta.get("merge_stats"), dict) else {}
+    candidates = [
+        merge_stats.get("final_train_count"),
+        bundle_meta.get("count"),
+        merge_stats.get("added_to_train"),
+    ]
+    for value in candidates:
+        try:
+            rows = int(value)
+            if rows > 0:
+                return rows
+        except Exception:
+            continue
+    return 0
+
+
+def _do_parse_kv_line(line: str, prefix: str) -> Dict[str, str]:
+    if not line.startswith(prefix):
+        return {}
+    payload = line[len(prefix) :].strip()
+    if not payload:
+        return {}
+
+    result: Dict[str, str] = {}
+    for token in payload.split():
+        if "=" not in token:
+            continue
+        key, value = token.split("=", 1)
+        if not key:
+            continue
+        result[key.strip()] = value.strip()
+    return result
+
+
+def _do_extract_runtime_metadata(logs: List[str]) -> Dict[str, Any]:
+    output: Dict[str, Any] = {}
+    for line in logs:
+        meta = _do_parse_kv_line(line, "[META]")
+        if meta:
+            output["compute_mode"] = meta.get("compute_mode") or output.get("compute_mode")
+            output["droplet_profile"] = meta.get("droplet_size") or output.get("droplet_profile")
+            output["training_mode"] = meta.get("training_mode") or output.get("training_mode")
+            output["base_model"] = meta.get("base_model") or output.get("base_model")
+
+        eta = _do_parse_kv_line(line, "[ETA]")
+        if eta and eta.get("estimate_minutes"):
+            try:
+                output["eta_estimate_minutes"] = int(eta["estimate_minutes"])
+            except Exception:
+                pass
+
+        timing = _do_parse_kv_line(line, "[TIMING]")
+        if timing:
+            if timing.get("train_started_at"):
+                output["train_started_at"] = timing.get("train_started_at")
+            if timing.get("train_finished_at"):
+                output["train_finished_at"] = timing.get("train_finished_at")
+            if timing.get("duration_minutes"):
+                try:
+                    output["train_duration_minutes"] = float(timing["duration_minutes"])
+                except Exception:
+                    pass
+
+        telemetry = _do_parse_kv_line(line, "[TELEMETRY]")
+        if telemetry:
+            if telemetry.get("sampled_at"):
+                output["telemetry_last_sample_at"] = telemetry.get("sampled_at")
+            if telemetry.get("interval_sec"):
+                try:
+                    output["telemetry_interval_sec"] = int(telemetry["interval_sec"])
+                except Exception:
+                    pass
+            if telemetry.get("cpu_pct"):
+                try:
+                    output["cpu_percent"] = float(telemetry["cpu_pct"])
+                except Exception:
+                    pass
+            if telemetry.get("memory_pct"):
+                try:
+                    output["memory_percent"] = float(telemetry["memory_pct"])
+                except Exception:
+                    pass
+
+    return output
+
+
+def _do_resolve_training_mode(request: "MlflowDOTriggerRequest") -> str:
+    mode = (request.training_mode or "retrain").strip().lower()
+    if mode not in {"retrain", "finetune"}:
+        return "retrain"
+    return mode
+
+
+def _do_resolve_base_model(request: "MlflowDOTriggerRequest") -> Optional[str]:
+    raw = (request.base_model or "").strip()
+    if not raw:
+        return None
+    if any(x in raw for x in ("..", "\\")):
+        raise RuntimeError("Invalid base_model")
+    return raw
+
+
+def _do_select_training_script(training_mode: str) -> Path:
+    script_name = "06_train_phobert_lora_macro_f1_finetune.py" if training_mode == "finetune" else "06_train_phobert_lora_macro_f1.py"
+    train_script = BASE_DIR / "scripts" / script_name
+    if not train_script.exists():
+        raise RuntimeError(f"Training script not found: scripts/{script_name}")
+    return train_script
+
+
+def _mlflow_stages_for_mode(compute_mode: Optional[str]) -> List[str]:
+    mode = (compute_mode or "").strip().lower()
+    if mode == "local_m1":
+        return LOCAL_M1_STAGES
+    return DO_STAGES
+
+
+def _do_get_run(conn: sqlite3.Connection, run_id: str) -> Optional[sqlite3.Row]:
+    conn.row_factory = sqlite3.Row
+    return conn.execute(
+        """
+        SELECT run_id, batch_id, provider, gpu_profile, status, current_stage, logs_json,
+               created_at, updated_at, droplet_id, artifact_uri, artifact_checksum,
+               spaces_bucket, spaces_key, error_message
+        FROM mlflow_do_run
+        WHERE run_id = ?
+        """,
+        (run_id,),
+    ).fetchone()
+
+
+def _do_extract_droplet_ipv4(droplet_id: str) -> Optional[str]:
+    details = do_call("GET", f"/droplets/{droplet_id}")
+    droplet = details.get("droplet") if isinstance(details, dict) else None
+    if not isinstance(droplet, dict):
+        return None
+
+    networks = droplet.get("networks") if isinstance(droplet.get("networks"), dict) else {}
+    v4 = networks.get("v4") if isinstance(networks.get("v4"), list) else []
+    for item in v4:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") == "public" and item.get("ip_address"):
+            return str(item.get("ip_address"))
+    return None
+
+
+def _do_wait_for_ssh(droplet_id: str, timeout_sec: int) -> str:
+    start = time.time()
+    while time.time() - start < timeout_sec:
+        ip_addr = _do_extract_droplet_ipv4(droplet_id)
+        if ip_addr:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(3)
+            try:
+                sock.connect((ip_addr, 22))
+                sock.close()
+                return ip_addr
+            except Exception:
+                pass
+            finally:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+        time.sleep(5)
+    raise RuntimeError("Timed out waiting for droplet SSH readiness")
+
+
+def _do_run_cmd(cmd: List[str], cwd: Optional[Path] = None) -> str:
+    try:
+        completed = subprocess.run(
+            cmd,
+            cwd=str(cwd) if cwd else None,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            check=True,
+        )
+        return completed.stdout or ""
+    except subprocess.CalledProcessError as exc:
+        output = exc.stdout or ""
+        raise RuntimeError(f"Command failed ({' '.join(cmd)}): {output[-1200:]}") from exc
+
+
+def _do_ssh_base(ip_addr: str) -> List[str]:
+    if not DO_SSH_PRIVATE_KEY_PATH:
+        raise RuntimeError("DO_SSH_PRIVATE_KEY_PATH is required for SSH bootstrap")
+    return [
+        "ssh",
+        "-i",
+        DO_SSH_PRIVATE_KEY_PATH,
+        "-o",
+        "StrictHostKeyChecking=no",
+        "-o",
+        "UserKnownHostsFile=/dev/null",
+        f"{DO_SSH_USER}@{ip_addr}",
+    ]
+
+
+def _do_scp_base() -> List[str]:
+    if not DO_SSH_PRIVATE_KEY_PATH:
+        raise RuntimeError("DO_SSH_PRIVATE_KEY_PATH is required for SCP")
+    return [
+        "scp",
+        "-i",
+        DO_SSH_PRIVATE_KEY_PATH,
+        "-o",
+        "StrictHostKeyChecking=no",
+        "-o",
+        "UserKnownHostsFile=/dev/null",
+    ]
+
+
+def _do_upload_file_to_vm(local_path: Path, ip_addr: str, remote_path: str) -> None:
+    scp_cmd = _do_scp_base() + [str(local_path), f"{DO_SSH_USER}@{ip_addr}:{remote_path}"]
+    _do_run_cmd(scp_cmd)
+
+
+def _do_ssh_exec(ip_addr: str, command: str) -> str:
+    return _do_run_cmd(_do_ssh_base(ip_addr) + [command])
+
+
+def _do_collect_vm_telemetry(ip_addr: str) -> Optional[Dict[str, float]]:
+    cmd = (
+        "CPU_LINE_1=$(grep '^cpu ' /proc/stat) && "
+        "IDLE1=$(echo \"$CPU_LINE_1\" | awk '{print $5+$6}') && "
+        "TOTAL1=$(echo \"$CPU_LINE_1\" | awk '{sum=0; for(i=2;i<=NF;i++) sum+=$i; print sum}') && "
+        "sleep 1 && "
+        "CPU_LINE_2=$(grep '^cpu ' /proc/stat) && "
+        "IDLE2=$(echo \"$CPU_LINE_2\" | awk '{print $5+$6}') && "
+        "TOTAL2=$(echo \"$CPU_LINE_2\" | awk '{sum=0; for(i=2;i<=NF;i++) sum+=$i; print sum}') && "
+        "CPU_PCT=$(awk -v idle1=\"$IDLE1\" -v idle2=\"$IDLE2\" -v total1=\"$TOTAL1\" -v total2=\"$TOTAL2\" 'BEGIN{dt=total2-total1; di=idle2-idle1; if(dt<=0){printf \"0.00\"} else {printf \"%.2f\", (dt-di)*100/dt}}') && "
+        "MEM_TOTAL_KB=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo) && "
+        "MEM_AVAIL_KB=$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo) && "
+        "MEM_PCT=$(awk -v total=\"$MEM_TOTAL_KB\" -v avail=\"$MEM_AVAIL_KB\" 'BEGIN{if(total<=0){printf \"0.00\"} else {printf \"%.2f\", (total-avail)*100/total}}') && "
+        "echo \"cpu_pct=$CPU_PCT memory_pct=$MEM_PCT\""
+    )
+    try:
+        output = _do_ssh_exec(ip_addr, cmd)
+    except Exception:
+        return None
+
+    for raw_line in reversed(output.splitlines()):
+        line = raw_line.strip()
+        if not line:
+            continue
+        match = re.search(r"cpu_pct=([0-9]+(?:\.[0-9]+)?)\s+memory_pct=([0-9]+(?:\.[0-9]+)?)", line)
+        if not match:
+            continue
+        try:
+            return {
+                "cpu_pct": float(match.group(1)),
+                "memory_pct": float(match.group(2)),
+            }
+        except Exception:
+            return None
+    return None
+
+
+def _do_build_training_bundle_locally(batch_id: Optional[str]) -> Tuple[Path, Dict[str, Any]]:
+    payload = MlflowManualExportBundleRequest(
+        batch_id=batch_id,
+        scope="batch" if batch_id else "all_batches",
+        bundle_profile="full_bundle",
+        include_unused=False,
+    )
+    result = mlflow_manual_export_bundle(payload)
+    rel = result.get("bundle_path")
+    if not isinstance(rel, str) or not rel.strip():
+        raise RuntimeError("Failed to create local export bundle for DO training")
+    bundle_path = (BASE_DIR / rel).resolve()
+    if not bundle_path.exists():
+        raise RuntimeError(f"Local bundle not found after export: {bundle_path}")
+    return bundle_path, result
+
+
+def _do_spaces_upload(local_file: Path, object_key: str) -> str:
+    if not DO_SPACES_BUCKET:
+        raise RuntimeError("DO_SPACES_BUCKET is required")
+    if not DO_SPACES_KEY or not DO_SPACES_SECRET:
+        raise RuntimeError("DO_SPACES_KEY and DO_SPACES_SECRET are required")
+
+    endpoint = DO_SPACES_ENDPOINT
+    dst = f"s3://{DO_SPACES_BUCKET}/{object_key}"
+    cmd = [
+        "aws",
+        "s3",
+        "cp",
+        str(local_file),
+        dst,
+        "--endpoint-url",
+        endpoint,
+    ]
+    env = os.environ.copy()
+    env["AWS_ACCESS_KEY_ID"] = DO_SPACES_KEY
+    env["AWS_SECRET_ACCESS_KEY"] = DO_SPACES_SECRET
+    env["AWS_DEFAULT_REGION"] = DO_SPACES_REGION
+
+    try:
+        completed = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env=env,
+            check=True,
+        )
+        _ = completed.stdout
+    except FileNotFoundError as exc:
+        raise RuntimeError("aws CLI not found. Install awscli to upload artifact to Spaces") from exc
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(f"Spaces upload failed: {(exc.stdout or '')[-1200:]}") from exc
+
+    return f"https://{DO_SPACES_BUCKET}.{DO_SPACES_REGION}.digitaloceanspaces.com/{object_key}"
+
+
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        while True:
+            chunk = f.read(1024 * 1024)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _do_preflight_status() -> Dict[str, Any]:
+    key_path = Path(DO_SSH_PRIVATE_KEY_PATH).expanduser() if DO_SSH_PRIVATE_KEY_PATH else None
+    key_exists = bool(key_path and key_path.exists() and key_path.is_file())
+
+    required = {
+        "DO_API_TOKEN": bool(os.getenv("DO_API_TOKEN", "").strip()),
+        "DO_SSH_PRIVATE_KEY_PATH": bool(DO_SSH_PRIVATE_KEY_PATH),
+        "DO_SPACES_BUCKET": bool(DO_SPACES_BUCKET.strip()),
+        "DO_SPACES_KEY": bool(DO_SPACES_KEY.strip()),
+        "DO_SPACES_SECRET": bool(DO_SPACES_SECRET.strip()),
+    }
+
+    warnings: List[str] = []
+    if required["DO_SSH_PRIVATE_KEY_PATH"] and not key_exists:
+        warnings.append("SSH private key path is set but file is missing/unreadable.")
+
+    if key_exists and key_path is not None:
+        try:
+            mode = key_path.stat().st_mode & 0o777
+            if mode & 0o077:
+                warnings.append("SSH private key permissions are too open; use chmod 600.")
+        except Exception:
+            warnings.append("Unable to verify SSH private key permissions.")
+
+    if not DO_SSH_KEY_IDS:
+        warnings.append("DO_SSH_KEY_IDS is empty; droplet may be inaccessible over SSH.")
+
+    if DO_SPACES_REGION and DO_SPACES_ENDPOINT and DO_SPACES_REGION not in DO_SPACES_ENDPOINT:
+        warnings.append("DO_SPACES_ENDPOINT does not seem to match DO_SPACES_REGION.")
+
+    if DO_DEFAULT_CPU_SIZE and not DO_DEFAULT_CPU_SIZE.startswith("s-"):
+        warnings.append("DO_DEFAULT_CPU_SIZE should be a CPU slug (example: s-8vcpu-16gb).")
+
+    missing = [k for k, present in required.items() if not present]
+    ready = len(missing) == 0 and key_exists
+
+    return {
+        "ready": ready,
+        "missing": missing,
+        "warnings": warnings,
+        "checks": {
+            "has_do_api_token": required["DO_API_TOKEN"],
+            "has_ssh_private_key_path": required["DO_SSH_PRIVATE_KEY_PATH"],
+            "ssh_private_key_exists": key_exists,
+            "has_do_ssh_key_ids": len(DO_SSH_KEY_IDS) > 0,
+            "has_spaces_bucket": required["DO_SPACES_BUCKET"],
+            "has_spaces_key": required["DO_SPACES_KEY"],
+            "has_spaces_secret": required["DO_SPACES_SECRET"],
+        },
+        "config": {
+            "do_api_base": DO_API_BASE,
+            "do_default_region": DO_DEFAULT_REGION,
+            "do_default_image": DO_DEFAULT_IMAGE,
+            "do_default_gpu_size": DO_DEFAULT_GPU_SIZE,
+            "do_default_cpu_size": DO_DEFAULT_CPU_SIZE,
+            "do_cpu_min_vcpus": DO_CPU_MIN_VCPUS,
+            "do_cpu_min_memory_mb": DO_CPU_MIN_MEMORY_MB,
+            "do_ssh_user": DO_SSH_USER,
+            "do_bootstrap_timeout_sec": DO_BOOTSTRAP_TIMEOUT_SEC,
+            "do_spaces_region": DO_SPACES_REGION,
+            "do_spaces_endpoint": DO_SPACES_ENDPOINT,
+            "do_spaces_bucket": DO_SPACES_BUCKET,
+            "do_telemetry_interval_sec": DO_TELEMETRY_INTERVAL_SEC,
+        },
+    }
+
+
+def _do_update_run(
+    conn: sqlite3.Connection,
+    run_id: str,
+    *,
+    status: Optional[str] = None,
+    stage: Optional[str] = None,
+    logs: Optional[List[str]] = None,
+    gpu_profile: Optional[str] = None,
+    droplet_id: Optional[str] = None,
+    artifact_uri: Optional[str] = None,
+    artifact_checksum: Optional[str] = None,
+    spaces_bucket: Optional[str] = None,
+    spaces_key: Optional[str] = None,
+    error_message: Optional[str] = None,
+) -> None:
+    fields: List[str] = ["updated_at = ?"]
+    values: List[Any] = [datetime.utcnow().isoformat() + "Z"]
+    if status is not None:
+        fields.append("status = ?")
+        values.append(status)
+    if stage is not None:
+        fields.append("current_stage = ?")
+        values.append(stage)
+    if logs is not None:
+        fields.append("logs_json = ?")
+        values.append(json.dumps(logs, ensure_ascii=False))
+    if gpu_profile is not None:
+        fields.append("gpu_profile = ?")
+        values.append(gpu_profile)
+    if droplet_id is not None:
+        fields.append("droplet_id = ?")
+        values.append(droplet_id)
+    if artifact_uri is not None:
+        fields.append("artifact_uri = ?")
+        values.append(artifact_uri)
+    if artifact_checksum is not None:
+        fields.append("artifact_checksum = ?")
+        values.append(artifact_checksum)
+    if spaces_bucket is not None:
+        fields.append("spaces_bucket = ?")
+        values.append(spaces_bucket)
+    if spaces_key is not None:
+        fields.append("spaces_key = ?")
+        values.append(spaces_key)
+    if error_message is not None:
+        fields.append("error_message = ?")
+        values.append(error_message)
+
+    values.append(run_id)
+    conn.execute(f"UPDATE mlflow_do_run SET {', '.join(fields)} WHERE run_id = ?", tuple(values))
+
+
+def _do_load_logs(row: sqlite3.Row) -> List[str]:
+    raw_logs = row["logs_json"] if row else None
+    if not raw_logs:
+        return []
+    try:
+        parsed = json.loads(raw_logs)
+        if isinstance(parsed, list):
+            return [str(x) for x in parsed]
+    except Exception:
+        return []
+    return []
+
+
+def _do_append_log(conn: sqlite3.Connection, run_id: str, message: str) -> None:
+    row = _do_get_run(conn, run_id)
+    logs = _do_load_logs(row) if row else []
+    logs.append(message)
+    _do_update_run(conn, run_id, logs=logs)
+
+
+def _simulate_local_m1_training_run(run_id: str, request: MlflowDOTriggerRequest) -> None:
+    try:
+        profile = _do_resolve_profile(request)
+        training_mode = _do_resolve_training_mode(request)
+        base_model = _do_resolve_base_model(request)
+        init_feedback_db()
+        with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+            _do_update_run(
+                conn,
+                run_id,
+                status="running",
+                stage=LOCAL_M1_STAGES[0],
+                gpu_profile=str(profile.get("size_slug") or "local-m1"),
+                error_message="",
+                artifact_uri="",
+                artifact_checksum="",
+                droplet_id="local-m1",
+            )
+            _do_update_run(conn, run_id, spaces_key="")
+            _do_append_log(conn, run_id, "Starting local M1 training pipeline...")
+            _do_append_log(
+                conn,
+                run_id,
+                (
+                    "[META] "
+                    "compute_mode=local_m1 "
+                    "droplet_size=local-m1 "
+                    "selection=local_m1 "
+                    f"training_mode={training_mode} "
+                    f"base_model={base_model or 'default'}"
+                ),
+            )
+            conn.commit()
+
+        bundle_path, bundle_meta = _do_build_training_bundle_locally(request.batch_id)
+        train_rows = _do_extract_train_rows(bundle_meta)
+        eta_minutes = _do_estimate_train_minutes(train_rows, "cpu", cpu_vcpus=os.cpu_count() or 1)
+
+        with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+            _do_append_log(
+                conn,
+                run_id,
+                f"[ETA] estimate_minutes={eta_minutes} train_rows={train_rows} compute_mode=local_m1",
+            )
+            conn.commit()
+
+        with tempfile.TemporaryDirectory(prefix=f"local_m1_run_{run_id}_") as tmp_dir_str:
+            tmp_dir = Path(tmp_dir_str)
+            bundle_zip = tmp_dir / "mlflow_bundle.zip"
+            bundle_dir = tmp_dir / "bundle"
+            pseudo_dir = tmp_dir / "pseudo"
+            output_dir = tmp_dir / "output"
+
+            shutil.copyfile(bundle_path, bundle_zip)
+            with zipfile.ZipFile(bundle_zip, "r") as zf:
+                zf.extractall(bundle_dir)
+
+            pseudo_dir.mkdir(parents=True, exist_ok=True)
+            accepted_src = bundle_dir / "dataset" / "accepted_pseudo.jsonl"
+            accepted_dst = pseudo_dir / "accepted.jsonl"
+            manifest_path = bundle_dir / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {}
+
+            pseudo_rows: List[Dict[str, Any]] = []
+            if accepted_src.exists():
+                for raw_line in accepted_src.read_text(encoding="utf-8").splitlines():
+                    if not raw_line.strip():
+                        continue
+                    row = json.loads(raw_line)
+                    pseudo_rows.append(
+                        {
+                            "text": str(row.get("text") or ""),
+                            "toxicity": int(row.get("label") or 0),
+                        }
+                    )
+            accepted_dst.write_text(
+                "\n".join(json.dumps(item, ensure_ascii=False) for item in pseudo_rows) + ("\n" if pseudo_rows else ""),
+                encoding="utf-8",
+            )
+
+            pseudo_manifest = {
+                "batch_id": manifest.get("batch_id") or "all_batches",
+                "seed_model": manifest.get("model_version") or "unknown",
+                "n_accepted_toxic": sum(1 for item in pseudo_rows if int(item.get("toxicity", 0)) == 1),
+                "n_accepted_clean": sum(1 for item in pseudo_rows if int(item.get("toxicity", 0)) == 0),
+            }
+            (pseudo_dir / "manifest.json").write_text(
+                json.dumps(pseudo_manifest, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+
+            with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+                _do_update_run(conn, run_id, stage=LOCAL_M1_STAGES[1])
+                _do_append_log(conn, run_id, "Running training script locally on M1 host...")
+                train_started_at = datetime.utcnow().isoformat() + "Z"
+                _do_append_log(conn, run_id, f"[TIMING] train_started_at={train_started_at}")
+                conn.commit()
+
+            train_script = _do_select_training_script(training_mode)
+
+            train_started_ts = time.time()
+            env = os.environ.copy()
+            env.update(
+                {
+                    "TRAINING_MODE": training_mode,
+                    "PSEUDO_LABELS_DIR": str(pseudo_dir),
+                    "GOLD_DATA_DIR": str(bundle_dir / "dataset" / "victsd_gold"),
+                    "OUTPUT_BASE": str(output_dir / "model"),
+                    "RESULTS_BASE": str(output_dir / "results"),
+                    "RUN_MANIFEST_DIR": str(output_dir / "run_manifests"),
+                    "ZIP_OUTPUT_DIR": str(output_dir / "zips"),
+                }
+            )
+            if base_model:
+                env["MODEL_NAME"] = base_model
+            completed = subprocess.run(
+                [sys.executable, str(train_script)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                env=env,
+                check=False,
+            )
+            if completed.stdout:
+                tail = completed.stdout[-4000:]
+                with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+                    _do_append_log(conn, run_id, f"[TRAIN_LOG] {tail}")
+                    conn.commit()
+            if completed.returncode != 0:
+                raise RuntimeError(
+                    f"Local M1 training failed (exit={completed.returncode}): {(completed.stdout or '')[-1200:]}"
+                )
+
+            train_duration_minutes = round((time.time() - train_started_ts) / 60, 2)
+            train_finished_at = datetime.utcnow().isoformat() + "Z"
+
+            with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+                _do_append_log(
+                    conn,
+                    run_id,
+                    f"[TIMING] train_finished_at={train_finished_at} duration_minutes={train_duration_minutes}",
+                )
+                _do_update_run(conn, run_id, stage=LOCAL_M1_STAGES[2])
+                _do_append_log(conn, run_id, "Collecting local artifact and optional upload to Spaces...")
+                conn.commit()
+
+            zip_dir = output_dir / "zips"
+            artifacts = sorted(zip_dir.glob("best_model_full_*.zip"))
+            if not artifacts:
+                raise RuntimeError(f"No best_model_full_*.zip artifact found under {zip_dir}")
+            generated_artifact = artifacts[0]
+
+            LOCAL_M1_ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
+            local_artifact = LOCAL_M1_ARTIFACT_DIR / f"model_artifact_{run_id}.zip"
+            shutil.copyfile(generated_artifact, local_artifact)
+            checksum = _sha256_file(local_artifact)
+
+            artifact_uri = str(local_artifact)
+            spaces_key = ""
+            spaces_bucket = DO_SPACES_BUCKET or None
+            if DO_SPACES_BUCKET and DO_SPACES_KEY and DO_SPACES_SECRET:
+                try:
+                    artifact_name = f"model_artifact_{run_id}.zip"
+                    spaces_key = f"mlflow/{run_id}/{artifact_name}"
+                    artifact_uri = _do_spaces_upload(local_artifact, spaces_key)
+                except Exception as upload_exc:
+                    with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+                        _do_append_log(conn, run_id, f"[WARN] Spaces upload skipped for local_m1: {upload_exc}")
+                        conn.commit()
+
+            with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+                _do_update_run(
+                    conn,
+                    run_id,
+                    artifact_uri=artifact_uri,
+                    artifact_checksum=checksum,
+                    spaces_bucket=spaces_bucket,
+                    spaces_key=spaces_key,
+                    error_message="",
+                )
+                conn.execute(
+                    """
+                    INSERT INTO mlflow_training_artifact (run_name, artifact_path, notes, created_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (
+                        f"local_m1_{run_id}",
+                        artifact_uri,
+                        f"Auto-import from local_m1 run {run_id}; scope={bundle_meta.get('scope')}",
+                        datetime.utcnow().isoformat() + "Z",
+                    ),
+                )
+                _do_update_run(conn, run_id, status="completed", stage=LOCAL_M1_STAGES[3], error_message="")
+                _do_append_log(conn, run_id, "Local M1 training completed.")
+                conn.commit()
+    except Exception as exc:
+        init_feedback_db()
+        with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+            _do_update_run(conn, run_id, status="failed", error_message=str(exc), stage=LOCAL_M1_STAGES[-1])
+            _do_append_log(conn, run_id, f"Run failed: {exc}")
+            conn.commit()
+
+
+def _simulate_do_training_run(run_id: str, request: MlflowDOTriggerRequest) -> None:
+    droplet_id: Optional[str] = None
+    droplet_ip: Optional[str] = None
+    try:
+        profile = _do_resolve_profile(request)
+        training_mode = _do_resolve_training_mode(request)
+        base_model = _do_resolve_base_model(request)
+        compute_mode = str(profile.get("compute_mode") or "gpu")
+        size_slug = str(profile.get("size_slug") or "").strip()
+        if not size_slug:
+            raise RuntimeError("Unable to resolve droplet size slug")
+
+        init_feedback_db()
+        with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+            _do_update_run(
+                conn,
+                run_id,
+                status="running",
+                stage=DO_STAGES[0],
+                gpu_profile=size_slug,
+                error_message="",
+                artifact_uri="",
+                artifact_checksum="",
+            )
+            _do_update_run(conn, run_id, spaces_key="", droplet_id="")
+            _do_append_log(conn, run_id, "Creating compute droplet via DigitalOcean API...")
+            _do_append_log(
+                conn,
+                run_id,
+                (
+                    "[META] "
+                    f"compute_mode={compute_mode} "
+                    f"droplet_size={size_slug} "
+                    f"selection={profile.get('selection_reason') or 'unknown'} "
+                    f"training_mode={training_mode} "
+                    f"base_model={base_model or 'default'}"
+                ),
+            )
+            conn.commit()
+
+        droplet_name = f"{DO_DEFAULT_TAG_PREFIX}-{run_id}".replace("_", "-")
+        create_payload: Dict[str, Any] = {
+            "name": droplet_name,
+            "region": DO_DEFAULT_REGION,
+            "size": size_slug,
+            "image": DO_DEFAULT_IMAGE,
+            "tags": [DO_DEFAULT_TAG_PREFIX, run_id],
+            "ipv6": False,
+            "monitoring": True,
+        }
+        ssh_key_resolution = _do_resolve_ssh_keys_for_droplet(DO_SSH_KEY_IDS)
+        create_payload["ssh_keys"] = list(ssh_key_resolution.get("ssh_keys") or [])
+        if not create_payload["ssh_keys"]:
+            raise RuntimeError("Unable to resolve valid SSH keys for droplet creation")
+
+        with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+            _do_append_log(
+                conn,
+                run_id,
+                (
+                    f"[META] ssh_keys_source={ssh_key_resolution.get('selection_reason') or 'unknown'} "
+                    f"ssh_keys_count={len(create_payload['ssh_keys'])}"
+                ),
+            )
+            for warning in list(ssh_key_resolution.get("warnings") or []):
+                _do_append_log(conn, run_id, f"[WARN] {warning}")
+            _do_append_log(
+                conn,
+                run_id,
+                f"DO API request: POST /droplets (region={DO_DEFAULT_REGION}, size={create_payload.get('size')})",
+            )
+            conn.commit()
+
+        response = do_call("POST", "/droplets", create_payload)
+        droplet = response.get("droplet") if isinstance(response, dict) else None
+        if not isinstance(droplet, dict):
+            raise RuntimeError("DigitalOcean create droplet response missing droplet payload")
+        droplet_id = str(droplet.get("id") or "")
+        if not droplet_id:
+            raise RuntimeError("DigitalOcean create droplet response missing droplet id")
+
+        droplet_ip = _do_wait_for_ssh(droplet_id, DO_BOOTSTRAP_TIMEOUT_SEC)
+
+        with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+            _do_update_run(conn, run_id, droplet_id=droplet_id)
+            _do_update_run(conn, run_id, error_message="")
+            _do_append_log(conn, run_id, f"Droplet ready: {droplet_id} ({droplet_ip})")
+            _do_update_run(conn, run_id, stage=DO_STAGES[1])
+            conn.commit()
+
+        if not DO_SSH_PRIVATE_KEY_PATH:
+            raise RuntimeError("DO_SSH_PRIVATE_KEY_PATH is required")
+
+        bundle_path, bundle_meta = _do_build_training_bundle_locally(request.batch_id)
+        train_rows = _do_extract_train_rows(bundle_meta)
+        eta_minutes = _do_estimate_train_minutes(
+            train_rows,
+            compute_mode,
+            cpu_vcpus=int(profile.get("vcpus") or 0) if compute_mode == "cpu" else None,
+        )
+
+        with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+            _do_append_log(
+                conn,
+                run_id,
+                f"[ETA] estimate_minutes={eta_minutes} train_rows={train_rows} compute_mode={compute_mode}",
+            )
+            conn.commit()
+
+        with tempfile.TemporaryDirectory(prefix=f"do_run_{run_id}_") as tmp_dir_str:
+            tmp_dir = Path(tmp_dir_str)
+            local_bundle = tmp_dir / "mlflow_bundle.zip"
+            shutil.copyfile(bundle_path, local_bundle)
+
+            train_script = _do_select_training_script(training_mode)
+            remote_train_script_name = train_script.name
+            req_base = BASE_DIR / "requirements-base.txt"
+            req_ml = BASE_DIR / "requirements-ml.txt"
+
+            remote_root = f"/root/viettoxic_runs/{run_id}"
+            _do_ssh_exec(droplet_ip, f"mkdir -p {shlex.quote(remote_root)}")
+            _do_upload_file_to_vm(local_bundle, droplet_ip, f"{remote_root}/bundle.zip")
+            _do_upload_file_to_vm(train_script, droplet_ip, f"{remote_root}/{remote_train_script_name}")
+            if req_base.exists():
+                _do_upload_file_to_vm(req_base, droplet_ip, f"{remote_root}/requirements-base.txt")
+            if req_ml.exists():
+                _do_upload_file_to_vm(req_ml, droplet_ip, f"{remote_root}/requirements-ml.txt")
+
+            bootstrap_cmd = (
+                f"cd {shlex.quote(remote_root)} && "
+                "UPDATE_OK=0; for i in $(seq 1 18); do "
+                "if apt-get update -y; then UPDATE_OK=1; break; fi; "
+                "echo '[META] waiting_for_apt_lock_or_repo' && sleep 5; done; "
+                "[ \"$UPDATE_OK\" -eq 1 ] && "
+                "INSTALL_OK=0; for i in $(seq 1 18); do "
+                "if DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-pip python3-venv unzip awscli; then INSTALL_OK=1; break; fi; "
+                "echo '[META] retry_apt_install' && sleep 5; done; "
+                "[ \"$INSTALL_OK\" -eq 1 ] && "
+                "PY_BIN=python3 && "
+                "if command -v python3.12 >/dev/null 2>&1; then PY_BIN=python3.12; "
+                "elif command -v python3.11 >/dev/null 2>&1; then PY_BIN=python3.11; "
+                "elif command -v python3.10 >/dev/null 2>&1; then PY_BIN=python3.10; fi && "
+                "$PY_BIN -m venv .venv && "
+                ". .venv/bin/activate && "
+                "python -m pip install --upgrade pip setuptools wheel"
+            )
+            _do_ssh_exec(droplet_ip, bootstrap_cmd)
+
+            install_cmd = (
+                f"cd {shlex.quote(remote_root)} && "
+                ". .venv/bin/activate && "
+                "python -m pip install --index-url https://download.pytorch.org/whl/cpu torch==2.9.1 && "
+                "if [ -f requirements-ml.txt ]; then python -m pip install -r requirements-ml.txt; fi && "
+                "if [ -f requirements-base.txt ]; then python -m pip install -r requirements-base.txt; fi"
+            )
+            _do_ssh_exec(droplet_ip, install_cmd)
+
+            prepare_cmd = (
+                f"cd {shlex.quote(remote_root)} && "
+                "rm -rf bundle pseudo output && mkdir -p bundle pseudo output && "
+                "unzip -o bundle.zip -d bundle && "
+                "python3 - <<'PY'\n"
+                "import json\n"
+                "from pathlib import Path\n"
+                "root = Path('.')\n"
+                "src = root / 'bundle' / 'dataset' / 'accepted_pseudo.jsonl'\n"
+                "dst = root / 'pseudo' / 'accepted.jsonl'\n"
+                "m = root / 'bundle' / 'manifest.json'\n"
+                "manifest = json.loads(m.read_text(encoding='utf-8')) if m.exists() else {}\n"
+                "out = []\n"
+                "for line in src.read_text(encoding='utf-8').splitlines():\n"
+                "    if not line.strip():\n"
+                "        continue\n"
+                "    row = json.loads(line)\n"
+                "    out.append({'text': row.get('text', ''), 'toxicity': int(row.get('label', 0))})\n"
+                "dst.write_text('\\n'.join(json.dumps(x, ensure_ascii=False) for x in out) + ('\\n' if out else ''), encoding='utf-8')\n"
+                "pseudo_manifest = {\n"
+                "  'batch_id': manifest.get('batch_id') or 'all_batches',\n"
+                "  'seed_model': manifest.get('model_version') or 'unknown',\n"
+                "  'n_accepted_toxic': sum(1 for x in out if x.get('toxicity') == 1),\n"
+                "  'n_accepted_clean': sum(1 for x in out if x.get('toxicity') == 0),\n"
+                "}\n"
+                "(root / 'pseudo' / 'manifest.json').write_text(json.dumps(pseudo_manifest, ensure_ascii=False, indent=2), encoding='utf-8')\n"
+                "PY"
+            )
+            _do_ssh_exec(droplet_ip, prepare_cmd)
+
+            with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+                _do_update_run(conn, run_id, stage=DO_STAGES[2])
+                _do_append_log(conn, run_id, "Running training script on droplet...")
+                train_started_at = datetime.utcnow().isoformat() + "Z"
+                _do_append_log(conn, run_id, f"[TIMING] train_started_at={train_started_at}")
+                conn.commit()
+
+            train_started_ts = time.time()
+            remote_env_prefix = (
+                "TRAINING_MODE=" + shlex.quote(training_mode) + " "
+                "PSEUDO_LABELS_DIR=$PWD/pseudo "
+                "GOLD_DATA_DIR=$PWD/bundle/dataset/victsd_gold "
+                "OUTPUT_BASE=$PWD/output/model "
+                "RESULTS_BASE=$PWD/output/results "
+                "RUN_MANIFEST_DIR=$PWD/output/run_manifests "
+                "ZIP_OUTPUT_DIR=$PWD/output/zips "
+            )
+            if base_model:
+                remote_env_prefix += "MODEL_NAME=" + shlex.quote(base_model) + " "
+
+            train_cmd = (
+                f"cd {shlex.quote(remote_root)} && "
+                ". .venv/bin/activate && "
+                f"{remote_env_prefix}"
+                f"python {shlex.quote(remote_train_script_name)}"
+            )
+
+            telemetry_stop_event = threading.Event()
+
+            def _telemetry_loop() -> None:
+                while not telemetry_stop_event.is_set():
+                    metric = _do_collect_vm_telemetry(droplet_ip)
+                    if metric:
+                        sampled_at = datetime.utcnow().isoformat() + "Z"
+                        with sqlite3.connect(FEEDBACK_DB_PATH) as telemetry_conn:
+                            _do_append_log(
+                                telemetry_conn,
+                                run_id,
+                                (
+                                    "[TELEMETRY] "
+                                    f"sampled_at={sampled_at} "
+                                    f"cpu_pct={metric['cpu_pct']:.2f} "
+                                    f"memory_pct={metric['memory_pct']:.2f} "
+                                    f"interval_sec={DO_TELEMETRY_INTERVAL_SEC}"
+                                ),
+                            )
+                            telemetry_conn.commit()
+
+                    if telemetry_stop_event.wait(DO_TELEMETRY_INTERVAL_SEC):
+                        break
+
+            telemetry_thread = threading.Thread(target=_telemetry_loop, daemon=True)
+            telemetry_thread.start()
+            try:
+                _do_ssh_exec(droplet_ip, train_cmd)
+            finally:
+                telemetry_stop_event.set()
+                telemetry_thread.join(timeout=2)
+
+            train_duration_minutes = round((time.time() - train_started_ts) / 60, 2)
+            train_finished_at = datetime.utcnow().isoformat() + "Z"
+
+            with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+                _do_append_log(
+                    conn,
+                    run_id,
+                    f"[TIMING] train_finished_at={train_finished_at} duration_minutes={train_duration_minutes}",
+                )
+                _do_update_run(conn, run_id, stage=DO_STAGES[3])
+                _do_append_log(conn, run_id, "Collecting artifact zip and uploading to DigitalOcean Spaces...")
+                conn.commit()
+
+            artifact_name = f"model_artifact_{run_id}.zip"
+            remote_artifact = f"{remote_root}/output/zips/best_model_full_victsd_gold.zip"
+            local_artifact = tmp_dir / artifact_name
+            _do_run_cmd(_do_scp_base() + [f"{DO_SSH_USER}@{droplet_ip}:{remote_artifact}", str(local_artifact)])
+
+            checksum = _sha256_file(local_artifact)
+            spaces_key = f"mlflow/{run_id}/{artifact_name}"
+            public_uri = _do_spaces_upload(local_artifact, spaces_key)
+
+            with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+                _do_update_run(
+                    conn,
+                    run_id,
+                    artifact_uri=public_uri,
+                    artifact_checksum=checksum,
+                    spaces_bucket=DO_SPACES_BUCKET,
+                    spaces_key=spaces_key,
+                    error_message="",
+                )
+                conn.execute(
+                    """
+                    INSERT INTO mlflow_training_artifact (run_name, artifact_path, notes, created_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (
+                        f"do_{run_id}",
+                        public_uri,
+                        f"Auto-import from DO run {run_id}; scope={bundle_meta.get('scope')}",
+                        datetime.utcnow().isoformat() + "Z",
+                    ),
+                )
+                _do_update_run(conn, run_id, status="completed", stage=DO_STAGES[4], error_message="")
+                _do_append_log(conn, run_id, "Training + Spaces upload completed.")
+                conn.commit()
+    except Exception as exc:
+        init_feedback_db()
+        with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+            _do_update_run(conn, run_id, status="failed", error_message=str(exc), stage=DO_STAGES[-1])
+            _do_append_log(conn, run_id, f"Run failed: {exc}")
+            conn.commit()
+    finally:
+        if droplet_id:
+            try:
+                do_call("DELETE", f"/droplets/{droplet_id}")
+                init_feedback_db()
+                with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+                    _do_append_log(conn, run_id, f"Droplet cleanup issued: {droplet_id}")
+                    conn.commit()
+            except Exception as cleanup_exc:
+                init_feedback_db()
+                with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+                    _do_append_log(conn, run_id, f"Droplet cleanup failed: {cleanup_exc}")
+                    conn.commit()
 
 
 @app.post("/api/mlflow/ingest")
@@ -3192,33 +4829,28 @@ def mlflow_ingest(request: MlflowIngestRequest) -> Dict[str, Any]:
                 score = normalize_score(seg.get("score"))
                 if score is None:
                     continue
-                if score <= discard_threshold:
+                seg_threshold_used = normalize_score(seg.get("seg_threshold_used"))
+
+                if score < discard_threshold:
                     if not options.persist_unused:
                         continue
                     gate_bucket = "discarded"
                     verification_status = "auto_discarded"
+                    pseudo_label = None
+                    label_source = "auto_gate"
+                    label_confidence = "high"
                 elif score >= accept_threshold:
                     gate_bucket = "accepted"
                     verification_status = "auto_accepted"
-                else:
-                    gate_bucket = "candidate"
-                    verification_status = "unverified"
-
-                seg_toxic_label = normalize_int(seg.get("toxic_label"))
-                seg_threshold_used = normalize_score(seg.get("seg_threshold_used"))
-
-                label_source = "fallback_0_5"
-                label_confidence = "low"
-                if seg_toxic_label in {0, 1}:
-                    pseudo_label = seg_toxic_label
-                    label_source = "auto_infer"
+                    pseudo_label = 1
+                    label_source = "auto_gate"
                     label_confidence = "high"
-                elif seg_threshold_used is not None:
-                    pseudo_label = 1 if score >= seg_threshold_used else 0
-                    label_source = "auto_infer"
-                    label_confidence = "medium"
                 else:
-                    pseudo_label = 1 if score >= 0.5 else 0
+                    gate_bucket = "accepted"
+                    verification_status = "auto_accepted"
+                    pseudo_label = 0
+                    label_source = "auto_gate"
+                    label_confidence = "high"
 
                 rows_to_insert.append(
                     (
@@ -3361,6 +4993,68 @@ def mlflow_batches(limit: int = Query(default=50, ge=1, le=200)) -> Dict[str, An
     return {"items": items, "total": len(items)}
 
 
+@app.get("/api/mlflow/crawl-history")
+def mlflow_crawl_history(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=200),
+) -> Dict[str, Any]:
+    offset = (page - 1) * page_size
+    init_feedback_db()
+
+    with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        total_row = conn.execute(
+            """
+            SELECT COUNT(1)
+            FROM (
+                SELECT batch_id, url_hash
+                FROM mlflow_comment_item
+                GROUP BY batch_id, url_hash
+            )
+            """
+        ).fetchone()
+        total = int(total_row[0] if total_row else 0)
+
+        comment_item_columns = {
+            str(row[1])
+            for row in conn.execute("PRAGMA table_info(mlflow_comment_item)").fetchall()
+            if len(row) >= 2
+        }
+        domain_category_expr = (
+            "MAX(domain_category) AS domain_category"
+            if "domain_category" in comment_item_columns
+            else "NULL AS domain_category"
+        )
+
+        rows = conn.execute(
+            f"""
+            SELECT
+                batch_id,
+                url,
+                url_hash,
+                {domain_category_expr},
+                COUNT(1) AS segment_count,
+                SUM(CASE WHEN gate_bucket = 'accepted' THEN 1 ELSE 0 END) AS accepted_count,
+                SUM(CASE WHEN gate_bucket = 'candidate' THEN 1 ELSE 0 END) AS candidate_count,
+                SUM(CASE WHEN gate_bucket = 'discarded' THEN 1 ELSE 0 END) AS discarded_count,
+                MAX(created_at) AS last_seen_at
+            FROM mlflow_comment_item
+            GROUP BY batch_id, url_hash, url
+            ORDER BY last_seen_at DESC
+            LIMIT ? OFFSET ?
+            """,
+            (page_size, offset),
+        ).fetchall()
+
+    items = [dict(row) for row in rows]
+    return {
+        "items": items,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    }
+
+
 @app.post("/api/mlflow/clear-batch")
 def mlflow_clear_batch(request: MlflowClearBatchRequest) -> Dict[str, Any]:
     batch_id = resolve_mlflow_batch_id(request.batch_id, strict=True)
@@ -3427,13 +5121,19 @@ def mlflow_review_history(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=25, ge=1, le=200),
     strict_batch: bool = Query(default=False),
+    scope: Literal["batch", "all_batches"] = Query(default="batch"),
 ) -> Dict[str, Any]:
-    resolved_batch_id = resolve_mlflow_batch_id(batch_id, strict=strict_batch)
+    resolved_batch_id: Optional[str] = None
     offset = (page - 1) * page_size
 
     decision_normalized = (decision or "all").strip().lower()
-    where_parts = ["batch_id = ?", "verification_status != 'unverified'"]
-    params: List[Any] = [resolved_batch_id]
+    where_parts = ["verification_status != 'unverified'"]
+    params: List[Any] = []
+
+    if scope == "batch":
+        resolved_batch_id = resolve_mlflow_batch_id(batch_id, strict=strict_batch)
+        where_parts.append("batch_id = ?")
+        params.append(resolved_batch_id)
 
     if decision_normalized == "accepted":
         where_parts.append("gate_bucket = 'accepted'")
@@ -3470,6 +5170,7 @@ def mlflow_review_history(
 
     items = [dict(row) for row in rows]
     return {
+        "scope": scope,
         "batch_id": resolved_batch_id,
         "decision": decision_normalized,
         "items": items,
@@ -3485,41 +5186,52 @@ def mlflow_candidates(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=25, ge=1, le=200),
     strict_batch: bool = Query(default=False),
+    scope: Literal["batch", "all_batches"] = Query(default="batch"),
 ) -> Dict[str, Any]:
-    resolved_batch_id = resolve_mlflow_batch_id(batch_id, strict=strict_batch)
+    resolved_batch_id: Optional[str] = None
     offset = (page - 1) * page_size
+    where_parts = [
+        "gate_bucket IN ('accepted', 'candidate')",
+        "verification_status IN ('auto_accepted', 'unverified')",
+    ]
+    params: List[Any] = []
+
+    if scope == "batch":
+        resolved_batch_id = resolve_mlflow_batch_id(batch_id, strict=strict_batch)
+        where_parts.insert(0, "batch_id = ?")
+        params.append(resolved_batch_id)
+
+    where_sql = " AND ".join(where_parts)
+
     with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
         total_row = conn.execute(
-            """
+            f"""
             SELECT COUNT(1)
             FROM mlflow_comment_item
-            WHERE batch_id = ?
-              AND gate_bucket = 'candidate'
-              AND verification_status = 'unverified'
+            WHERE {where_sql}
             """,
-            (resolved_batch_id,),
+            tuple(params),
         ).fetchone()
         total = int(total_row[0] if total_row else 0)
 
         rows = conn.execute(
-            """
+            f"""
             SELECT id, batch_id, url, url_hash, segment_id, domain_category, text, score,
                    pseudo_label, gate_bucket, verification_status,
                    segment_hash, context_segment_hash, html_tag,
                    seg_threshold_used, label_source, label_confidence, created_at, reviewed_at
             FROM mlflow_comment_item
-            WHERE batch_id = ?
-              AND gate_bucket = 'candidate'
-              AND verification_status = 'unverified'
+            WHERE {where_sql}
             ORDER BY id DESC
             LIMIT ? OFFSET ?
             """,
-            (resolved_batch_id, page_size, offset),
+            tuple([*params, page_size, offset]),
         ).fetchall()
 
     items = [dict(row) for row in rows]
     return {
+        "scope": scope,
         "batch_id": resolved_batch_id,
         "items": items,
         "total": total,
@@ -3664,57 +5376,85 @@ def mlflow_threshold_status(
 @app.post("/api/mlflow/manual/export-bundle")
 def mlflow_manual_export_bundle(request: MlflowManualExportBundleRequest) -> Dict[str, Any]:
     init_feedback_db()
-    batch_id = request.batch_id.strip()
+    scope = request.scope
+    requested_batch_id = (request.batch_id or "").strip()
+    resolved_batch_id: Optional[str] = None
+
+    if scope == "batch":
+        if not requested_batch_id:
+            raise HTTPException(status_code=400, detail="batch_id is required when scope='batch'")
+        resolved_batch_id = resolve_mlflow_batch_id(requested_batch_id, strict=True)
+
     resolved_dataset_version = normalize_dataset_version(request.dataset_version)
 
     with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
-        batch_row = conn.execute(
-            "SELECT batch_id, model_id, created_at FROM mlflow_crawl_batch WHERE batch_id = ?",
-            (batch_id,),
-        ).fetchone()
-        if not batch_row:
-            raise HTTPException(status_code=404, detail=f"Batch not found: {batch_id}")
+
+        if resolved_batch_id:
+            batch_row = conn.execute(
+                "SELECT batch_id, model_id, created_at FROM mlflow_crawl_batch WHERE batch_id = ?",
+                (resolved_batch_id,),
+            ).fetchone()
+        else:
+            batch_row = conn.execute(
+                "SELECT batch_id, model_id, created_at FROM mlflow_crawl_batch ORDER BY created_at DESC LIMIT 1"
+            ).fetchone()
+
+        accepted_where = "gate_bucket = 'accepted' AND pseudo_label IN (0, 1)"
+        accepted_params: List[Any] = []
+        if resolved_batch_id:
+            accepted_where += " AND batch_id = ?"
+            accepted_params.append(resolved_batch_id)
 
         accepted_rows = conn.execute(
-            """
-            SELECT text, pseudo_label, score, url, url_hash, segment_hash, context_segment_hash, html_tag
+            f"""
+            SELECT batch_id, text, pseudo_label, score, url, url_hash, segment_hash, context_segment_hash, html_tag
             FROM mlflow_comment_item
-            WHERE batch_id = ? AND gate_bucket = 'accepted' AND pseudo_label IN (0, 1)
+            WHERE {accepted_where}
             ORDER BY id ASC
             """,
-            (batch_id,),
+            tuple(accepted_params),
         ).fetchall()
+
+        candidate_where = "gate_bucket = 'candidate' AND verification_status = 'unverified'"
+        candidate_params: List[Any] = []
+        if resolved_batch_id:
+            candidate_where += " AND batch_id = ?"
+            candidate_params.append(resolved_batch_id)
+
         candidate_rows = conn.execute(
-            """
-            SELECT text, pseudo_label, score, url, url_hash, segment_hash, context_segment_hash, html_tag
+            f"""
+            SELECT batch_id, text, pseudo_label, score, url, url_hash, segment_hash, context_segment_hash, html_tag
             FROM mlflow_comment_item
-            WHERE batch_id = ? AND gate_bucket = 'candidate' AND verification_status = 'unverified'
+            WHERE {candidate_where}
             ORDER BY id ASC
             """,
-            (batch_id,),
+            tuple(candidate_params),
         ).fetchall()
 
         unused_rows: List[sqlite3.Row] = []
         if request.include_unused:
-            where_sql = "batch_id = ? AND gate_bucket = 'discarded'"
-            params: List[Any] = [batch_id]
+            unused_where = "gate_bucket = 'discarded'"
+            unused_params: List[Any] = []
+            if resolved_batch_id:
+                unused_where += " AND batch_id = ?"
+                unused_params.append(resolved_batch_id)
             if request.unused_scope == "auto_discarded":
-                where_sql += " AND verification_status = 'auto_discarded'"
+                unused_where += " AND verification_status = 'auto_discarded'"
             elif request.unused_scope == "manual_rejected":
-                where_sql += " AND verification_status = 'manual_rejected'"
+                unused_where += " AND verification_status = 'manual_rejected'"
 
             unused_rows = conn.execute(
                 f"""
-                SELECT text, pseudo_label, score, url, url_hash, segment_hash, context_segment_hash, html_tag, verification_status
+                SELECT batch_id, text, pseudo_label, score, url, url_hash, segment_hash, context_segment_hash, html_tag, verification_status
                 FROM mlflow_comment_item
-                WHERE {where_sql}
+                WHERE {unused_where}
                 ORDER BY id ASC
                 """,
-                tuple(params),
+                tuple(unused_params),
             ).fetchall()
 
-    model_version = request.model_version or str(batch_row["model_id"])
+    model_version = request.model_version or str(batch_row["model_id"] if batch_row else DEFAULT_MODEL_VERSION)
     policy_version = request.policy_version or DEFAULT_POLICY_VERSION
     versions = build_artifact_versions(
         dataset_version=resolved_dataset_version,
@@ -3725,7 +5465,15 @@ def mlflow_manual_export_bundle(request: MlflowManualExportBundleRequest) -> Dic
     out_dir = BASE_DIR / "data" / "processed"
     out_dir.mkdir(parents=True, exist_ok=True)
     timestamp = utc_timestamp_compact()
-    out_path = out_dir / f"mlflow_bundle_{batch_id}_{timestamp}.zip"
+    scope_token = "batch" if resolved_batch_id else "all_batches"
+    batch_token = slugify_token(resolved_batch_id or "global")
+    bundle_profile = request.bundle_profile
+    required_zip_contents = build_mlflow_required_bundle_contents(bundle_profile)
+
+    if bundle_profile == "full_bundle":
+        out_path = out_dir / f"mlflow_bundle_{scope_token}_{batch_token}_{timestamp}.zip"
+    else:
+        out_path = out_dir / f"victsd_gold_merged_{scope_token}_{batch_token}_{timestamp}.zip"
 
     accepted_jsonl = "\n".join(
         json.dumps(
@@ -3734,7 +5482,7 @@ def mlflow_manual_export_bundle(request: MlflowManualExportBundleRequest) -> Dic
                 "label": int(row["pseudo_label"]),
                 "meta": {
                     "source": "mlflow_pseudo",
-                    "batch_id": batch_id,
+                    "batch_id": row["batch_id"],
                     "score": row["score"],
                     "url": row["url"],
                     "url_hash": row["url_hash"],
@@ -3754,7 +5502,7 @@ def mlflow_manual_export_bundle(request: MlflowManualExportBundleRequest) -> Dic
                 "label": int(row["pseudo_label"] if row["pseudo_label"] is not None else 0),
                 "meta": {
                     "source": "mlflow_candidate",
-                    "batch_id": batch_id,
+                    "batch_id": row["batch_id"],
                     "score": row["score"],
                     "url": row["url"],
                     "url_hash": row["url_hash"],
@@ -3774,7 +5522,7 @@ def mlflow_manual_export_bundle(request: MlflowManualExportBundleRequest) -> Dic
                 "label": int(row["pseudo_label"] if row["pseudo_label"] is not None else 0),
                 "meta": {
                     "source": "mlflow_unused",
-                    "batch_id": batch_id,
+                    "batch_id": row["batch_id"],
                     "score": row["score"],
                     "url": row["url"],
                     "url_hash": row["url_hash"],
@@ -3788,6 +5536,45 @@ def mlflow_manual_export_bundle(request: MlflowManualExportBundleRequest) -> Dic
         )
         for row in unused_rows
     )
+
+    train_rows = load_victsd_gold_split("train")
+    validation_rows = load_victsd_gold_split("validation")
+    test_rows = load_victsd_gold_split("test")
+
+    existing_train_texts = {
+        normalize_training_text(str(item.get("text", "")))
+        for item in train_rows
+        if isinstance(item.get("text"), str) and normalize_training_text(str(item.get("text", "")))
+    }
+    dedup_existing_count = len(existing_train_texts)
+    added_to_train = 0
+    skipped_empty = 0
+    skipped_duplicate = 0
+
+    for row in accepted_rows:
+        normalized_text = normalize_training_text(str(row["text"] or ""))
+        if not normalized_text:
+            skipped_empty += 1
+            continue
+        if normalized_text in existing_train_texts:
+            skipped_duplicate += 1
+            continue
+        train_rows.append(
+            {
+                "text": normalized_text,
+                "toxicity": int(row["pseudo_label"]),
+                "meta": {
+                    "source": "MLFlowAccepted",
+                    "batch_id": row["batch_id"],
+                    "score": row["score"],
+                    "url": row["url"],
+                    "url_hash": row["url_hash"],
+                    "segment_hash": row["segment_hash"],
+                },
+            }
+        )
+        existing_train_texts.add(normalized_text)
+        added_to_train += 1
 
     training_config_yaml = (
         "model: phobert\n"
@@ -3807,36 +5594,100 @@ def mlflow_manual_export_bundle(request: MlflowManualExportBundleRequest) -> Dic
 
     manifest_json = {
         "artifact_type": "mlflow_training_bundle",
+        "bundle_profile": bundle_profile,
         "created_at": datetime.utcnow().isoformat() + "Z",
-        "batch_id": batch_id,
+        "scope": scope_token,
+        "batch_id": resolved_batch_id,
         "record_count": len(accepted_rows),
         "candidate_count": len(candidate_rows),
         "unused_count": len(unused_rows),
         "include_unused": request.include_unused,
         "unused_scope": request.unused_scope,
+        "merge_stats": {
+            "base_train_count": dedup_existing_count,
+            "added_to_train": added_to_train,
+            "skipped_duplicate": skipped_duplicate,
+            "skipped_empty": skipped_empty,
+            "final_train_count": len(train_rows),
+        },
         **versions,
-        "required_zip_contents": build_mlflow_required_bundle_contents(),
+        "required_zip_contents": required_zip_contents,
     }
 
+    train_jsonl = "\n".join(json.dumps(item, ensure_ascii=False) for item in train_rows)
+    validation_jsonl = "\n".join(json.dumps(item, ensure_ascii=False) for item in validation_rows)
+    test_jsonl = "\n".join(json.dumps(item, ensure_ascii=False) for item in test_rows)
+
     with zipfile.ZipFile(out_path, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("dataset/accepted_pseudo.jsonl", accepted_jsonl + ("\n" if accepted_jsonl else ""))
-        zf.writestr("dataset/candidates_unverified.jsonl", candidate_jsonl + ("\n" if candidate_jsonl else ""))
-        if request.include_unused:
-            zf.writestr("dataset/unused_discarded.jsonl", unused_jsonl + ("\n" if unused_jsonl else ""))
-        zf.writestr("manifest.json", json.dumps(manifest_json, ensure_ascii=False, indent=2))
-        zf.writestr("config/training_config.yaml", training_config_yaml)
-        zf.writestr("config/gate_policy.json", json.dumps(gate_policy_json, ensure_ascii=False, indent=2))
+        if bundle_profile == "full_bundle":
+            zf.writestr("dataset/accepted_pseudo.jsonl", accepted_jsonl + ("\n" if accepted_jsonl else ""))
+            zf.writestr("dataset/candidates_unverified.jsonl", candidate_jsonl + ("\n" if candidate_jsonl else ""))
+            if request.include_unused:
+                zf.writestr("dataset/unused_discarded.jsonl", unused_jsonl + ("\n" if unused_jsonl else ""))
+            zf.writestr("dataset/victsd_gold/train.jsonl", train_jsonl + ("\n" if train_jsonl else ""))
+            zf.writestr("dataset/victsd_gold/validation.jsonl", validation_jsonl + ("\n" if validation_jsonl else ""))
+            zf.writestr("dataset/victsd_gold/test.jsonl", test_jsonl + ("\n" if test_jsonl else ""))
+            zf.writestr("manifest.json", json.dumps(manifest_json, ensure_ascii=False, indent=2))
+            zf.writestr("config/training_config.yaml", training_config_yaml)
+            zf.writestr("config/gate_policy.json", json.dumps(gate_policy_json, ensure_ascii=False, indent=2))
+        else:
+            zf.writestr("train.jsonl", train_jsonl + ("\n" if train_jsonl else ""))
+            zf.writestr("validation.jsonl", validation_jsonl + ("\n" if validation_jsonl else ""))
+            zf.writestr("test.jsonl", test_jsonl + ("\n" if test_jsonl else ""))
+            zf.writestr(
+                "build_report.json",
+                json.dumps(
+                    {
+                        "profile": "clean_victsd_gold",
+                        "generated_at": datetime.utcnow().isoformat() + "Z",
+                        "scope": scope_token,
+                        "batch_id": resolved_batch_id,
+                        "artifact_versions": versions,
+                        "merge_stats": manifest_json["merge_stats"],
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+            )
+
+    relative_bundle_path = str(out_path.relative_to(BASE_DIR))
+    download_path = f"/api/mlflow/manual/export-bundle/download?bundle_path={urllib.parse.quote(relative_bundle_path)}"
 
     return {
-        "bundle_path": str(out_path.relative_to(BASE_DIR)),
+        "bundle_path": relative_bundle_path,
+        "download_url": download_path,
+        "bundle_profile": bundle_profile,
+        "scope": scope_token,
+        "batch_id": resolved_batch_id,
         "count": len(accepted_rows),
         "candidate_count": len(candidate_rows),
         "unused_count": len(unused_rows),
         "include_unused": request.include_unused,
         "unused_scope": request.unused_scope,
-        "required_zip_contents": build_mlflow_required_bundle_contents(),
+        "required_zip_contents": required_zip_contents,
         "artifact_versions": versions,
+        "merge_stats": manifest_json["merge_stats"],
     }
+
+
+@app.get("/api/mlflow/manual/export-bundle/download")
+def mlflow_manual_export_bundle_download(bundle_path: str = Query(..., min_length=1)) -> FileResponse:
+    candidate = (bundle_path or "").strip()
+    if not candidate:
+        raise HTTPException(status_code=400, detail="bundle_path is required")
+
+    resolved = (BASE_DIR / candidate).resolve()
+    processed_dir = (BASE_DIR / "data" / "processed").resolve()
+
+    try:
+        resolved.relative_to(processed_dir)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid bundle_path") from exc
+
+    if not resolved.exists() or not resolved.is_file():
+        raise HTTPException(status_code=404, detail=f"Bundle file not found: {candidate}")
+
+    return FileResponse(path=str(resolved), filename=resolved.name, media_type="application/zip")
 
 
 @app.post("/api/mlflow/manual/import-artifact")
@@ -3864,49 +5715,109 @@ def mlflow_manual_import_artifact(request: MlflowManualImportArtifactRequest) ->
     }
 
 
+@app.get("/api/mlflow/do/preflight")
+def mlflow_do_preflight() -> Dict[str, Any]:
+    preflight = _do_preflight_status()
+    preflight["checked_at"] = datetime.utcnow().isoformat() + "Z"
+    return preflight
+
+
 @app.post("/api/mlflow/do/trigger")
 def mlflow_do_trigger(request: MlflowDOTriggerRequest) -> Dict[str, Any]:
     init_feedback_db()
     run_id = f"do_{uuid.uuid4().hex[:12]}"
-    stages = [
-        "trigger_vm_gpu",
-        "upload_data_and_train_files",
-        "train",
-        "save_artifact",
-        "download_or_upload_destination",
-        "destroy_vm",
-    ]
-    logs = [
-        "Placeholder flow only. No infrastructure action executed.",
-        "Configure DigitalOcean credentials before enabling real automation.",
-    ]
     now = datetime.utcnow().isoformat() + "Z"
+
+    mode = (request.compute_mode or "gpu").strip().lower()
+    if mode not in {"gpu", "cpu", "local_m1"}:
+        mode = "gpu"
+    training_mode = _do_resolve_training_mode(request)
+    try:
+        base_model = _do_resolve_base_model(request)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    stage_list = _mlflow_stages_for_mode(mode)
+
+    if mode in {"gpu", "cpu"}:
+        preflight = _do_preflight_status()
+        if not preflight.get("ready"):
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "message": "DigitalOcean preflight not ready",
+                    "missing": preflight.get("missing", []),
+                    "warnings": preflight.get("warnings", []),
+                },
+            )
+
     with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
         conn.execute(
             """
             INSERT INTO mlflow_do_run (
-                run_id, batch_id, provider, gpu_profile, status, current_stage, logs_json, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                run_id, batch_id, provider, gpu_profile, status, current_stage, logs_json,
+                created_at, updated_at, droplet_id, artifact_uri, artifact_checksum, spaces_bucket, spaces_key, error_message
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 run_id,
                 request.batch_id,
-                request.provider,
-                request.gpu_profile,
-                "placeholder",
-                stages[0],
-                json.dumps(logs, ensure_ascii=False),
+                ("local_m1" if mode == "local_m1" else request.provider),
+                (
+                    "local-m1"
+                    if mode == "local_m1"
+                    else (request.cpu_profile.strip() if mode == "cpu" and request.cpu_profile else request.gpu_profile)
+                ),
+                "queued",
+                stage_list[0],
+                json.dumps(
+                    [
+                        "DO run queued.",
+                        f"[META] compute_mode={mode} training_mode={training_mode} base_model={base_model or 'default'}",
+                    ],
+                    ensure_ascii=False,
+                ),
                 now,
                 now,
+                None,
+                None,
+                None,
+                DO_SPACES_BUCKET or None,
+                None,
+                None,
             ),
         )
         conn.commit()
 
+    if request.dry_run:
+        with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+            _do_append_log(conn, run_id, "Dry-run mode: no DigitalOcean API call executed.")
+            _do_update_run(conn, run_id, status="dry_run", stage=stage_list[-1])
+            conn.commit()
+        return {
+            "run_id": run_id,
+            "status": "dry_run",
+            "stages": stage_list,
+            "dry_run": True,
+            "provider": ("local_m1" if mode == "local_m1" else request.provider),
+            "training_mode": training_mode,
+            "base_model": base_model,
+            "spaces_bucket": DO_SPACES_BUCKET or None,
+        }
+
+    worker_target = _simulate_local_m1_training_run if mode == "local_m1" else _simulate_do_training_run
+    worker = threading.Thread(target=worker_target, args=(run_id, request), daemon=True)
+    worker.start()
+
     return {
         "run_id": run_id,
-        "status": "placeholder",
-        "stages": stages,
-        "dry_run": request.dry_run,
+        "status": "queued",
+        "stages": stage_list,
+        "dry_run": False,
+        "provider": ("local_m1" if mode == "local_m1" else request.provider),
+        "training_mode": training_mode,
+        "base_model": base_model,
+        "spaces_bucket": DO_SPACES_BUCKET or None,
     }
 
 
@@ -3914,36 +5825,55 @@ def mlflow_do_trigger(request: MlflowDOTriggerRequest) -> Dict[str, Any]:
 def mlflow_do_status(run_id: str = Query(..., min_length=1)) -> Dict[str, Any]:
     init_feedback_db()
     with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
-        conn.row_factory = sqlite3.Row
-        row = conn.execute(
-            """
-            SELECT run_id, batch_id, provider, gpu_profile, status, current_stage, logs_json, created_at, updated_at
-            FROM mlflow_do_run
-            WHERE run_id = ?
-            """,
-            (run_id.strip(),),
-        ).fetchone()
+        row = _do_get_run(conn, run_id.strip())
     if not row:
         raise HTTPException(status_code=404, detail=f"DO run not found: {run_id}")
 
-    logs = []
-    raw_logs = row["logs_json"]
-    if raw_logs:
-        try:
-            parsed = json.loads(raw_logs)
-            if isinstance(parsed, list):
-                logs = parsed
-        except Exception:
-            logs = []
+    logs = _do_load_logs(row)
+    spaces_key = row["spaces_key"]
+    spaces_bucket = row["spaces_bucket"]
+    signed_download_url: Optional[str] = None
+    if spaces_bucket and spaces_key:
+        signed_download_url = (
+            f"https://{spaces_bucket}.{DO_SPACES_REGION}.digitaloceanspaces.com/{spaces_key}"
+        )
+
+    runtime_meta = _do_extract_runtime_metadata(logs)
+    compute_mode = runtime_meta.get("compute_mode")
+    if not compute_mode:
+        provider = str(row["provider"] or "").strip().lower()
+        if provider == "local_m1":
+            compute_mode = "local_m1"
+    stage_list = _mlflow_stages_for_mode(str(compute_mode) if compute_mode else None)
 
     return {
         "run_id": row["run_id"],
         "batch_id": row["batch_id"],
         "provider": row["provider"],
         "gpu_profile": row["gpu_profile"],
+        "compute_mode": compute_mode,
+        "training_mode": runtime_meta.get("training_mode") or "retrain",
+        "base_model": runtime_meta.get("base_model"),
+        "droplet_profile": runtime_meta.get("droplet_profile") or row["gpu_profile"],
+        "eta_estimate_minutes": runtime_meta.get("eta_estimate_minutes"),
+        "train_started_at": runtime_meta.get("train_started_at"),
+        "train_finished_at": runtime_meta.get("train_finished_at"),
+        "train_duration_minutes": runtime_meta.get("train_duration_minutes"),
+        "cpu_percent": runtime_meta.get("cpu_percent"),
+        "memory_percent": runtime_meta.get("memory_percent"),
+        "telemetry_last_sample_at": runtime_meta.get("telemetry_last_sample_at"),
+        "telemetry_interval_sec": runtime_meta.get("telemetry_interval_sec"),
         "status": row["status"],
         "current_stage": row["current_stage"],
         "logs": logs,
+        "stages": stage_list,
+        "droplet_id": row["droplet_id"],
+        "artifact_uri": row["artifact_uri"],
+        "artifact_checksum": row["artifact_checksum"],
+        "spaces_bucket": spaces_bucket,
+        "spaces_key": spaces_key,
+        "signed_download_url": signed_download_url,
+        "error_message": row["error_message"],
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
@@ -4210,6 +6140,102 @@ def get_models() -> Dict[str, Any]:
         }
     except (PermissionError, OSError, NotADirectoryError) as exc:
         raise HTTPException(status_code=500, detail=f"Failed to list models: {exc}") from exc
+
+
+@app.post("/api/models/import-zip")
+async def import_model_zip(request: Request) -> Dict[str, Any]:
+    try:
+        form = await request.form()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Model ZIP import requires python-multipart. Install dependency: pip install python-multipart",
+        ) from exc
+
+    model_name_raw = form.get("model_name")
+    if not isinstance(model_name_raw, str) or not model_name_raw.strip():
+        raise HTTPException(status_code=400, detail="model_name is required")
+
+    model_zip = form.get("model_zip")
+    if model_zip is None or not hasattr(model_zip, "filename") or not hasattr(model_zip, "read"):
+        raise HTTPException(status_code=400, detail="model_zip is required")
+
+    sanitized_name = _sanitize_import_model_name(model_name_raw)
+    filename = str(getattr(model_zip, "filename", "") or "").lower()
+    if not filename.endswith(".zip"):
+        raise HTTPException(status_code=415, detail="model_zip must be a .zip file")
+
+    model_root = resolve_model_root()
+    target_dir = model_root / "phobert" / sanitized_name
+    if target_dir.exists():
+        raise HTTPException(status_code=409, detail=f"Model already exists: phobert/{sanitized_name}")
+
+    with tempfile.TemporaryDirectory(prefix="model_import_") as tmp_dir_str:
+        tmp_dir = Path(tmp_dir_str)
+        zip_path = tmp_dir / "uploaded_model.zip"
+        extract_root = tmp_dir / "extracted"
+        extract_root.mkdir(parents=True, exist_ok=True)
+
+        total_bytes = 0
+        with zip_path.open("wb") as out:
+            while True:
+                chunk = await model_zip.read(1024 * 1024)
+                if not chunk:
+                    break
+                total_bytes += len(chunk)
+                if total_bytes > MODEL_IMPORT_MAX_ZIP_BYTES:
+                    raise HTTPException(status_code=413, detail="ZIP exceeds size limit")
+                out.write(chunk)
+
+        try:
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                _validate_model_import_zip(zf)
+                safe_root = extract_root.resolve()
+                for info in zf.infolist():
+                    member_target = (extract_root / info.filename).resolve()
+                    try:
+                        member_target.relative_to(safe_root)
+                    except ValueError as exc:
+                        raise HTTPException(status_code=400, detail="ZIP contains unsafe path") from exc
+
+                    if info.is_dir():
+                        member_target.mkdir(parents=True, exist_ok=True)
+                        continue
+
+                    member_target.parent.mkdir(parents=True, exist_ok=True)
+                    with zf.open(info, "r") as src, member_target.open("wb") as dst:
+                        shutil.copyfileobj(src, dst)
+        except zipfile.BadZipFile as exc:
+            raise HTTPException(status_code=400, detail="Invalid ZIP file") from exc
+
+        imported_model_dir = _find_imported_model_dir(extract_root)
+        target_dir.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(imported_model_dir, target_dir)
+
+    try:
+        validate_model_artifacts("phobert", target_dir)
+    except Exception as exc:
+        try:
+            shutil.rmtree(target_dir)
+        except Exception:
+            pass
+        raise HTTPException(status_code=400, detail=f"Imported model is invalid: {exc}") from exc
+    finally:
+        try:
+            close_result = model_zip.close()
+            if hasattr(close_result, "__await__"):
+                await close_result
+        except Exception:
+            pass
+
+    return {
+        "status": "imported",
+        "model_id": f"phobert/{sanitized_name}",
+        "model_name": sanitized_name,
+        "model_type": "phobert",
+        "model_path": to_relative(str(target_dir)) or str(target_dir),
+        "validated": True,
+    }
 
 
 @app.get("/api/training-tracker")

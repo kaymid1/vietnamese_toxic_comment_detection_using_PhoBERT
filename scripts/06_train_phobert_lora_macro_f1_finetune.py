@@ -1,6 +1,6 @@
 """
-PhoBERT Full Fine-tuning — Vietnamese Toxic Comment Detection
-Refactored to match the LoRA script data source + export layout.
+PhoBERT Fine-tune (light profile) — Vietnamese Toxic Comment Detection
+Refactored from retrain script for incremental updates on smaller data/resources.
 """
 
 # -----------------------
@@ -64,36 +64,37 @@ os.environ["WANDB_DISABLED"] = "true"
 # ================================================================
 # Config — tune here
 # ================================================================
-parser = argparse.ArgumentParser(description="Train PhoBERT LoRA/full fine-tune with optional pseudo-label mixing")
+parser = argparse.ArgumentParser(description="Train PhoBERT fine-tune light profile with optional pseudo-label mixing")
 parser.add_argument("--dry-run", action="store_true", help="Validate inputs and print resolved config without training")
 args, _ = parser.parse_known_args()
 
 DATA_DIR = os.environ.get("DATA_DIR", "/content/drive/MyDrive/victsd_gold")
 DATASET_PREFIX = os.environ.get("DATASET_PREFIX", "").strip()
 DATASET_LAYOUT = os.environ.get("DATASET_LAYOUT", "auto").strip().lower()
+TRAINING_MODE = os.environ.get("TRAINING_MODE", "finetune").strip().lower()
 MODEL_NAME = os.environ.get("MODEL_NAME", "vinai/phobert-base-v2").strip()
-MAX_LENGTH = 256
+MAX_LENGTH = int(os.environ.get("MAX_LENGTH", "256"))
 
 PSEUDO_LABELS_DIR = os.environ.get("PSEUDO_LABELS_DIR", "").strip()
 PSEUDO_LOSS_WEIGHT = float(os.environ.get("PSEUDO_LOSS_WEIGHT", "0.3"))
 GOLD_DATA_DIR = os.environ.get("GOLD_DATA_DIR", "data/processed/victsd_gold")
 GOLD_DATASET_PREFIX = os.environ.get("GOLD_DATASET_PREFIX", "").strip()
-MAX_PSEUDO_RATIO = float(os.environ.get("MAX_PSEUDO_RATIO", "0.4"))
+MAX_PSEUDO_RATIO = float(os.environ.get("MAX_PSEUDO_RATIO", "0.3"))
 RUN_MANIFEST_DIR = os.environ.get("RUN_MANIFEST_DIR", "experiments/retrain_runs/")
 REQUESTED_MIXED_MODE = bool(PSEUDO_LABELS_DIR)
 ACTIVE_MIXED_MODE = REQUESTED_MIXED_MODE
 
-BATCH_SIZE = 16
-GRAD_ACCUM = 2
-EPOCHS     = 10
-LR         = 2e-5
-WEIGHT_DECAY  = 0.05
-WARMUP_RATIO  = 0.08
-MAX_GRAD_NORM = 1.0
+BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "8"))
+GRAD_ACCUM = int(os.environ.get("GRAD_ACCUM", "2"))
+EPOCHS     = int(os.environ.get("EPOCHS", "3"))
+LR         = float(os.environ.get("LR", "2e-5"))
+WEIGHT_DECAY  = float(os.environ.get("WEIGHT_DECAY", "0.05"))
+WARMUP_RATIO  = float(os.environ.get("WARMUP_RATIO", "0.08"))
+MAX_GRAD_NORM = float(os.environ.get("MAX_GRAD_NORM", "1.0"))
 
-LABEL_SMOOTHING     = 0.0
-EARLY_STOP_PATIENCE = int(os.environ.get("EARLY_STOP_PATIENCE", "2"))
-HEAD_DROPOUT        = 0.1
+LABEL_SMOOTHING     = float(os.environ.get("LABEL_SMOOTHING", "0.0"))
+EARLY_STOP_PATIENCE = int(os.environ.get("EARLY_STOP_PATIENCE", "1"))
+HEAD_DROPOUT        = float(os.environ.get("HEAD_DROPOUT", "0.1"))
 
 USE_FOCAL   = True
 FOCAL_GAMMA = 2.0
@@ -1169,6 +1170,7 @@ epoch_mlflow_metrics = _build_epoch_mlflow_metrics(trainer.state.log_history)
 
 mlflow_params = {
     "training_type": training_type,
+    "training_mode": TRAINING_MODE,
     "base_model": MODEL_NAME,
     "epochs": int(EPOCHS),
     "lr": float(LR),

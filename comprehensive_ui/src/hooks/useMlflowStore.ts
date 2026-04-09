@@ -1,13 +1,20 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 const RAW_API_BASE = import.meta.env.VITE_API_BASE_URL?.trim() ?? "";
 const API_BASE = RAW_API_BASE.replace(/\/+$/, "");
+const API_BASE_WITHOUT_API_SUFFIX = API_BASE.replace(/\/api$/i, "");
 
 const buildApiUrl = (path: string) => {
-  if (!path.startsWith("/")) {
-    return API_BASE ? `${API_BASE}/${path}` : `/${path}`;
+  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+  if (!API_BASE) return normalizedPath;
+
+  const baseEndsWithApi = /\/api$/i.test(API_BASE);
+  const pathStartsWithApi = /^\/api(?:\/|$)/i.test(normalizedPath);
+  if (baseEndsWithApi && pathStartsWithApi) {
+    return `${API_BASE_WITHOUT_API_SUFFIX}${normalizedPath}`;
   }
-  return API_BASE ? `${API_BASE}${path}` : path;
+
+  return `${API_BASE}${normalizedPath}`;
 };
 
 class ApiError extends Error {
@@ -97,7 +104,20 @@ export interface MlflowThresholdStatus {
   is_ready: boolean;
 }
 
+export interface MlflowCrawlHistoryItem {
+  batch_id: string;
+  url: string;
+  url_hash: string;
+  domain_category?: string | null;
+  segment_count: number;
+  accepted_count: number;
+  candidate_count: number;
+  discarded_count: number;
+  last_seen_at?: string | null;
+}
+
 export type MlflowUnusedScope = "all" | "auto_discarded" | "manual_rejected";
+export type MlflowExportScope = "all_batches" | "batch";
 
 export interface MlflowComparePayload {
   current?: {
@@ -135,7 +155,38 @@ export interface MlflowClearAllResponse {
   deleted_rows: MlflowDeletedRows;
 }
 
+export interface MlflowDOPreflight {
+  ready: boolean;
+  missing: string[];
+  warnings: string[];
+  checks: Record<string, boolean>;
+  config: Record<string, unknown>;
+  checked_at?: string;
+}
+
 export type MlflowIngestStage = "idle" | "crawl" | "inference" | "finalize" | "completed" | "error";
+
+export interface MlflowDOTriggerOptions {
+  computeMode?: "gpu" | "cpu" | "local_m1";
+  trainingMode?: "retrain" | "finetune";
+  baseModel?: string;
+  cpuProfile?: string;
+  gpuProfile?: string;
+  dryRun?: boolean;
+}
+
+export interface MlflowImportModelZipResponse {
+  status: string;
+  model_id: string;
+  model_name: string;
+  model_type: string;
+  model_path: string;
+  validated: boolean;
+}
+
+const DO_TERMINAL_STATUSES = new Set(["completed", "failed", "dry_run", "placeholder"]);
+const DO_POLL_INTERVAL_MS = 4000;
+const DO_MAX_POLL_ATTEMPTS = 21600;
 
 export function useMlflowStore() {
   const [loading, setLoading] = useState(false);
@@ -151,15 +202,22 @@ export function useMlflowStore() {
   const [reviewHistory, setReviewHistory] = useState<MlflowCandidate[]>([]);
   const [reviewHistoryTotal, setReviewHistoryTotal] = useState(0);
   const [reviewHistoryPage, setReviewHistoryPage] = useState(1);
+  const [crawlHistory, setCrawlHistory] = useState<MlflowCrawlHistoryItem[]>([]);
+  const [crawlHistoryTotal, setCrawlHistoryTotal] = useState(0);
+  const [crawlHistoryPage, setCrawlHistoryPage] = useState(1);
+  const [crawlHistoryUnavailable, setCrawlHistoryUnavailable] = useState(false);
   const [comparePayload, setComparePayload] = useState<MlflowComparePayload | null>(null);
   const [lastBundlePath, setLastBundlePath] = useState<string | null>(null);
   const [requiredZipContents, setRequiredZipContents] = useState<string[]>([]);
   const [doRunId, setDoRunId] = useState<string | null>(null);
   const [doStatus, setDoStatus] = useState<Record<string, unknown> | null>(null);
+  const [doPreflight, setDoPreflight] = useState<MlflowDOPreflight | null>(null);
   const [hasNoBatch, setHasNoBatch] = useState(false);
   const [ingestStage, setIngestStage] = useState<MlflowIngestStage>("idle");
   const [ingestProgress, setIngestProgress] = useState(0);
   const [ingestStageMessage, setIngestStageMessage] = useState<string | null>(null);
+  const doPollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const doPollAttemptRef = useRef(0);
 
   const run = useCallback(async <T,>(fn: () => Promise<T>) => {
     setLoading(true);
@@ -178,6 +236,10 @@ export function useMlflowStore() {
         setCandidateTotal(0);
         setThresholdStatus(null);
         setComparePayload(null);
+        setReviewHistory([]);
+        setReviewHistoryTotal(0);
+        setCrawlHistory([]);
+        setCrawlHistoryTotal(0);
       } else {
         const message = err instanceof Error ? err.message : "Unknown error";
         setError(message);
@@ -226,6 +288,10 @@ export function useMlflowStore() {
             setCandidateTotal(0);
             setThresholdStatus(null);
             setComparePayload(null);
+            setReviewHistory([]);
+            setReviewHistoryTotal(0);
+            setCrawlHistory([]);
+            setCrawlHistoryTotal(0);
             return null;
           }
           throw err;
@@ -236,13 +302,22 @@ export function useMlflowStore() {
   );
 
   const refreshCandidates = useCallback(
-    async (batchId?: string | null, page = candidatePage) => {
+    async (batchId?: string | null, page = candidatePage, scope: "batch" | "all_batches" = "all_batches") => {
       return run(async () => {
         const useBatch = batchId || activeBatchId;
-        if (!useBatch) return;
-        const qs = `?batch_id=${encodeURIComponent(useBatch)}&page=${page}&page_size=${candidatePageSize}&strict_batch=true`;
+        if (scope === "batch" && !useBatch) return;
+        const query = new URLSearchParams({
+          page: String(page),
+          page_size: String(candidatePageSize),
+          scope,
+        });
+        if (scope === "batch" && useBatch) {
+          query.set("batch_id", useBatch);
+          query.set("strict_batch", "true");
+        }
+
         const payload = await parseJsonResponse<{ items: MlflowCandidate[]; total: number; page: number }>(
-          await fetch(buildApiUrl(`/api/mlflow/candidates${qs}`)),
+          await fetch(buildApiUrl(`/api/mlflow/candidates?${query.toString()}`)),
         );
         setCandidates(payload.items || []);
         setCandidateTotal(payload.total || 0);
@@ -256,8 +331,9 @@ export function useMlflowStore() {
     async (batchId?: string | null) => {
       return run(async () => {
         const useBatch = batchId || activeBatchId;
-        if (!useBatch) return;
-        const qs = `?batch_id=${encodeURIComponent(useBatch)}&strict_batch=true`;
+        const qs = useBatch
+          ? `?batch_id=${encodeURIComponent(useBatch)}&strict_batch=true`
+          : "";
         const payload = await parseJsonResponse<MlflowThresholdStatus>(
           await fetch(buildApiUrl(`/api/mlflow/threshold-status${qs}`)),
         );
@@ -269,13 +345,24 @@ export function useMlflowStore() {
   );
 
   const refreshReviewHistory = useCallback(
-    async (batchId?: string | null, decision = "all", page = reviewHistoryPage) => {
+    async (batchId?: string | null, decision = "all", page = reviewHistoryPage, scope: "batch" | "all_batches" = "all_batches") => {
       return run(async () => {
         const useBatch = batchId || activeBatchId;
-        if (!useBatch) return;
-        const qs = `?batch_id=${encodeURIComponent(useBatch)}&decision=${encodeURIComponent(decision)}&page=${page}&page_size=${candidatePageSize}&strict_batch=true`;
+        if (scope === "batch" && !useBatch) return;
+
+        const query = new URLSearchParams({
+          decision: String(decision),
+          page: String(page),
+          page_size: String(candidatePageSize),
+          scope,
+        });
+        if (scope === "batch" && useBatch) {
+          query.set("batch_id", useBatch);
+          query.set("strict_batch", "true");
+        }
+
         const payload = await parseJsonResponse<{ items: MlflowCandidate[]; total: number; page: number }>(
-          await fetch(buildApiUrl(`/api/mlflow/review-history${qs}`)),
+          await fetch(buildApiUrl(`/api/mlflow/review-history?${query.toString()}`)),
         );
         setReviewHistory(payload.items || []);
         setReviewHistoryTotal(payload.total || 0);
@@ -286,25 +373,81 @@ export function useMlflowStore() {
     [activeBatchId, reviewHistoryPage, candidatePageSize, run],
   );
 
+  const refreshCrawlHistory = useCallback(
+    async (page = crawlHistoryPage, options?: { allowUnavailableFallback?: boolean }) => {
+      return run(async () => {
+        if (crawlHistoryUnavailable && !options?.allowUnavailableFallback) {
+          const fallback = { items: [] as MlflowCrawlHistoryItem[], total: 0, page };
+          setCrawlHistory(fallback.items);
+          setCrawlHistoryTotal(0);
+          setCrawlHistoryPage(page);
+          return fallback;
+        }
+
+        const query = new URLSearchParams({
+          page: String(page),
+          page_size: String(candidatePageSize),
+        });
+
+        try {
+          const payload = await parseJsonResponse<{ items: MlflowCrawlHistoryItem[]; total: number; page: number }>(
+            await fetch(buildApiUrl(`/api/mlflow/crawl-history?${query.toString()}`)),
+          );
+          setCrawlHistoryUnavailable(false);
+          setCrawlHistory(payload.items || []);
+          setCrawlHistoryTotal(payload.total || 0);
+          setCrawlHistoryPage(payload.page || page);
+          return payload;
+        } catch (err) {
+          if (err instanceof ApiError && err.status === 404) {
+            setCrawlHistoryUnavailable(true);
+            const fallback = { items: [] as MlflowCrawlHistoryItem[], total: 0, page };
+            setCrawlHistory(fallback.items);
+            setCrawlHistoryTotal(0);
+            setCrawlHistoryPage(page);
+            return fallback;
+          }
+          throw err;
+        }
+      });
+    },
+    [crawlHistoryPage, candidatePageSize, crawlHistoryUnavailable, run],
+  );
+
   const exportBundle = useCallback(
-    async (batchId?: string | null, options?: { includeUnused?: boolean; unusedScope?: MlflowUnusedScope }) => {
+    async (
+      batchId?: string | null,
+      options?: { includeUnused?: boolean; unusedScope?: MlflowUnusedScope; scope?: MlflowExportScope },
+    ) => {
       return run(async () => {
         const useBatch = batchId || activeBatchId;
-        if (!useBatch) throw new Error("No active batch to export");
+        const exportScope = options?.scope || "all_batches";
+        if (exportScope === "batch" && !useBatch) throw new Error("No active batch to export in batch scope");
         const payload = await parseJsonResponse<{
           bundle_path: string;
+          download_url: string;
+          scope: MlflowExportScope;
+          batch_id: string | null;
           required_zip_contents: string[];
           count: number;
           candidate_count: number;
           unused_count: number;
           include_unused: boolean;
           unused_scope: MlflowUnusedScope;
+          merge_stats?: {
+            base_train_count: number;
+            added_to_train: number;
+            skipped_duplicate: number;
+            skipped_empty: number;
+            final_train_count: number;
+          };
         }>(
           await fetch(buildApiUrl("/api/mlflow/manual/export-bundle"), {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               batch_id: useBatch,
+              scope: exportScope,
               include_unused: Boolean(options?.includeUnused),
               unused_scope: options?.unusedScope || "all",
             }),
@@ -333,23 +476,50 @@ export function useMlflowStore() {
     [run],
   );
 
-  const triggerDO = useCallback(
-    async () => {
+  const importModelZip = useCallback(
+    async (modelName: string, modelZip: File) => {
       return run(async () => {
-        const payload = await parseJsonResponse<{ run_id: string }>(
-          await fetch(buildApiUrl("/api/mlflow/do/trigger"), {
+        const formData = new FormData();
+        formData.append("model_name", modelName);
+        formData.append("model_zip", modelZip);
+        return parseJsonResponse<MlflowImportModelZipResponse>(
+          await fetch(buildApiUrl("/api/models/import-zip"), {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ batch_id: activeBatchId, provider: "digitalocean", dry_run: true }),
+            body: formData,
           }),
         );
-        setDoRunId(payload.run_id);
-        await refreshDOStatus(payload.run_id);
-        return payload;
       });
     },
-    [activeBatchId, run],
+    [run],
   );
+
+  const refreshDOPreflight = useCallback(async () => {
+    return run(async () => {
+      try {
+        const payload = await parseJsonResponse<MlflowDOPreflight>(
+          await fetch(buildApiUrl("/api/mlflow/do/preflight")),
+        );
+        setDoPreflight(payload);
+        return payload;
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 404) {
+          const fallback: MlflowDOPreflight = {
+            ready: false,
+            missing: [],
+            warnings: [
+              "Backend đang chạy chưa có endpoint /api/mlflow/do/preflight. Hãy restart backend với code mới.",
+            ],
+            checks: {},
+            config: {},
+            checked_at: new Date().toISOString(),
+          };
+          setDoPreflight(fallback);
+          return fallback;
+        }
+        throw err;
+      }
+    });
+  }, [run]);
 
   const refreshDOStatus = useCallback(
     async (runId?: string | null) => {
@@ -364,6 +534,113 @@ export function useMlflowStore() {
       });
     },
     [doRunId, run],
+  );
+
+  const stopDOPolling = useCallback(() => {
+    if (doPollTimerRef.current) {
+      clearInterval(doPollTimerRef.current);
+      doPollTimerRef.current = null;
+    }
+    doPollAttemptRef.current = 0;
+  }, []);
+
+  const startDOPolling = useCallback(
+    (runId: string) => {
+      stopDOPolling();
+      doPollAttemptRef.current = 0;
+
+      doPollTimerRef.current = setInterval(() => {
+        doPollAttemptRef.current += 1;
+        const attempt = doPollAttemptRef.current;
+        void refreshDOStatus(runId)
+          .then((payload) => {
+            const status = typeof payload?.status === "string" ? payload.status : "";
+            if (DO_TERMINAL_STATUSES.has(status)) {
+              stopDOPolling();
+              return;
+            }
+            if (attempt >= DO_MAX_POLL_ATTEMPTS) {
+              stopDOPolling();
+            }
+          })
+          .catch(() => {
+            if (attempt >= DO_MAX_POLL_ATTEMPTS) {
+              stopDOPolling();
+            }
+          });
+      }, DO_POLL_INTERVAL_MS);
+    },
+    [refreshDOStatus, stopDOPolling],
+  );
+
+  useEffect(() => {
+    return () => {
+      stopDOPolling();
+    };
+  }, [stopDOPolling]);
+
+  const triggerDO = useCallback(
+    async (options?: MlflowDOTriggerOptions) => {
+      return run(async () => {
+        const preflightGpuSize =
+          doPreflight && typeof doPreflight.config?.do_default_gpu_size === "string"
+            ? doPreflight.config.do_default_gpu_size
+            : undefined;
+        const rawMode = (options?.computeMode || "gpu").toLowerCase();
+        const computeMode = rawMode === "cpu" || rawMode === "local_m1" ? rawMode : "gpu";
+        const gpuProfile =
+          (options?.gpuProfile && options.gpuProfile.trim()) ||
+          (typeof preflightGpuSize === "string" && preflightGpuSize.trim() ? preflightGpuSize : undefined);
+        const cpuProfile = (options?.cpuProfile && options.cpuProfile.trim()) || undefined;
+        const trainingMode = options?.trainingMode === "finetune" ? "finetune" : "retrain";
+        const baseModel = (options?.baseModel && options.baseModel.trim()) || undefined;
+
+        const payloadBody: Record<string, unknown> = {
+          batch_id: activeBatchId,
+          provider: computeMode === "local_m1" ? "local_m1" : "digitalocean",
+          dry_run: options?.dryRun ?? false,
+          gpu_profile: gpuProfile,
+          compute_mode: computeMode,
+          training_mode: trainingMode,
+        };
+        if (computeMode === "cpu") {
+          payloadBody.cpu_profile = cpuProfile;
+        }
+        if (baseModel) {
+          payloadBody.base_model = baseModel;
+        }
+
+        const payload = await parseJsonResponse<{
+          run_id: string;
+          status: string;
+          stages: string[];
+          dry_run: boolean;
+          training_mode?: "retrain" | "finetune";
+          base_model?: string | null;
+        }>(
+          await fetch(buildApiUrl("/api/mlflow/do/trigger"), {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payloadBody),
+          }),
+        );
+
+        if (payload.status === "placeholder") {
+          throw new Error(
+            "Backend đang trả status=placeholder (không chạy DO thật). Hãy restart backend với phiên bản mới có DO runtime flow.",
+          );
+        }
+
+        setDoRunId(payload.run_id);
+        const latest = await refreshDOStatus(payload.run_id);
+        const latestStatus = typeof latest?.status === "string" ? latest.status : "";
+        if (!DO_TERMINAL_STATUSES.has(latestStatus)) {
+          startDOPolling(payload.run_id);
+        }
+        return payload;
+      });
+    },
+    [activeBatchId, doPreflight, refreshDOStatus, run, startDOPolling],
   );
 
   const refreshCompare = useCallback(async () => {
@@ -408,14 +685,22 @@ export function useMlflowStore() {
             body: JSON.stringify({ updates }),
           }),
         );
-        await refreshOverview(activeBatchId);
-        await refreshCandidates(activeBatchId, candidatePage);
-        await refreshThresholdStatus(activeBatchId);
-        await refreshReviewHistory(activeBatchId, "all", 1);
+
+        const latestOverview = await refreshOverview();
+        const nextBatchId = latestOverview?.active_batch_id || null;
+
+        await refreshCandidates(undefined, 1, "all_batches");
+        if (nextBatchId) {
+          await refreshThresholdStatus(nextBatchId);
+        } else {
+          setThresholdStatus(null);
+        }
+        await refreshReviewHistory(undefined, "all", 1, "all_batches");
+        await refreshCrawlHistory(1);
         return payload;
       });
     },
-    [activeBatchId, candidatePage, refreshCandidates, refreshOverview, refreshReviewHistory, refreshThresholdStatus, run],
+    [refreshCandidates, refreshCrawlHistory, refreshOverview, refreshReviewHistory, refreshThresholdStatus, run],
   );
 
   const clearMlflowBatch = useCallback(
@@ -435,30 +720,22 @@ export function useMlflowStore() {
         );
 
         await refreshBatches();
-        let nextBatchId: string | null = null;
-        try {
-          const latestOverview = await refreshOverview();
-          nextBatchId = latestOverview?.active_batch_id || null;
-        } catch {
-          nextBatchId = null;
-        }
+        const latestOverview = await refreshOverview();
+        const nextBatchId = latestOverview?.active_batch_id || null;
 
+        await refreshCandidates(undefined, 1, "all_batches");
         if (nextBatchId) {
-          await refreshCandidates(nextBatchId, 1);
           await refreshThresholdStatus(nextBatchId);
-          await refreshReviewHistory(nextBatchId, "all", 1);
         } else {
-          setCandidates([]);
-          setCandidateTotal(0);
           setThresholdStatus(null);
-          setReviewHistory([]);
-          setReviewHistoryTotal(0);
         }
+        await refreshReviewHistory(undefined, "all", 1, "all_batches");
+        await refreshCrawlHistory(1);
 
         return payload;
       });
     },
-    [activeBatchId, refreshBatches, refreshCandidates, refreshOverview, refreshReviewHistory, refreshThresholdStatus, run],
+    [activeBatchId, refreshBatches, refreshCandidates, refreshCrawlHistory, refreshOverview, refreshReviewHistory, refreshThresholdStatus, run],
   );
 
   const clearMlflowAll = useCallback(
@@ -473,20 +750,21 @@ export function useMlflowStore() {
         );
 
         await refreshBatches();
-        try {
-          await refreshOverview();
-        } catch {
-          // expected when all batches are cleared
-        }
+        setOverview(null);
+        setActiveBatchId(null);
         setCandidates([]);
         setCandidateTotal(0);
         setThresholdStatus(null);
         setReviewHistory([]);
         setReviewHistoryTotal(0);
+        setReviewHistoryPage(1);
+        setCrawlHistory([]);
+        setCrawlHistoryTotal(0);
+        setCrawlHistoryPage(1);
         return payload;
       });
     },
-    [refreshBatches, refreshOverview, run],
+    [refreshBatches, run],
   );
 
   const ingest = useCallback(
@@ -526,7 +804,7 @@ export function useMlflowStore() {
       startStageRamp();
       try {
         const payload = await run(async () => {
-          const ingestPayload = await parseJsonResponse<{
+          return parseJsonResponse<{
             batch_id: string;
             model_name?: string;
             counts?: Record<string, number>;
@@ -547,23 +825,41 @@ export function useMlflowStore() {
               }),
             }),
           );
-          const b = ingestPayload.batch_id;
-          setIngestStage("finalize");
-          setIngestStageMessage("Đang đồng bộ trạng thái từ backend...");
-          setIngestProgress((prev) => Math.max(prev, 90));
-          setActiveBatchId(b);
-          await refreshOverview(b);
-          await refreshCandidates(b, 1);
-          await refreshThresholdStatus(b);
-          await refreshReviewHistory(b, "all", 1);
-          await refreshBatches();
-          return ingestPayload;
         });
+
+        const b = payload.batch_id;
+        setIngestStage("finalize");
+        setIngestStageMessage("Đang đồng bộ trạng thái từ backend...");
+        setIngestProgress((prev) => Math.max(prev, 90));
+        setActiveBatchId(b);
+
+        const refreshWarnings: string[] = [];
+        const tryRefresh = async (label: string, fn: () => Promise<unknown>) => {
+          try {
+            await fn();
+          } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            refreshWarnings.push(`${label}: ${message}`);
+            console.warn(`[mlflow] post-ingest refresh failed: ${label}`, err);
+          }
+        };
+
+        await tryRefresh("overview", () => refreshOverview(b));
+        await tryRefresh("candidates", () => refreshCandidates(undefined, 1, "all_batches"));
+        await tryRefresh("threshold-status", () => refreshThresholdStatus(b));
+        await tryRefresh("review-history", () => refreshReviewHistory(undefined, "all", 1, "all_batches"));
+        await tryRefresh("crawl-history", () => refreshCrawlHistory(1, { allowUnavailableFallback: true }));
+        await tryRefresh("batches", () => refreshBatches());
 
         stopStageRamp();
         setIngestStage("completed");
         setIngestProgress(100);
-        setIngestStageMessage("Hoàn tất ingest + infer + gate.");
+        if (refreshWarnings.length > 0) {
+          setIngestStageMessage(`Hoàn tất ingest + infer + gate. Có ${refreshWarnings.length} panel chưa đồng bộ.`);
+        } else {
+          setIngestStageMessage("Hoàn tất ingest + infer + gate.");
+        }
+        setError(null);
         return payload;
       } catch (err) {
         stopStageRamp();
@@ -572,7 +868,7 @@ export function useMlflowStore() {
         throw err;
       }
     },
-    [refreshBatches, refreshCandidates, refreshOverview, refreshReviewHistory, refreshThresholdStatus, run],
+    [refreshBatches, refreshCandidates, refreshCrawlHistory, refreshOverview, refreshReviewHistory, refreshThresholdStatus, run],
   );
 
   return {
@@ -593,23 +889,30 @@ export function useMlflowStore() {
     reviewHistory,
     reviewHistoryTotal,
     reviewHistoryPage,
+    crawlHistory,
+    crawlHistoryTotal,
+    crawlHistoryPage,
     comparePayload,
     lastBundlePath,
     requiredZipContents,
     doRunId,
     doStatus,
+    doPreflight,
     ingest,
     refreshOverview,
     refreshBatches,
     refreshCandidates,
     refreshReviewHistory,
+    refreshCrawlHistory,
     reviewCandidates,
     clearMlflowBatch,
     clearMlflowAll,
     refreshThresholdStatus,
     exportBundle,
     importArtifact,
+    importModelZip,
     triggerDO,
+    refreshDOPreflight,
     refreshDOStatus,
     refreshCompare,
     promote,

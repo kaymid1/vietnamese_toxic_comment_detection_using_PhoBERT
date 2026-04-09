@@ -188,7 +188,7 @@ export const messages = {
     model: {
       common: { noMetrics: "Không có số liệu", na: "N/A", baseline: "Baseline", yes: "Có", no: "Không", all: "Tất cả", lastUpdated: "Cập nhật: {value}" },
       status: { cannotLoadRegistry: "Không thể tải experiment registry" },
-      hero: { title: "Mô hình & Hiệu năng", subtitle: "Theo dõi pipeline tiền xử lý, chỉ số huấn luyện và phân tích lỗi để cải thiện hệ thống." },
+      hero: { title: "Mô hình & Hiệu năng", subtitle: "Theo dõi pipeline tiền xử lý, registry thí nghiệm và độ tin cậy triển khai." },
       about: {
         title: "Tổng quan mô hình", description: "Mô hình hiện tại tập trung phát hiện toxicity tiếng Việt trong ngữ cảnh social media.", preprocessTitle: "Tiền xử lý", preprocessDesc: "Giữ pipeline tối giản để bảo toàn tín hiệu ngôn ngữ tự nhiên.", keepCaseTitle: "Giữ nguyên case", keepCaseDesc: "Không ép lowercase để tránh mất ngữ nghĩa trong một số trường hợp.", datasetTitle: "Nguồn dữ liệu", datasetDesc: "Huấn luyện trên tập ViCTSD", transferTitle: "Khả năng tổng quát", transferDesc: "Đánh giá liên tục qua hard cases và phản hồi thực tế.",
       },
@@ -550,7 +550,7 @@ export const messages = {
     model: {
       common: { noMetrics: "No metrics", na: "N/A", baseline: "Baseline", yes: "Yes", no: "No", all: "All", lastUpdated: "Last updated: {value}" },
       status: { cannotLoadRegistry: "Unable to load experiment registry" },
-      hero: { title: "Model & Performance", subtitle: "Track preprocessing, training metrics, and error analysis to improve the system." },
+      hero: { title: "Model & Performance", subtitle: "Track preprocessing, experiment registry, and deployment reliability." },
       about: {
         title: "Model overview", description: "The current model focuses on Vietnamese toxicity detection in social-media contexts.", preprocessTitle: "Preprocessing", preprocessDesc: "Keep the pipeline minimal to preserve natural language signals.", keepCaseTitle: "Preserve casing", keepCaseDesc: "Do not force lowercase to avoid losing semantic cues in some cases.", datasetTitle: "Data source", datasetDesc: "Trained on merged ViCTSD + ViHSD OFFENSIVE.", transferTitle: "Generalization", transferDesc: "Continuously evaluated through hard cases and real-world feedback.",
       },

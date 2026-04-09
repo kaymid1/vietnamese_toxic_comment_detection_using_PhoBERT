@@ -32,6 +32,7 @@ multidict==6.7.0
 
 # --- Config / env ---
 python-dotenv==1.2.1
+python-multipart==0.0.20
 PyYAML==6.0.3
 click==8.3.1
 packaging==25.0

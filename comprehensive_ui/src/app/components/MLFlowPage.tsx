@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ChangeEvent, type MouseEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type ChangeEvent, type MouseEvent } from "react";
 import { RotateCcw } from "lucide-react";
 import { toast } from "sonner";
 import { Card } from "@/app/components/ui/card";
@@ -10,34 +10,42 @@ import { Progress } from "@/app/components/ui/progress";
 import { Checkbox } from "@/app/components/ui/checkbox";
 import { useMlflowStore, type MlflowUnusedScope } from "../../hooks/useMlflowStore";
 
+
 interface MLFlowPageProps {
   availableModels: string[];
+  onModelsChanged?: () => Promise<void> | void;
 }
 
 const MLFLOW_URLS_DRAFT_KEY = "viettoxic:mlflow:urlsText";
 const MLFLOW_MODEL_DRAFT_KEY = "viettoxic:mlflow:selectedModel";
-const MLFLOW_CANDIDATE_SELECTIONS_KEY = "viettoxic:mlflow:selectedCandidatesByBatch";
 const MLFLOW_CLEAR_ALL_CONFIRM_TOKEN = "DELETE_ALL_MLFLOW_DATA";
 
-const safeReadLocalStorage = <T,>(key: string, fallback: T): T => {
+const safeReadLocalStorageString = (key: string, fallback = "") => {
   try {
     const raw = window.localStorage.getItem(key);
-    if (!raw) return fallback;
-    return JSON.parse(raw) as T;
+    if (raw == null) return fallback;
+    try {
+      const parsed = JSON.parse(raw);
+      if (typeof parsed === "string") return parsed;
+    } catch {
+      // backward compatibility: previously stored raw/plain string
+    }
+    return raw;
   } catch {
     return fallback;
   }
 };
 
-const safeWriteLocalStorage = (key: string, value: unknown) => {
+const safeWriteLocalStorageString = (key: string, value: string) => {
   try {
-    window.localStorage.setItem(key, JSON.stringify(value));
+    window.localStorage.setItem(key, value);
   } catch {
     // ignore quota / private mode errors
   }
 };
 
-export function MLFlowPage({ availableModels }: MLFlowPageProps) {
+export function MLFlowPage({ availableModels, onModelsChanged }: MLFlowPageProps) {
+  const isDeprecatedModel = (model: string) => model.toLowerCase().includes("deprecated");
   const {
     loading,
     error,
@@ -52,26 +60,29 @@ export function MLFlowPage({ availableModels }: MLFlowPageProps) {
     candidatePage,
     candidatePageSize,
     thresholdStatus,
-    batches,
     reviewHistory,
     reviewHistoryTotal,
     reviewHistoryPage,
+    crawlHistory,
+    crawlHistoryTotal,
+    crawlHistoryPage,
     comparePayload,
     lastBundlePath,
     requiredZipContents,
     doStatus,
+    doPreflight,
     ingest,
     refreshOverview,
-    refreshBatches,
     refreshCandidates,
     refreshReviewHistory,
+    refreshCrawlHistory,
     reviewCandidates,
-    clearMlflowBatch,
     clearMlflowAll,
     refreshThresholdStatus,
     exportBundle,
-    importArtifact,
+    importModelZip,
     triggerDO,
+    refreshDOPreflight,
     refreshDOStatus,
     refreshCompare,
     promote,
@@ -79,19 +90,15 @@ export function MLFlowPage({ availableModels }: MLFlowPageProps) {
 
   const [urlsText, setUrlsText] = useState(() => {
     if (typeof window === "undefined") return "";
-    const raw = window.localStorage.getItem(MLFLOW_URLS_DRAFT_KEY);
-    return raw ?? "";
+    return safeReadLocalStorageString(MLFLOW_URLS_DRAFT_KEY, "");
   });
   const [selectedModel, setSelectedModel] = useState<string>(() => {
     if (typeof window === "undefined") return availableModels[0] || "";
-    const raw = window.localStorage.getItem(MLFLOW_MODEL_DRAFT_KEY);
-    return raw || availableModels[0] || "";
+    return safeReadLocalStorageString(MLFLOW_MODEL_DRAFT_KEY, availableModels[0] || "");
   });
   const [selectedCandidateIds, setSelectedCandidateIds] = useState<number[]>([]);
-  const [minCandidateScore, setMinCandidateScore] = useState(0.5);
-  const [scoreSortMode, setScoreSortMode] = useState<"high_to_low" | "low_to_high">("high_to_low");
-  const [artifactRunName, setArtifactRunName] = useState("");
-  const [artifactPath, setArtifactPath] = useState("");
+  const [importModelName, setImportModelName] = useState("");
+  const [importModelZipFile, setImportModelZipFile] = useState<File | null>(null);
   const [statusText, setStatusText] = useState<string | null>(null);
   const [includeUnusedInExport, setIncludeUnusedInExport] = useState(false);
   const [unusedScope, setUnusedScope] = useState<MlflowUnusedScope>("all");
@@ -101,54 +108,81 @@ export function MLFlowPage({ availableModels }: MLFlowPageProps) {
     timeout_count?: number;
     total_urls?: number;
   } | null>(null);
+  const [activeTab, setActiveTab] = useState("step1");
+  const [manualTabUnlocked, setManualTabUnlocked] = useState(false);
+  const [selectedComputeMode, setSelectedComputeMode] = useState<"gpu" | "cpu" | "local_m1">("gpu");
+  const [selectedTrainingMode, setSelectedTrainingMode] = useState<"retrain" | "finetune">("retrain");
+  const [finetuneBaseModel, setFinetuneBaseModel] = useState("");
+  const [cpuProfileInput, setCpuProfileInput] = useState("");
+  const prevDoStatusRef = useRef<string>("idle");
 
   useEffect(() => {
-    void refreshBatches();
-    if (!activeBatchId) {
-      void refreshOverview();
-      void refreshCompare();
+    void refreshOverview();
+    void refreshCandidates(undefined, 1, "all_batches");
+    void refreshThresholdStatus(activeBatchId);
+    void refreshReviewHistory(undefined, historyDecision, 1, "all_batches");
+    void refreshCrawlHistory(1);
+    void refreshCompare();
+    void refreshDOPreflight();
+  }, []);
+
+  useEffect(() => {
+    const firstSelectable = availableModels.find((model) => !isDeprecatedModel(model)) || availableModels[0] || "";
+    if (!selectedModel && firstSelectable) {
+      setSelectedModel(firstSelectable);
       return;
     }
-    void refreshOverview(activeBatchId);
-    void refreshCandidates(activeBatchId, 1);
-    void refreshThresholdStatus(activeBatchId);
-    void refreshReviewHistory(activeBatchId, historyDecision, 1);
-    void refreshCompare();
-  }, []);
-  useEffect(() => {
-    if (!selectedModel && availableModels[0]) {
-      setSelectedModel(availableModels[0]);
+    if (selectedModel && isDeprecatedModel(selectedModel) && firstSelectable && selectedModel !== firstSelectable) {
+      setSelectedModel(firstSelectable);
     }
   }, [availableModels, selectedModel]);
 
   useEffect(() => {
-    if (!activeBatchId) return;
-    void refreshReviewHistory(activeBatchId, historyDecision, 1);
-  }, [activeBatchId, historyDecision]);
+    const firstSelectable = availableModels.find((model) => !isDeprecatedModel(model)) || availableModels[0] || "";
+    if (!finetuneBaseModel && firstSelectable) {
+      setFinetuneBaseModel(firstSelectable);
+      return;
+    }
+    if (finetuneBaseModel && isDeprecatedModel(finetuneBaseModel) && firstSelectable && finetuneBaseModel !== firstSelectable) {
+      setFinetuneBaseModel(firstSelectable);
+    }
+  }, [availableModels, finetuneBaseModel]);
+
   useEffect(() => {
-    safeWriteLocalStorage(MLFLOW_URLS_DRAFT_KEY, urlsText);
+    void refreshReviewHistory(undefined, historyDecision, 1, "all_batches");
+  }, [historyDecision]);
+
+  useEffect(() => {
+    safeWriteLocalStorageString(MLFLOW_URLS_DRAFT_KEY, urlsText);
   }, [urlsText]);
 
   useEffect(() => {
     if (!selectedModel) return;
-    safeWriteLocalStorage(MLFLOW_MODEL_DRAFT_KEY, selectedModel);
+    safeWriteLocalStorageString(MLFLOW_MODEL_DRAFT_KEY, selectedModel);
   }, [selectedModel]);
 
   useEffect(() => {
-    if (!activeBatchId) {
-      setSelectedCandidateIds([]);
-      return;
-    }
-    const map = safeReadLocalStorage<Record<string, number[]>>(MLFLOW_CANDIDATE_SELECTIONS_KEY, {});
-    const persisted = map[activeBatchId] || [];
     const availableIds = new Set(candidates.map((item) => item.id));
-    const sanitized = persisted.filter((id) => availableIds.has(id));
-    setSelectedCandidateIds(sanitized);
-    if (sanitized.length !== persisted.length) {
-      map[activeBatchId] = sanitized;
-      safeWriteLocalStorage(MLFLOW_CANDIDATE_SELECTIONS_KEY, map);
+    setSelectedCandidateIds((prev) => prev.filter((id) => availableIds.has(id)));
+  }, [candidates]);
+
+  useEffect(() => {
+    if (!manualTabUnlocked && activeTab === "step3") {
+      setActiveTab("step4");
     }
-  }, [activeBatchId, candidates]);
+  }, [activeTab, manualTabUnlocked]);
+
+  useEffect(() => {
+    if (cpuProfileInput.trim()) return;
+    const fromPreflight =
+      doPreflight && typeof doPreflight.config?.do_default_cpu_size === "string"
+        ? doPreflight.config.do_default_cpu_size
+        : "";
+    if (fromPreflight.trim()) {
+      setCpuProfileInput(fromPreflight.trim());
+    }
+  }, [cpuProfileInput, doPreflight]);
+
   const parsedUrls = useMemo(
     () =>
       urlsText
@@ -209,43 +243,17 @@ export function MLFlowPage({ availableModels }: MLFlowPageProps) {
     return inferDomainFromUrl(item.url);
   };
 
-  const filteredCandidates = useMemo(() => {
-    const withScore = candidates.filter((item) => {
-      const score = Number(item.score ?? 0);
-      return score >= minCandidateScore;
-    });
-
-    return withScore.sort((a, b) => {
-      const scoreA = Number(a.score ?? 0);
-      const scoreB = Number(b.score ?? 0);
-      return scoreSortMode === "high_to_low" ? scoreB - scoreA : scoreA - scoreB;
-    });
-  }, [candidates, minCandidateScore, scoreSortMode]);
-
-  const persistSelectionByBatch = (batchId: string | null, ids: number[]) => {
-    if (!batchId) return;
-    const map = safeReadLocalStorage<Record<string, number[]>>(MLFLOW_CANDIDATE_SELECTIONS_KEY, {});
-    map[batchId] = ids;
-    safeWriteLocalStorage(MLFLOW_CANDIDATE_SELECTIONS_KEY, map);
-  };
-
   const toggleCandidate = (id: number) => {
-    setSelectedCandidateIds((prev) => {
-      const next = prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id];
-      persistSelectionByBatch(activeBatchId, next);
-      return next;
-    });
+    setSelectedCandidateIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
   };
 
   const handleSelectAllCandidates = () => {
-    const ids = filteredCandidates.map((item) => item.id);
+    const ids = candidates.map((item) => item.id);
     setSelectedCandidateIds(ids);
-    persistSelectionByBatch(activeBatchId, ids);
   };
 
   const handleUnselectAllCandidates = () => {
     setSelectedCandidateIds([]);
-    persistSelectionByBatch(activeBatchId, []);
   };
 
   const handleCandidateRowToggle = (event: MouseEvent<HTMLDivElement>, id: number) => {
@@ -272,7 +280,6 @@ export function MLFlowPage({ availableModels }: MLFlowPageProps) {
       setStatusText(`Đã ingest batch ${result.batch_id}`);
       setCrawlSummary(summary);
       setSelectedCandidateIds([]);
-      persistSelectionByBatch(result.batch_id, []);
 
       if (total <= 0) {
         toast.warning("Crawl hoàn tất nhưng không tìm thấy comment.");
@@ -308,9 +315,7 @@ export function MLFlowPage({ availableModels }: MLFlowPageProps) {
                     : undefined,
         })),
       );
-      await refreshBatches();
       setSelectedCandidateIds([]);
-      persistSelectionByBatch(activeBatchId, []);
 
       if (action === "include_toxic") {
         setStatusText(`Đã lưu ${payload.updated} mẫu Toxic vào DB.`);
@@ -325,45 +330,6 @@ export function MLFlowPage({ availableModels }: MLFlowPageProps) {
     } catch {
       setStatusText("Lưu review vào DB thất bại.");
       toast.error("Lưu review vào DB thất bại.");
-    }
-  };
-
-  const handleBatchChange = async (nextBatchId: string) => {
-    if (!nextBatchId || nextBatchId === activeBatchId) return;
-
-    setSelectedCandidateIds([]);
-    persistSelectionByBatch(activeBatchId, []);
-
-    try {
-      await refreshOverview(nextBatchId);
-      await refreshCandidates(nextBatchId, 1);
-      await refreshThresholdStatus(nextBatchId);
-      await refreshReviewHistory(nextBatchId, historyDecision, 1);
-      setStatusText(`Đã chuyển sang batch ${nextBatchId}.`);
-    } catch {
-      setStatusText("Chuyển batch thất bại.");
-      toast.error("Chuyển batch thất bại.");
-    }
-  };
-
-  const handleClearCurrentBatch = async () => {
-    if (!activeBatchId) return;
-
-    const confirmed = window.confirm(`Xóa toàn bộ dữ liệu MLFlow của batch ${activeBatchId}?`);
-    if (!confirmed) return;
-
-    try {
-      const payload = await clearMlflowBatch(activeBatchId);
-      setSelectedCandidateIds([]);
-      persistSelectionByBatch(activeBatchId, []);
-      const rows = payload.deleted_rows;
-      setStatusText(
-        `Đã clear batch ${payload.batch_id}: do_run=${rows.mlflow_do_run}, items=${rows.mlflow_comment_item}, batches=${rows.mlflow_crawl_batch}.`,
-      );
-      toast.success(`Đã clear batch ${payload.batch_id}.`);
-    } catch {
-      setStatusText("Clear current batch thất bại.");
-      toast.error("Clear current batch thất bại.");
     }
   };
 
@@ -382,12 +348,10 @@ export function MLFlowPage({ availableModels }: MLFlowPageProps) {
       const payload = await clearMlflowAll(token.trim());
       setSelectedCandidateIds([]);
       const rows = payload.deleted_rows;
-      setStatusText(
-        `Đã clear toàn bộ MLFlow: do_run=${rows.mlflow_do_run}, artifacts=${rows.mlflow_training_artifact}, items=${rows.mlflow_comment_item}, batches=${rows.mlflow_crawl_batch}.`,
+      toast.success(
+        `Đã clear MLFlow: do_run=${rows.mlflow_do_run}, artifacts=${rows.mlflow_training_artifact}, items=${rows.mlflow_comment_item}, batches=${rows.mlflow_crawl_batch}.`,
       );
-      toast.success("Đã clear toàn bộ dữ liệu MLFlow.");
     } catch {
-      setStatusText("Clear all MLFlow thất bại.");
       toast.error("Clear all MLFlow thất bại.");
     }
   };
@@ -395,36 +359,76 @@ export function MLFlowPage({ availableModels }: MLFlowPageProps) {
   const handleExportBundle = async () => {
     try {
       const payload = await exportBundle(activeBatchId, {
+        scope: "all_batches",
         includeUnused: includeUnusedInExport,
         unusedScope,
       });
+
+      const downloadHref = payload.download_url.startsWith("http")
+        ? payload.download_url
+        : `${window.location.origin}${payload.download_url}`;
+      const anchor = document.createElement("a");
+      anchor.href = downloadHref;
+      anchor.rel = "noopener noreferrer";
+      anchor.download = payload.bundle_path.split("/").pop() || "mlflow_bundle.zip";
+      document.body.appendChild(anchor);
+      anchor.click();
+      document.body.removeChild(anchor);
+
+      const merge = payload.merge_stats;
+      const mergeText = merge
+        ? ` | merge train +${merge.added_to_train}, dup ${merge.skipped_duplicate}, final ${merge.final_train_count}`
+        : "";
       setStatusText(
-        `Đã tạo bundle train/import. accepted ${payload.count}, candidate ${payload.candidate_count}, unused ${payload.unused_count}.`,
+        `Đã tạo và tải bundle (${payload.scope}). accepted ${payload.count}, candidate ${payload.candidate_count}, unused ${payload.unused_count}${mergeText}.`,
       );
     } catch {
       setStatusText("Export bundle thất bại.");
     }
   };
 
-  const handleImportArtifact = async () => {
-    if (!artifactRunName.trim() || !artifactPath.trim()) {
-      setStatusText("Nhập run name và artifact path trước khi import.");
+  const handleImportModelZip = async () => {
+    const modelName = importModelName.trim();
+    if (!modelName) {
+      setStatusText("Nhập model name trước khi import.");
+      return;
+    }
+    if (!importModelZipFile) {
+      setStatusText("Chọn file ZIP model trước khi import.");
       return;
     }
     try {
-      await importArtifact(artifactRunName.trim(), artifactPath.trim());
-      setStatusText("Đã lưu metadata artifact import.");
+      const payload = await importModelZip(modelName, importModelZipFile);
+      if (typeof onModelsChanged === "function") {
+        await onModelsChanged();
+      }
+      setSelectedModel(payload.model_id);
+      setImportModelName("");
+      setImportModelZipFile(null);
+      setStatusText(`Đã import model ${payload.model_id}.`);
+      toast.success(`Đã import model ${payload.model_id}.`);
     } catch {
-      setStatusText("Import artifact thất bại.");
+      setStatusText("Import model ZIP thất bại.");
+      toast.error("Import model ZIP thất bại.");
     }
   };
 
   const handleTriggerDO = async () => {
     try {
-      const payload = await triggerDO();
-      setStatusText(`Đã trigger DO placeholder run ${payload.run_id}.`);
+      const payload = await triggerDO({
+        computeMode: selectedComputeMode,
+        trainingMode: selectedTrainingMode,
+        baseModel: selectedTrainingMode === "finetune" ? finetuneBaseModel : undefined,
+        cpuProfile: cpuProfileInput,
+      });
+      const modeLabel =
+        selectedComputeMode === "local_m1" ? "LOCAL_M1" : selectedComputeMode.toUpperCase();
+      const trainingLabel = selectedTrainingMode === "finetune" ? "FINETUNE" : "RETRAIN";
+      setStatusText(`Đã trigger DO run ${payload.run_id} (${payload.status}) - ${trainingLabel}.`);
+      toast.success(`Đã trigger DO ${modeLabel} run ${payload.run_id} (${trainingLabel}).`);
     } catch {
       setStatusText("Trigger DO pipeline thất bại.");
+      toast.error("Trigger DO pipeline thất bại.");
     }
   };
 
@@ -442,6 +446,100 @@ export function MLFlowPage({ availableModels }: MLFlowPageProps) {
     }
   };
 
+  const defaultDoStages = [
+    "trigger_vm_gpu",
+    "upload_data_and_train_files",
+    "train",
+    "save_artifact",
+    "destroy_vm",
+  ];
+  const doStageLabels: Record<string, string> = {
+    trigger_vm_gpu: "Provision VM (CPU/GPU)",
+    upload_data_and_train_files: "Upload data + train files",
+    train: "Train trên VM",
+    save_artifact: "Lưu artifact",
+    destroy_vm: "Destroy VM",
+    prepare_local_bundle: "Prepare local fresh bundle",
+    train_local_m1: "Train local trên M1",
+    finalize_local_run: "Finalize local run",
+  };
+
+  const doStages =
+    Array.isArray(doStatus?.stages) && (doStatus.stages as unknown[]).every((stage) => typeof stage === "string")
+      ? (doStatus.stages as string[])
+      : defaultDoStages;
+  const doStatusValue = (doStatus?.status as string | undefined) || "idle";
+  const doCurrentStage = (doStatus?.current_stage as string | undefined) || "";
+  const doLogs = Array.isArray(doStatus?.logs) ? (doStatus?.logs as string[]) : [];
+  const doRunId = (doStatus?.run_id as string | undefined) || "-";
+  const doProvider = (doStatus?.provider as string | undefined) || "-";
+  const doBatchId = (doStatus?.batch_id as string | undefined) || "-";
+  const doGpuProfile = (doStatus?.gpu_profile as string | undefined) || "-";
+  const doComputeMode = ((doStatus?.compute_mode as string | undefined) || selectedComputeMode || "gpu").toLowerCase();
+  const doTrainingMode = ((doStatus?.training_mode as string | undefined) || selectedTrainingMode || "retrain").toLowerCase();
+  const doBaseModel = (doStatus?.base_model as string | undefined) || (selectedTrainingMode === "finetune" ? finetuneBaseModel : "");
+  const doDropletProfile =
+    (doStatus?.droplet_profile as string | undefined) ||
+    (doComputeMode === "cpu" ? (cpuProfileInput.trim() || doGpuProfile) : doGpuProfile);
+  const doEtaEstimate = Number(doStatus?.eta_estimate_minutes);
+  const doTrainDuration = Number(doStatus?.train_duration_minutes);
+  const doCpuPercent = Number(doStatus?.cpu_percent);
+  const doMemoryPercent = Number(doStatus?.memory_percent);
+  const doTelemetryLastSampleAt = (doStatus?.telemetry_last_sample_at as string | undefined) || "";
+  const doDropletId = (doStatus?.droplet_id as string | undefined) || "-";
+  const doArtifactUri = (doStatus?.artifact_uri as string | undefined) || "";
+  const doChecksum = (doStatus?.artifact_checksum as string | undefined) || "";
+  const doSignedUrl = (doStatus?.signed_download_url as string | undefined) || "";
+  const doErrorMessage = (doStatus?.error_message as string | undefined) || "";
+  const doApiCallEvidence = doLogs.find((line) => line.startsWith("DO API request:")) || "";
+  const doIsPlaceholder =
+    doStatusValue === "placeholder" || doLogs.some((line) => line.toLowerCase().includes("placeholder flow only"));
+  const doIsRestricted = /restricted|account tier|increase your account tier/i.test(doErrorMessage);
+  const hasDoEtaEstimate = Number.isFinite(doEtaEstimate) && doEtaEstimate > 0;
+  const hasDoTrainDuration = Number.isFinite(doTrainDuration) && doTrainDuration >= 0;
+  const hasDoCpuPercent = Number.isFinite(doCpuPercent) && doCpuPercent >= 0;
+  const hasDoMemoryPercent = Number.isFinite(doMemoryPercent) && doMemoryPercent >= 0;
+  const hasDoTelemetrySample = doTelemetryLastSampleAt.length > 0;
+
+  useEffect(() => {
+    const prev = prevDoStatusRef.current;
+    if (prev === doStatusValue) return;
+
+    if (doStatusValue === "running") {
+      toast.message("DO pipeline đang chạy.");
+    } else if (doStatusValue === "completed") {
+      toast.success("DO pipeline hoàn tất.");
+    } else if (doStatusValue === "failed") {
+      if (doIsRestricted) {
+        toast.error("GPU bị restricted. Hãy chuyển CPU hoặc mở ticket tăng tier.");
+      } else {
+        toast.error("DO pipeline thất bại.");
+      }
+    }
+
+    prevDoStatusRef.current = doStatusValue;
+  }, [doIsRestricted, doStatusValue]);
+
+  const doCompletedIndex = doStages.findIndex((s) => s === doCurrentStage);
+  const doHasStageProgress = ["running", "failed", "completed", "dry_run"].includes(doStatusValue);
+  const doProgress =
+    doStatusValue === "completed"
+      ? 100
+      : doStatusValue === "queued" || doStatusValue === "placeholder"
+        ? 0
+        : !doHasStageProgress || doCompletedIndex < 0
+          ? 0
+          : Math.min(95, Math.round(((doCompletedIndex + 1) / doStages.length) * 100));
+
+  const doBadgeVariant =
+    doStatusValue === "failed"
+      ? "destructive"
+      : doStatusValue === "completed"
+        ? "secondary"
+        : doStatusValue === "running" || doStatusValue === "queued"
+          ? "default"
+          : "outline";
+
   return (
     <div className="max-w-7xl mx-auto px-4 py-8 space-y-6">
       <Card className="p-5 border-border/80 bg-gradient-to-br from-background to-muted/30">
@@ -449,7 +547,7 @@ export function MLFlowPage({ availableModels }: MLFlowPageProps) {
           <div className="space-y-1">
             <p className="text-xs uppercase tracking-wider text-muted-foreground">Admin / ML Flow</p>
             <h1 className="text-2xl font-semibold">VietToxic Self-Learning Pipeline</h1>
-            <p className="text-sm text-muted-foreground">Ingest → Infer → Gate → Review → Retrain decision</p>
+            <p className="text-sm text-muted-foreground">Ingest → Auto Gate Persisted DB → Verify → Retrain decision</p>
           </div>
           <div className="flex items-center gap-2">
             <Badge variant={ingestStageMeta.variant}>{ingestStageMeta.label}</Badge>
@@ -491,11 +589,11 @@ export function MLFlowPage({ availableModels }: MLFlowPageProps) {
         </Card>
       )}
 
-      <Tabs defaultValue="step1" className="space-y-4">
-        <TabsList className="w-full grid grid-cols-5 h-auto">
+      <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-4">
+        <TabsList className={`w-full grid ${manualTabUnlocked ? "grid-cols-5" : "grid-cols-4"} h-auto`}>
           <TabsTrigger value="step1">Thu thập & Gán nhãn</TabsTrigger>
-          <TabsTrigger value="step2">Kiểm tra Threshold</TabsTrigger>
-          <TabsTrigger value="step3">Thủ công: Train & Import</TabsTrigger>
+          <TabsTrigger value="step2">Dataset</TabsTrigger>
+          {manualTabUnlocked && <TabsTrigger value="step3">Thủ công: Train & Import</TabsTrigger>}
           <TabsTrigger value="step4">Tự động: DigitalOcean</TabsTrigger>
           <TabsTrigger value="step5">Đánh giá & Gate</TabsTrigger>
         </TabsList>
@@ -510,11 +608,14 @@ export function MLFlowPage({ availableModels }: MLFlowPageProps) {
                   value={selectedModel}
                   onChange={(e) => setSelectedModel(e.target.value)}
                 >
-                  {availableModels.map((model) => (
-                    <option key={model} value={model}>
-                      {model}
-                    </option>
-                  ))}
+                  {availableModels.map((model) => {
+                    const deprecated = isDeprecatedModel(model);
+                    return (
+                      <option key={model} value={model} disabled={deprecated} className={deprecated ? "text-muted-foreground" : undefined}>
+                        {model}
+                      </option>
+                    );
+                  })}
                 </select>
               </div>
               <div className="md:col-span-3">
@@ -532,33 +633,15 @@ export function MLFlowPage({ availableModels }: MLFlowPageProps) {
               <Button
                 variant="outline"
                 onClick={() => {
-                  void refreshOverview(activeBatchId);
-                  void refreshCandidates(activeBatchId, 1);
+                  void refreshOverview();
+                  void refreshCandidates(undefined, 1, "all_batches");
                   void refreshThresholdStatus(activeBatchId);
-                  void refreshReviewHistory(activeBatchId, historyDecision, 1);
-                  void refreshBatches();
+                  void refreshReviewHistory(undefined, historyDecision, 1, "all_batches");
+                  void refreshCrawlHistory(1);
+                  void refreshCompare();
                 }}
               >
                 Refresh
-              </Button>
-              <select
-                className="rounded-md border bg-background px-3 py-2 text-sm"
-                value={activeBatchId || ""}
-                onChange={(e) => {
-                  void handleBatchChange(e.target.value);
-                }}
-              >
-                <option value="" disabled>
-                  Chọn batch
-                </option>
-                {batches.map((batch) => (
-                  <option key={batch.batch_id} value={batch.batch_id}>
-                    {batch.batch_id} · {batch.status || "-"}
-                  </option>
-                ))}
-              </select>
-              <Button variant="destructive" onClick={handleClearCurrentBatch} disabled={!activeBatchId}>
-                Clear current batch
               </Button>
               <Button variant="destructive" onClick={handleClearAllMlflow}>
                 Clear all MLFlow
@@ -608,56 +691,80 @@ export function MLFlowPage({ availableModels }: MLFlowPageProps) {
 
           <Card className="p-4 space-y-3">
             <div className="flex items-center justify-between gap-2">
-              <h3 className="font-medium">Candidate review</h3>
+              <h3 className="font-medium">Lịch sử URL đã crawl (DB persisted)</h3>
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-muted-foreground">
+                  Total: <b>{crawlHistoryTotal}</b> · page <b>{crawlHistoryPage}</b>
+                </span>
+                <Button size="sm" variant="outline" onClick={() => refreshCrawlHistory(crawlHistoryPage)}>
+                  Refresh history
+                </Button>
+              </div>
+            </div>
+            <div className="space-y-1.5 max-h-72 overflow-auto pr-1">
+              {crawlHistory.map((item) => (
+                <div key={`${item.batch_id}:${item.url_hash}`} className="rounded-md border p-2">
+                  <p className="text-sm truncate">{item.url}</p>
+                  <p className="text-xs text-muted-foreground">
+                    batch={item.batch_id} · segments={item.segment_count} · accepted={item.accepted_count} · candidate={item.candidate_count} · discarded={item.discarded_count}
+                  </p>
+                </div>
+              ))}
+              {crawlHistory.length === 0 && (
+                <p className="rounded-md border border-dashed p-4 text-sm text-muted-foreground">
+                  Chưa có lịch sử crawl.
+                </p>
+              )}
+            </div>
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="step2" className="space-y-4">
+          <Card className="p-6 text-center space-y-4">
+            <h3 className="text-xl font-semibold">Dataset toàn bộ DB (all batches)</h3>
+            <p className="text-4xl font-bold">
+              {thresholdStatus?.accepted_count ?? 0} / {thresholdStatus?.target_max_test_stage ?? 10}
+            </p>
+            <Progress value={thresholdProgress} />
+            <p className="text-sm text-muted-foreground">
+              {thresholdStatus?.is_ready ? "Đủ điều kiện retrain" : "Chưa đủ điều kiện retrain"}
+            </p>
+            <div className="flex justify-center gap-2">
+              <Button onClick={handleExportBundle}>Tải dataset xuống</Button>
+              <Button
+                variant="outline"
+                onClick={() => {
+                  void refreshThresholdStatus(activeBatchId);
+                  void refreshCandidates(undefined, candidatePage, "all_batches");
+                }}
+              >
+                Refresh
+              </Button>
+            </div>
+          </Card>
+
+          <Card className="p-4 space-y-3">
+            <div className="flex items-center justify-between gap-2">
+              <h3 className="font-medium">Manual verify (DB persisted pool)</h3>
               <div className="text-sm text-muted-foreground">
-                {candidateTotal} candidates · page {candidatePage} · size {candidatePageSize}
+                {candidateTotal} items · page {candidatePage} · size {candidatePageSize}
               </div>
             </div>
             <p className="text-xs text-muted-foreground">
-              Chọn Toxic/Clean/Remove để lưu trực tiếp vào DB cho các phase tiếp theo.
+              Chọn Toxic/Clean/Remove để cập nhật trực tiếp trong DB trước khi export/retrain.
             </p>
-            <div className="grid gap-2 md:grid-cols-3">
-              <label className="text-sm">
-                Min score
-                <Input
-                  type="number"
-                  min={0}
-                  max={1}
-                  step={0.01}
-                  value={minCandidateScore}
-                  onChange={(e: ChangeEvent<HTMLInputElement>) => {
-                    const raw = Number(e.target.value);
-                    const clamped = Number.isFinite(raw) ? Math.max(0, Math.min(1, raw)) : 0;
-                    setMinCandidateScore(clamped);
-                  }}
-                  className="mt-1"
-                />
-              </label>
-              <label className="text-sm">
-                Sort by score
-                <select
-                  className="mt-1 w-full rounded-md border bg-background px-3 py-2 text-sm"
-                  value={scoreSortMode}
-                  onChange={(e) => setScoreSortMode(e.target.value as "high_to_low" | "low_to_high")}
-                >
-                  <option value="high_to_low">High → Low</option>
-                  <option value="low_to_high">Low → High</option>
-                </select>
-              </label>
-              <div className="text-sm text-muted-foreground md:self-end">
-                Hiển thị: <b>{filteredCandidates.length}</b> / {candidates.length}
-              </div>
-            </div>
+
             <div className="flex flex-wrap gap-2">
-              <Button size="sm" variant="outline" onClick={handleSelectAllCandidates} disabled={filteredCandidates.length === 0}>
-                Select all (filtered)
+              <Button size="sm" variant="outline" onClick={handleSelectAllCandidates} disabled={candidates.length === 0}>
+                Select all
               </Button>
               <Button size="sm" variant="outline" onClick={handleUnselectAllCandidates} disabled={selectedCandidateIds.length === 0}>
                 Unselect all
               </Button>
             </div>
+
             <div className="space-y-1.5 max-h-[34rem] overflow-auto pr-1">
-              {filteredCandidates.map((item) => (
+              {candidates.map((item) => (
                 <div
                   key={item.id}
                   className="flex cursor-pointer items-start gap-2 rounded-md border p-2 hover:bg-muted/40"
@@ -672,12 +779,13 @@ export function MLFlowPage({ availableModels }: MLFlowPageProps) {
                   </div>
                 </div>
               ))}
-              {filteredCandidates.length === 0 && (
+              {candidates.length === 0 && (
                 <p className="rounded-md border border-dashed p-4 text-sm text-muted-foreground">
-                  Không có candidate nào thỏa bộ lọc score hiện tại.
+                  Không có item để verify trong DB hiện tại.
                 </p>
               )}
             </div>
+
             <div className="flex flex-wrap gap-2">
               <Button disabled={selectedCandidateIds.length === 0} onClick={() => void handleBulkReview("include_toxic")}>
                 Toxic
@@ -692,7 +800,7 @@ export function MLFlowPage({ availableModels }: MLFlowPageProps) {
               >
                 Remove
               </Button>
-              <Button size="icon" variant="outline" onClick={() => refreshCandidates(activeBatchId, candidatePage)}>
+              <Button size="icon" variant="outline" onClick={() => refreshCandidates(undefined, candidatePage, "all_batches")}>
                 <RotateCcw />
               </Button>
             </div>
@@ -713,7 +821,7 @@ export function MLFlowPage({ availableModels }: MLFlowPageProps) {
                   <option value="rejected">Rejected</option>
                   <option value="discarded">Discarded</option>
                 </select>
-                <Button size="sm" variant="outline" onClick={() => refreshReviewHistory(activeBatchId, historyDecision, reviewHistoryPage)}>
+                <Button size="sm" variant="outline" onClick={() => refreshReviewHistory(undefined, historyDecision, reviewHistoryPage, "all_batches")}>
                   Refresh history
                 </Button>
               </div>
@@ -739,34 +847,16 @@ export function MLFlowPage({ availableModels }: MLFlowPageProps) {
           </Card>
         </TabsContent>
 
-        <TabsContent value="step2" className="space-y-4">
-          <Card className="p-6 text-center space-y-4">
-            <h3 className="text-xl font-semibold">Kiểm tra threshold (test max=10)</h3>
-            <p className="text-4xl font-bold">
-              {thresholdStatus?.accepted_count ?? 0} / {thresholdStatus?.target_max_test_stage ?? 10}
-            </p>
-            <Progress value={thresholdProgress} />
-            <p className="text-sm text-muted-foreground">
-              {thresholdStatus?.is_ready ? "Đủ điều kiện retrain" : "Chưa đủ điều kiện retrain"}
-            </p>
-            <div className="flex justify-center gap-2">
-              <Button onClick={handleExportBundle}>Tải dataset xuống</Button>
-              <Button variant="outline" onClick={() => refreshThresholdStatus(activeBatchId)}>
-                Refresh
-              </Button>
-            </div>
-          </Card>
-        </TabsContent>
-
-        <TabsContent value="step3" className="space-y-4">
-          <Card className="p-4 space-y-3">
+        {manualTabUnlocked && (
+          <TabsContent value="step3" className="space-y-4">
+            <Card className="p-4 space-y-3">
             <div className="flex items-center justify-between">
               <h3 className="font-medium">Bước 1 — Tải dataset bundle</h3>
               <Button onClick={handleExportBundle}>Download</Button>
             </div>
             <p className="text-sm text-muted-foreground">Bundle mặc định gồm accepted + candidate. Bạn có thể bật thêm unused/discarded nếu cần phân tích sâu.</p>
             <p className="text-xs text-muted-foreground">
-              Export bundle lấy dữ liệu từ MLFlow DB theo batch hiện tại (accepted/candidate/unused). Endpoint này không tự merge với victsd_gold.
+              Export bundle mặc định chạy theo scope all_batches, tự tạo bộ `dataset/victsd_gold/*` đã merge accepted vào train và vẫn giữ accepted/candidate/unused để tương thích ngược.
             </p>
             <div className="rounded-md border p-3 space-y-3 bg-muted/20">
               <div className="flex items-center justify-between gap-3">
@@ -818,57 +908,308 @@ export function MLFlowPage({ availableModels }: MLFlowPageProps) {
             </div>
           </Card>
 
-          <Card className="p-4 space-y-3">
-            <h3 className="font-medium">Bước 2 — Import model</h3>
-            <div className="grid md:grid-cols-2 gap-3">
-              <Input
-                placeholder="run_20260408_retrain"
-                value={artifactRunName}
-                onChange={(e: ChangeEvent<HTMLInputElement>) => setArtifactRunName(e.target.value)}
-              />
-              <Input
-                placeholder="models/options/phobert/run_20260408_retrain"
-                value={artifactPath}
-                onChange={(e: ChangeEvent<HTMLInputElement>) => setArtifactPath(e.target.value)}
-              />
-            </div>
-            <div className="flex gap-2">
-              <Button onClick={handleImportArtifact}>Import metadata</Button>
-              <Button variant="outline" onClick={() => refreshCompare()}>
-                Refresh compare source
-              </Button>
-            </div>
-          </Card>
-        </TabsContent>
+            <Card className="p-4 space-y-3">
+              <h3 className="font-medium">Bước 2 — Import model</h3>
+              <div className="grid md:grid-cols-2 gap-3">
+                <Input
+                  placeholder="my_phobert_v3"
+                  value={importModelName}
+                  onChange={(e: ChangeEvent<HTMLInputElement>) => setImportModelName(e.target.value)}
+                />
+                <Input
+                  type="file"
+                  accept=".zip,application/zip"
+                  onChange={(e: ChangeEvent<HTMLInputElement>) => {
+                    const file = e.target.files?.[0] || null;
+                    setImportModelZipFile(file);
+                  }}
+                />
+              </div>
+              <p className="text-xs text-muted-foreground">
+                ZIP sẽ được giải nén vào models/options/phobert/&lt;model_name&gt; và tự refresh danh sách model.
+              </p>
+              <div className="flex gap-2">
+                <Button onClick={handleImportModelZip}>Import ZIP model</Button>
+                <Button variant="outline" onClick={() => refreshCompare()}>
+                  Refresh compare source
+                </Button>
+              </div>
+            </Card>
+          </TabsContent>
+        )}
 
         <TabsContent value="step4" className="space-y-4">
           <Card className="p-4 space-y-3">
-            <div className="flex items-center justify-between">
-              <h3 className="font-medium">Pipeline tự động DigitalOcean (placeholder)</h3>
-              <Button onClick={handleTriggerDO}>Kích hoạt DO Pipeline</Button>
-            </div>
-            <div className="grid gap-2 md:grid-cols-2">
-              {[
-                "Trigger VM",
-                "Upload data + train files",
-                "Train trên VM",
-                "Lưu artifact",
-                "Tải về / upload destination",
-                "Destroy VM",
-              ].map((stage) => (
-                <div key={stage} className="rounded-md border p-3 text-sm">
-                  {stage}
-                </div>
-              ))}
-            </div>
-            <div className="rounded-md border p-3 text-sm space-y-2">
-              <div className="flex items-center justify-between">
-                <span className="font-medium">Training log</span>
-                <Button size="sm" variant="outline" onClick={() => refreshDOStatus()}>
-                  Refresh log
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h3 className="font-medium">Pipeline tự động DigitalOcean (API trực tiếp)</h3>
+              <div className="flex gap-2">
+                <Button variant="outline" onClick={() => refreshDOPreflight()}>
+                  Check preflight
+                </Button>
+                <Button variant="outline" onClick={() => refreshDOStatus()}>
+                  Refresh status
+                </Button>
+                <Button
+                  variant="outline"
+                  onClick={() => {
+                    setManualTabUnlocked(true);
+                    setActiveTab("step3");
+                  }}
+                >
+                  Thủ công
+                </Button>
+                <Button
+                  onClick={handleTriggerDO}
+                  disabled={selectedComputeMode !== "local_m1" && doPreflight?.ready === false}
+                >
+                  Kích hoạt DO Pipeline
                 </Button>
               </div>
-              <pre className="text-xs whitespace-pre-wrap">{JSON.stringify(doStatus || { status: "idle" }, null, 2)}</pre>
+            </div>
+
+            <div className="rounded-md border p-3 space-y-3 bg-muted/20">
+              <p className="text-sm font-medium">Compute mode</p>
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  type="button"
+                  variant={selectedComputeMode === "gpu" ? "default" : "outline"}
+                  onClick={() => setSelectedComputeMode("gpu")}
+                >
+                  GPU
+                </Button>
+                <Button
+                  type="button"
+                  variant={selectedComputeMode === "cpu" ? "default" : "outline"}
+                  onClick={() => setSelectedComputeMode("cpu")}
+                >
+                  CPU
+                </Button>
+                <Button
+                  type="button"
+                  variant={selectedComputeMode === "local_m1" ? "default" : "outline"}
+                  onClick={() => setSelectedComputeMode("local_m1")}
+                >
+                  M1 Mac (local)
+                </Button>
+              </div>
+
+              <p className="text-sm font-medium">Training mode</p>
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  type="button"
+                  variant={selectedTrainingMode === "retrain" ? "default" : "outline"}
+                  onClick={() => setSelectedTrainingMode("retrain")}
+                >
+                  Retrain
+                </Button>
+                <Button
+                  type="button"
+                  variant={selectedTrainingMode === "finetune" ? "default" : "outline"}
+                  onClick={() => setSelectedTrainingMode("finetune")}
+                >
+                  Finetune
+                </Button>
+              </div>
+
+              {selectedTrainingMode === "finetune" && (
+                <div>
+                  <label className="text-xs text-muted-foreground">Base model (optional)</label>
+                  <Input
+                    value={finetuneBaseModel}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) => setFinetuneBaseModel(e.target.value)}
+                    placeholder="vinai/phobert-base-v2"
+                    className="mt-1"
+                    list="finetune-base-models"
+                  />
+                  <datalist id="finetune-base-models">
+                    {availableModels
+                      .filter((model) => !isDeprecatedModel(model))
+                      .map((model) => (
+                        <option key={`base-${model}`} value={model} />
+                      ))}
+                  </datalist>
+                  <p className="mt-1 text-xs text-muted-foreground">Để trống để dùng base model mặc định của script finetune.</p>
+                </div>
+              )}
+
+              {selectedComputeMode === "cpu" && (
+                <div>
+                  <label className="text-xs text-muted-foreground">CPU profile (optional slug)</label>
+                  <Input
+                    value={cpuProfileInput}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) => setCpuProfileInput(e.target.value)}
+                    placeholder="s-8vcpu-16gb"
+                    className="mt-1"
+                  />
+                </div>
+              )}
+              <p className="text-xs text-muted-foreground">
+                Retrain phù hợp khi refresh dataset lớn; Finetune phù hợp khi thêm ít data/pseudo mới để giảm tài nguyên.
+              </p>
+            </div>
+
+            <div className="grid gap-3 md:grid-cols-3">
+              <div className="rounded-md border p-3">
+                <p className="text-xs text-muted-foreground">Run ID</p>
+                <p className="text-sm font-medium break-all">{doRunId}</p>
+              </div>
+              <div className="rounded-md border p-3">
+                <p className="text-xs text-muted-foreground">Status</p>
+                <Badge variant={doBadgeVariant as "default" | "secondary" | "destructive" | "outline"}>{doStatusValue}</Badge>
+              </div>
+              <div className="rounded-md border p-3">
+                <p className="text-xs text-muted-foreground">Droplet ID</p>
+                <p className="text-sm font-medium break-all">{doDropletId}</p>
+              </div>
+              <div className="rounded-md border p-3">
+                <p className="text-xs text-muted-foreground">Provider</p>
+                <p className="text-sm font-medium break-all">{doProvider}</p>
+              </div>
+              <div className="rounded-md border p-3">
+                <p className="text-xs text-muted-foreground">Batch ID</p>
+                <p className="text-sm font-medium break-all">{doBatchId}</p>
+              </div>
+              <div className="rounded-md border p-3">
+                <p className="text-xs text-muted-foreground">Compute profile</p>
+                <p className="text-sm font-medium break-all">{doDropletProfile || "-"}</p>
+              </div>
+              <div className="rounded-md border p-3">
+                <p className="text-xs text-muted-foreground">Compute mode</p>
+                <p className="text-sm font-medium uppercase">{doComputeMode}</p>
+              </div>
+              <div className="rounded-md border p-3">
+                <p className="text-xs text-muted-foreground">Training mode</p>
+                <p className="text-sm font-medium uppercase">{doTrainingMode}</p>
+              </div>
+              <div className="rounded-md border p-3">
+                <p className="text-xs text-muted-foreground">Base model</p>
+                <p className="text-sm font-medium break-all">{doBaseModel || "default"}</p>
+              </div>
+              <div className="rounded-md border p-3">
+                <p className="text-xs text-muted-foreground">CPU usage</p>
+                <p className="text-sm font-medium">
+                  {hasDoCpuPercent ? `${doCpuPercent.toFixed(1)}%` : doStatusValue === "running" ? "Đang chờ sample..." : "-"}
+                </p>
+              </div>
+              <div className="rounded-md border p-3">
+                <p className="text-xs text-muted-foreground">Memory usage</p>
+                <p className="text-sm font-medium">
+                  {hasDoMemoryPercent ? `${doMemoryPercent.toFixed(1)}%` : doStatusValue === "running" ? "Đang chờ sample..." : "-"}
+                </p>
+              </div>
+              <div className="rounded-md border p-3">
+                <p className="text-xs text-muted-foreground">Last telemetry sample</p>
+                <p className="text-sm font-medium break-all">{hasDoTelemetrySample ? doTelemetryLastSampleAt : "-"}</p>
+              </div>
+              <div className="rounded-md border p-3">
+                <p className="text-xs text-muted-foreground">ETA train (ước tính)</p>
+                <p className="text-sm font-medium">{hasDoEtaEstimate ? `~${Math.round(doEtaEstimate)} phút` : "-"}</p>
+              </div>
+              <div className="rounded-md border p-3">
+                <p className="text-xs text-muted-foreground">Train duration (thực tế)</p>
+                <p className="text-sm font-medium">{hasDoTrainDuration ? `${doTrainDuration.toFixed(2)} phút` : "-"}</p>
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <div className="flex items-center justify-between text-sm">
+                <span className="font-medium">Pipeline progress</span>
+                <span className="text-muted-foreground">{doProgress}%</span>
+              </div>
+              <Progress value={doProgress} className="h-2" />
+            </div>
+
+            {doPreflight && (
+              <div className={`rounded-md border p-3 space-y-2 ${doPreflight.ready ? "bg-muted/20" : "border-destructive/40 bg-destructive/5"}`}>
+                <div className="flex items-center gap-2">
+                  <Badge variant={doPreflight.ready ? "secondary" : "destructive"}>{doPreflight.ready ? "READY" : "NOT READY"}</Badge>
+                  <p className="text-xs text-muted-foreground">Preflight checked at: {doPreflight.checked_at || "-"}</p>
+                </div>
+                {doPreflight.missing.length > 0 && (
+                  <p className="text-xs text-destructive">Missing env: {doPreflight.missing.join(", ")}</p>
+                )}
+                {doPreflight.warnings.length > 0 && (
+                  <ul className="list-disc ml-5 text-xs text-muted-foreground space-y-1">
+                    {doPreflight.warnings.map((w) => (
+                      <li key={w}>{w}</li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
+
+            {doIsRestricted && (
+              <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 space-y-1">
+                <p className="text-xs font-medium text-amber-700 dark:text-amber-300">GPU droplet bị restricted bởi account tier</p>
+                <p className="text-xs text-muted-foreground">
+                  Bạn có thể chuyển sang <b>CPU mode</b> để chạy tạm cho demo, hoặc mở ticket nâng tier để bật GPU droplet.
+                </p>
+              </div>
+            )}
+
+            {doIsPlaceholder && (
+              <div className="rounded-md border border-destructive/40 bg-destructive/5 p-3 space-y-1">
+                <p className="text-xs font-medium text-destructive">DO pipeline đang ở placeholder mode</p>
+                <p className="text-xs text-muted-foreground">
+                  Backend hiện không thực thi tạo droplet thật. Hãy kiểm tra lại backend version đang chạy và restart server.
+                </p>
+              </div>
+            )}
+
+            {doApiCallEvidence && (
+              <div className="rounded-md border p-3 bg-muted/20">
+                <p className="text-xs text-muted-foreground">API call evidence</p>
+                <p className="text-xs font-medium break-all">{doApiCallEvidence}</p>
+              </div>
+            )}
+
+            <div className="grid gap-2">
+              {doStages.map((stage, idx) => {
+                const currentIdx = doStages.findIndex((s) => s === doCurrentStage);
+                const isDone =
+                  doStatusValue === "completed" || doStatusValue === "dry_run" || (currentIdx >= 0 && idx < currentIdx);
+                const isRunning = doStatusValue === "running" && stage === doCurrentStage;
+                const isFailed = doStatusValue === "failed" && stage === doCurrentStage;
+                const variant = isFailed ? "destructive" : isRunning ? "default" : isDone ? "secondary" : "outline";
+                const stateText = isFailed ? "FAILED" : isRunning ? "RUNNING" : isDone ? "DONE" : "PENDING";
+                return (
+                  <div key={stage} className="rounded-md border p-3 text-sm flex items-center justify-between">
+                    <span>{doStageLabels[stage] || stage}</span>
+                    <Badge variant={variant as "default" | "secondary" | "destructive" | "outline"}>{stateText}</Badge>
+                  </div>
+                );
+              })}
+            </div>
+
+            <div className="rounded-md border p-3 text-sm space-y-2">
+              <p className="font-medium">Artifact</p>
+              <p className="text-xs break-all">URI: {doArtifactUri || "-"}</p>
+              <p className="text-xs break-all">Checksum (sha256): {doChecksum || "-"}</p>
+              {doSignedUrl && (
+                <a className="text-xs underline text-primary break-all" href={doSignedUrl} target="_blank" rel="noreferrer">
+                  Download artifact (Spaces)
+                </a>
+              )}
+              {doErrorMessage && <p className="text-xs text-destructive break-all">Error: {doErrorMessage}</p>}
+            </div>
+
+            <div className="rounded-md border p-3 text-sm space-y-2">
+              <p className="font-medium">Training log</p>
+              <div className="max-h-56 overflow-auto space-y-1">
+                {doLogs.length === 0 ? (
+                  <p className="text-xs text-muted-foreground">Chưa có log.</p>
+                ) : (
+                  doLogs.map((line, idx) => (
+                    <p key={`${idx}-${line.slice(0, 16)}`} className="text-xs text-muted-foreground">
+                      {line}
+                    </p>
+                  ))
+                )}
+              </div>
+              <details>
+                <summary className="cursor-pointer text-xs text-muted-foreground">View raw JSON</summary>
+                <pre className="text-xs whitespace-pre-wrap mt-2">{JSON.stringify(doStatus || { status: "idle" }, null, 2)}</pre>
+              </details>
             </div>
           </Card>
         </TabsContent>
@@ -915,7 +1256,7 @@ export function MLFlowPage({ availableModels }: MLFlowPageProps) {
                 ))}
               </div>
               <Button onClick={handlePromote}>Promote to Production</Button>
-              <p className="text-xs text-muted-foreground">Nút promote hiện đang chạy ở chế độ placeholder.</p>
+              <p className="text-xs text-muted-foreground">Promote dùng gate check hiện có; pipeline DO trả thêm artifact URI/checksum để kiểm tra trước khi promote.</p>
             </Card>
           </div>
         </TabsContent>

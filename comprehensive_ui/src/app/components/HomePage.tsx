@@ -31,11 +31,12 @@ export function HomePage({
   const [isProcessing, setIsProcessing] = useState(false);
   const [uiProgress, setUiProgress] = useState(0);
 
+  const isDeprecatedModel = (model: string) => model.toLowerCase().includes("deprecated");
   const primaryModel = selectedModels[0] ?? "";
   const compareModel = selectedModels[1] ?? "";
   const compareEnabled = selectedModels.length > 1;
   const compareCandidates = useMemo(
-    () => availableModels.filter((model) => model !== primaryModel),
+    () => availableModels.filter((model) => model !== primaryModel && !isDeprecatedModel(model)),
     [availableModels, primaryModel],
   );
   const targetProgress = Math.max(0, Math.min(100, Math.round(analysisProgress ?? 0)));
@@ -150,11 +151,14 @@ export function HomePage({
               >
                 {modelsLoading && <option value="">{t("home.loading")}</option>}
                 {!modelsLoading && availableModels.length === 0 && <option value="">{t("home.noModels")}</option>}
-                {availableModels.map((model) => (
-                  <option key={model} value={model}>
-                    {model}
-                  </option>
-                ))}
+                {availableModels.map((model) => {
+                  const deprecated = isDeprecatedModel(model);
+                  return (
+                    <option key={model} value={model} disabled={deprecated} className={deprecated ? "text-muted-foreground" : undefined}>
+                      {model}
+                    </option>
+                  );
+                })}
               </select>
 
               <button
