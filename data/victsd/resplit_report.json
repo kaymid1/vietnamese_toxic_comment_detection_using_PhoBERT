@@ -1,0 +1,51 @@
+{
+  "splits": {
+    "train": {
+      "total": 6482,
+      "clean": 4369,
+      "toxic": 2113,
+      "toxic_ratio": 0.3259796359148411,
+      "unique_norm_text": 6354,
+      "unique_loose_text": 6325
+    },
+    "validation": {
+      "total": 1852,
+      "clean": 1248,
+      "toxic": 604,
+      "toxic_ratio": 0.326133909287257,
+      "unique_norm_text": 1852,
+      "unique_loose_text": 1850
+    },
+    "test": {
+      "total": 926,
+      "clean": 624,
+      "toxic": 302,
+      "toxic_ratio": 0.326133909287257,
+      "unique_norm_text": 926,
+      "unique_loose_text": 925
+    }
+  },
+  "overlap_normalized_text": {
+    "train_validation": 0,
+    "train_test": 0,
+    "validation_test": 0
+  },
+  "overlap_loose_text": {
+    "train_validation": 8,
+    "train_test": 7,
+    "validation_test": 2
+  },
+  "config": {
+    "input_dir": "/Users/mac/git/Thesis/data/victsd",
+    "output_dir": "/Users/mac/git/Thesis/data/victsd",
+    "train_ratio": 0.7,
+    "validation_ratio": 0.2,
+    "test_ratio": 0.1,
+    "seed": 42,
+    "dry_run": false
+  },
+  "global": {
+    "total_rows": 9260,
+    "unique_normalized_text_groups": 9132
+  }
+}
