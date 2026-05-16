@@ -1,0 +1,43 @@
+models_2/
+models/options/
+model.safetensors
+__pycache__/
+.pycache/
+*.pyc
+.DS_Store
+._*
+.venv/
+venv/
+comprehensive_ui/node_modules/
+comprehensive_ui/package-lock.json
+comprehensive_ui/dist/
+data/processed/
+data/raw/crawled_urls/
+viettoxic_outputs/
+viettoxic_outputs_extract/
+.env
+.env.local
+.env.*
+**/.env
+**/.env.local
+**/.env.*
+
+# IDE & Tool configs
+.claude/
+.serena/
+.mcp.json
+.vscode/
+
+
+# Build outputs
+comprehensive_ui/dist/
+
+# MLflow & Experiment runs
+mlruns_smoke_mlflow/
+mlruns_smoke_mlflow_v2/
+
+# Generated/Output data
+data/pseudo_labels/
+results/
+experiments/retrain_runs/
+experiments/crawler_audit.md

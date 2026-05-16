@@ -1,0 +1,70 @@
+name: Build & Push Images
+
+# Runs on every merge to main → builds multi-platform images and pushes to GHCR.
+on:
+  push:
+    branches: [main]
+
+# Only one build runs at a time per branch; a new push cancels the in-flight one.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  # TODO: replace <your-github-username> with your actual GitHub username
+  BACKEND_IMAGE:  ghcr.io/<your-github-username>/viettoxic-backend
+  FRONTEND_IMAGE: ghcr.io/<your-github-username>/viettoxic-frontend
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write   # required to push to GHCR
+
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+      # QEMU lets the AMD64 GitHub runner cross-compile an ARM64 image.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@4574d27a4764455b42196d70a065bc6853246a25  # v3.4.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f7ce87c1d6bead3e36075b2ce75da1f6cc28aaca  # v3.9.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567  # v3.3.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # ---- Backend --------------------------------------------------------
+      - name: Build & push backend
+        uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991  # v6.13.0
+        with:
+          context: .
+          file: backend/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.BACKEND_IMAGE }}:latest
+            ${{ env.BACKEND_IMAGE }}:${{ github.sha }}
+          # GitHub Actions layer cache — first build ~15 min, subsequent ~2-3 min
+          cache-from: type=gha
+          cache-to:   type=gha,mode=max
+
+      # ---- Frontend -------------------------------------------------------
+      - name: Build & push frontend
+        uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991  # v6.13.0
+        with:
+          context: ./comprehensive_ui
+          file: comprehensive_ui/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.FRONTEND_IMAGE }}:latest
+            ${{ env.FRONTEND_IMAGE }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to:   type=gha,mode=max
