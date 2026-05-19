@@ -392,18 +392,27 @@ export function MLFlowPage({ availableModels, onModelsChanged }: MLFlowPageProps
   };
 
   const handleTriggerDO = async () => {
+    const resolvedBaseModel =
+      selectedTrainingMode === "retrain" ? selectedModel.trim() : finetuneBaseModel.trim();
+    if (selectedTrainingMode === "retrain" && !resolvedBaseModel) {
+      setStatusText("Retrain yêu cầu base model. Hãy chọn model ở bước ingest trước khi trigger.");
+      toast.error("Thiếu base model cho retrain.");
+      return;
+    }
+
     try {
       const payload = await triggerDO({
         trainingMode: selectedTrainingMode,
-        baseModel: selectedTrainingMode === "finetune" ? finetuneBaseModel : undefined,
+        baseModel: resolvedBaseModel || undefined,
       });
       const modeLabel = "COLAB";
       const trainingLabel = selectedTrainingMode === "finetune" ? "FINETUNE" : "RETRAIN";
       setStatusText(`Đã trigger Kaggle run ${payload.run_id} (${payload.status}) - ${trainingLabel}.`);
       toast.success(`Đã trigger Kaggle ${modeLabel} run ${payload.run_id} (${trainingLabel}).`);
-    } catch {
-      setStatusText("Trigger Kaggle pipeline thất bại.");
-      toast.error("Trigger Kaggle pipeline thất bại.");
+    } catch (error) {
+      const detail = error instanceof Error && error.message ? error.message : "Không rõ nguyên nhân.";
+      setStatusText(`Trigger Kaggle pipeline thất bại: ${detail}`);
+      toast.error(`Trigger Kaggle pipeline thất bại: ${detail}`);
     }
   };
 
@@ -476,13 +485,31 @@ export function MLFlowPage({ availableModels, onModelsChanged }: MLFlowPageProps
   const doTelemetryLastSampleAt = (doStatus?.telemetry_last_sample_at as string | undefined) || "";
   const doDropletId = (doStatus?.droplet_id as string | undefined) || "-";
   const doArtifactUri = (doStatus?.artifact_uri as string | undefined) || "";
+  const doArtifactKind = ((doStatus?.artifact_kind as string | undefined) || "none").toLowerCase();
   const doChecksum = (doStatus?.artifact_checksum as string | undefined) || "";
   const doSignedUrl = (doStatus?.signed_download_url as string | undefined) || "";
   const doErrorMessage = (doStatus?.error_message as string | undefined) || "";
+  const doRunMode = ((doStatus?.run_mode as string | undefined) || "unknown").toLowerCase();
+  const doStatusSource = ((doStatus?.status_source as string | undefined) || "local_db").toLowerCase();
+  const doStageTimestamps =
+    doStatus?.stage_timestamps && typeof doStatus.stage_timestamps === "object"
+      ? (doStatus.stage_timestamps as Record<string, string | null>)
+      : {};
+  const doLogEvents = Array.isArray(doStatus?.log_events) ? (doStatus.log_events as Array<Record<string, unknown>>) : [];
   const doApiCallEvidence = "";
+  const doIsMockRun = doRunMode === "mock" || doDropletId.toLowerCase().startsWith("mock_");
   const doIsPlaceholder =
-    doStatusValue === "placeholder" || doLogs.some((line) => line.toLowerCase().includes("placeholder flow only"));
+    doStatusValue === "placeholder" ||
+    doLogs.some((line) => line.toLowerCase().includes("placeholder flow only")) ||
+    doIsMockRun;
   const doIsRestricted = /restricted|account tier|increase your account tier/i.test(doErrorMessage);
+  const doIsMockArtifact = doArtifactKind === "mock" || doArtifactUri.toLowerCase().startsWith("mock://");
+  const doHasRealArtifact = doArtifactKind === "real" && !!doArtifactUri;
+  const formatIsoTs = (value: string | null | undefined) => {
+    if (!value) return "-";
+    const d = new Date(value);
+    return Number.isNaN(d.getTime()) ? value : d.toLocaleString();
+  };
   const hasDoEtaEstimate = Number.isFinite(doEtaEstimate) && doEtaEstimate > 0;
   const hasDoTrainDuration = Number.isFinite(doTrainDuration) && doTrainDuration >= 0;
   const hasDoCpuPercent = Number.isFinite(doCpuPercent) && doCpuPercent >= 0;
@@ -1022,6 +1049,10 @@ export function MLFlowPage({ availableModels, onModelsChanged }: MLFlowPageProps
                 <Badge variant={doBadgeVariant as "default" | "secondary" | "destructive" | "outline"}>{doStatusValue}</Badge>
               </div>
               <div className="rounded-md border p-3">
+                <p className="text-xs text-muted-foreground">Run mode</p>
+                <Badge variant={doIsMockRun ? "destructive" : "secondary"}>{doIsMockRun ? "MOCK" : "REAL"}</Badge>
+              </div>
+              <div className="rounded-md border p-3">
                 <p className="text-xs text-muted-foreground">Droplet ID</p>
                 <p className="text-sm font-medium break-all">{doDropletId}</p>
               </div>
@@ -1048,6 +1079,16 @@ export function MLFlowPage({ availableModels, onModelsChanged }: MLFlowPageProps
               <div className="rounded-md border p-3">
                 <p className="text-xs text-muted-foreground">Base model</p>
                 <p className="text-sm font-medium break-all">{doBaseModel || "default"}</p>
+              </div>
+              <div className="rounded-md border p-3">
+                <p className="text-xs text-muted-foreground">Status source</p>
+                <p className="text-sm font-medium break-all">{doStatusSource}</p>
+              </div>
+              <div className="rounded-md border p-3">
+                <p className="text-xs text-muted-foreground">Artifact type</p>
+                <Badge variant={doIsMockArtifact ? "destructive" : doHasRealArtifact ? "secondary" : "outline"}>
+                  {doIsMockArtifact ? "PLACEHOLDER" : doHasRealArtifact ? "REAL" : "NONE"}
+                </Badge>
               </div>
               <div className="rounded-md border p-3">
                 <p className="text-xs text-muted-foreground">CPU usage</p>
@@ -1081,6 +1122,17 @@ export function MLFlowPage({ availableModels, onModelsChanged }: MLFlowPageProps
                 <span className="text-muted-foreground">{doProgress}%</span>
               </div>
               <Progress value={doProgress} className="h-2" />
+            </div>
+
+            <div className="rounded-md border p-3 bg-muted/20 space-y-1">
+              <p className="text-sm font-medium">Run provenance</p>
+              <p className="text-xs text-muted-foreground">
+                Đây là <b>{doIsMockRun ? "mock/test run" : "real run"}</b>. Nguồn cập nhật status: <b>{doStatusSource}</b>.
+              </p>
+              <p className="text-xs text-muted-foreground">
+                Created: {formatIsoTs((doStatus?.created_at as string | undefined) || null)} | Updated:{" "}
+                {formatIsoTs((doStatus?.updated_at as string | undefined) || null)}
+              </p>
             </div>
 
             {doPreflight && (
@@ -1137,8 +1189,11 @@ export function MLFlowPage({ availableModels, onModelsChanged }: MLFlowPageProps
                 const variant = isFailed ? "destructive" : isRunning ? "default" : isDone ? "secondary" : "outline";
                 const stateText = isFailed ? "FAILED" : isRunning ? "RUNNING" : isDone ? "DONE" : "PENDING";
                 return (
-                  <div key={stage} className="rounded-md border p-3 text-sm flex items-center justify-between">
-                    <span>{doStageLabels[stage] || stage}</span>
+                  <div key={stage} className="rounded-md border p-3 text-sm flex items-center justify-between gap-3">
+                    <div>
+                      <p>{doStageLabels[stage] || stage}</p>
+                      <p className="text-xs text-muted-foreground">At: {formatIsoTs(doStageTimestamps[stage] || null)}</p>
+                    </div>
                     <Badge variant={variant as "default" | "secondary" | "destructive" | "outline"}>{stateText}</Badge>
                   </div>
                 );
@@ -1147,6 +1202,11 @@ export function MLFlowPage({ availableModels, onModelsChanged }: MLFlowPageProps
 
             <div className="rounded-md border p-3 text-sm space-y-2">
               <p className="font-medium">Artifact</p>
+              {doIsMockArtifact && (
+                <p className="text-xs text-amber-700 dark:text-amber-300">
+                  Artifact này là placeholder từ mock webhook, không phải model ZIP thật từ Kaggle.
+                </p>
+              )}
               <p className="text-xs break-all">URI: {doArtifactUri || "-"}</p>
               <p className="text-xs break-all">Checksum (sha256): {doChecksum || "-"}</p>
               {doSignedUrl && (
@@ -1160,8 +1220,19 @@ export function MLFlowPage({ availableModels, onModelsChanged }: MLFlowPageProps
             <div className="rounded-md border p-3 text-sm space-y-2">
               <p className="font-medium">Training log</p>
               <div className="max-h-56 overflow-auto space-y-1">
-                {doLogs.length === 0 ? (
+                {doLogEvents.length === 0 && doLogs.length === 0 ? (
                   <p className="text-xs text-muted-foreground">Chưa có log.</p>
+                ) : doLogEvents.length > 0 ? (
+                  doLogEvents.map((event, idx) => {
+                    const msg = String(event.message || "");
+                    const ts = typeof event.ts === "string" ? event.ts : "";
+                    const src = typeof event.source === "string" ? event.source : "";
+                    return (
+                      <p key={`${idx}-${msg.slice(0, 16)}`} className="text-xs text-muted-foreground">
+                        [{formatIsoTs(ts || null)}] [{src || "unknown"}] {msg}
+                      </p>
+                    );
+                  })
                 ) : (
                   doLogs.map((line, idx) => (
                     <p key={`${idx}-${line.slice(0, 16)}`} className="text-xs text-muted-foreground">

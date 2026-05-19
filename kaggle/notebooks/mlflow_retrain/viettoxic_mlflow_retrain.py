@@ -16,8 +16,10 @@ import os
 import pathlib
 import subprocess
 import sys
+import time
 import zipfile
-from urllib.request import urlopen
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 WORKDIR = pathlib.Path("/kaggle/working/viettoxic")
 WORKDIR.mkdir(parents=True, exist_ok=True)
@@ -25,6 +27,30 @@ WORKDIR.mkdir(parents=True, exist_ok=True)
 BUNDLE_URL = os.getenv("VIETTOXIC_BUNDLE_URL", "").strip()
 BUNDLE_ZIP = WORKDIR / "mlflow_bundle.zip"
 BUNDLE_DIR = WORKDIR / "bundle"
+SEED = int(os.getenv("VIETTOXIC_SEED", "42"))
+
+TEST_MODE = os.getenv("VIETTOXIC_TEST_MODE", "smoke").strip().lower()
+SMOKE_MAX_TRAIN = int(os.getenv("VIETTOXIC_SMOKE_MAX_TRAIN", "4000"))
+SMOKE_MAX_VAL = int(os.getenv("VIETTOXIC_SMOKE_MAX_VAL", "1200"))
+SMOKE_MAX_TEST = int(os.getenv("VIETTOXIC_SMOKE_MAX_TEST", "1200"))
+
+MLFLOW_ENABLED = os.getenv("MLFLOW_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", str(WORKDIR / "mlruns"))
+MLFLOW_EXPERIMENT_NAME = os.getenv("MLFLOW_EXPERIMENT_NAME", "viettoxic-kaggle-retrain-smoke")
+RUN_NAME = os.getenv("VIETTOXIC_RUN_NAME", f"kaggle_smoke_{time.strftime('%Y%m%d_%H%M%S')}")
+
+IMPORT_API_URL = os.getenv("VIETTOXIC_IMPORT_API_URL", "").strip()
+IMPORT_API_TOKEN = os.getenv("VIETTOXIC_IMPORT_API_TOKEN", "").strip()
+IMPORT_ARTIFACT_PATH = os.getenv("VIETTOXIC_IMPORT_ARTIFACT_PATH", "").strip()
+IMPORT_NOTES = os.getenv("VIETTOXIC_IMPORT_NOTES", "Kaggle retrain smoke test")
+IMPORT_REQUIRED = os.getenv("VIETTOXIC_IMPORT_REQUIRED", "false").strip().lower() in {"1", "true", "yes", "on"}
+DATASET_ROOT_OVERRIDE = os.getenv("VIETTOXIC_DATASET_ROOT", "").strip()
+BUNDLE_DOWNLOAD_REQUIRED = os.getenv("VIETTOXIC_BUNDLE_DOWNLOAD_REQUIRED", "false").strip().lower() in {"1", "true", "yes", "on"}
+SPLIT_NAME_CANDIDATES: dict[str, list[str]] = {
+    "train": ["train.jsonl", "train_augmented.jsonl"],
+    "validation": ["validation.jsonl", "validation_augmented.jsonl", "val.jsonl", "dev.jsonl"],
+    "test": ["test.jsonl", "test_augmented.jsonl"],
+}
 
 
 def run(cmd: list[str]) -> None:
@@ -32,45 +58,373 @@ def run(cmd: list[str]) -> None:
     subprocess.run(cmd, check=True)
 
 
+def ensure_python_package(module_name: str, pip_name: str | None = None) -> None:
+    try:
+        __import__(module_name)
+    except ImportError:
+        pkg = pip_name or module_name
+        print(f"Installing missing package: {pkg}")
+        run([sys.executable, "-m", "pip", "install", "-q", pkg])
+
+
 def download_bundle_if_configured() -> None:
     if not BUNDLE_URL:
         print("VIETTOXIC_BUNDLE_URL is empty -> skip bundle download.")
         return
     print(f"Downloading bundle from: {BUNDLE_URL}")
-    with urlopen(BUNDLE_URL) as response:  # nosec B310
-        BUNDLE_ZIP.write_bytes(response.read())
-    print(f"Saved: {BUNDLE_ZIP}")
+    try:
+        with urlopen(BUNDLE_URL) as response:  # nosec B310
+            BUNDLE_ZIP.write_bytes(response.read())
+        print(f"Saved: {BUNDLE_ZIP}")
 
-    BUNDLE_DIR.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(BUNDLE_ZIP, "r") as zf:
-        zf.extractall(BUNDLE_DIR)
-    print(f"Extracted to: {BUNDLE_DIR}")
+        BUNDLE_DIR.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(BUNDLE_ZIP, "r") as zf:
+            zf.extractall(BUNDLE_DIR)
+        print(f"Extracted to: {BUNDLE_DIR}")
+    except (HTTPError, URLError, zipfile.BadZipFile) as exc:
+        msg = (
+            f"Bundle download/extract failed ({exc}). "
+            "Will continue and try resolving dataset from local paths (/kaggle/input or VIETTOXIC_DATASET_ROOT)."
+        )
+        if BUNDLE_DOWNLOAD_REQUIRED:
+            raise RuntimeError(msg) from exc
+        print(f"[WARN] {msg}")
+
+
+def _build_split_paths(base_dir: pathlib.Path, nested: bool) -> dict[str, pathlib.Path]:
+    root = base_dir / "dataset" / "victsd_gold" if nested else base_dir
+    return {
+        "train": root / "train.jsonl",
+        "validation": root / "validation.jsonl",
+        "test": root / "test.jsonl",
+    }
+
+
+def _choose_shortest_path(paths: list[pathlib.Path]) -> pathlib.Path:
+    return sorted(paths, key=lambda p: (len(p.parts), len(str(p))))[0]
+
+
+def _discover_split_paths(root: pathlib.Path) -> dict[str, pathlib.Path] | None:
+    if not root.exists() or not root.is_dir():
+        return None
+
+    found: dict[str, pathlib.Path] = {}
+    for split_name, file_names in SPLIT_NAME_CANDIDATES.items():
+        selected: pathlib.Path | None = None
+        for file_name in file_names:
+            matches = [p for p in root.rglob(file_name) if p.is_file()]
+            if matches:
+                selected = _choose_shortest_path(matches)
+                break
+        if selected is None:
+            return None
+        found[split_name] = selected
+    return found
+
+
+def resolve_dataset_paths() -> tuple[dict[str, pathlib.Path], str]:
+    candidate_roots: list[pathlib.Path] = []
+    if DATASET_ROOT_OVERRIDE:
+        candidate_roots.append(pathlib.Path(DATASET_ROOT_OVERRIDE))
+    candidate_roots.append(BUNDLE_DIR)
+
+    kaggle_input_root = pathlib.Path("/kaggle/input")
+    if kaggle_input_root.exists():
+        for child in kaggle_input_root.iterdir():
+            if child.is_dir():
+                candidate_roots.extend([child, child / "victsd_gold", child / "dataset", child / "dataset" / "victsd_gold"])
+
+    # Remove duplicates but keep original order.
+    seen: set[pathlib.Path] = set()
+    unique_roots: list[pathlib.Path] = []
+    for root in candidate_roots:
+        if root not in seen:
+            seen.add(root)
+            unique_roots.append(root)
+
+    attempted: list[pathlib.Path] = []
+    for root in unique_roots:
+        clean_paths = _build_split_paths(root, nested=False)
+        if all(path.exists() for path in clean_paths.values()):
+            return clean_paths, f"clean_victsd_gold@{root}"
+        attempted.extend(clean_paths.values())
+
+        full_paths = _build_split_paths(root, nested=True)
+        if all(path.exists() for path in full_paths.values()):
+            return full_paths, f"full_bundle@{root}"
+        attempted.extend(full_paths.values())
+
+        discovered = _discover_split_paths(root)
+        if discovered is not None:
+            return discovered, f"auto_discovered@{root}"
+
+    attempted_str = "\n".join(f"- {p}" for p in attempted)
+    input_dirs = []
+    kaggle_input_root = pathlib.Path("/kaggle/input")
+    if kaggle_input_root.exists():
+        input_dirs = sorted(str(p) for p in kaggle_input_root.iterdir() if p.is_dir())
+    input_dirs_str = "\n".join(f"- {p}" for p in input_dirs) if input_dirs else "- (none)"
+    raise FileNotFoundError(
+        "Could not resolve dataset files for smoke/validate run.\n"
+        "Provide VIETTOXIC_BUNDLE_URL, or mount dataset under /kaggle/input, or set VIETTOXIC_DATASET_ROOT.\n"
+        "Visible /kaggle/input directories:\n"
+        f"{input_dirs_str}\n"
+        f"Tried:\n{attempted_str}"
+    )
+
+
+def load_jsonl_dataset(path: pathlib.Path) -> list[dict[str, int | str]]:
+    rows: list[dict[str, int | str]] = []
+    skipped = 0
+    with path.open("r", encoding="utf-8") as f:
+        for line_no, raw in enumerate(f, start=1):
+            line = raw.strip()
+            if not line:
+                continue
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError:
+                skipped += 1
+                if skipped <= 3:
+                    print(f"[WARN] Invalid JSON at {path}:{line_no}")
+                continue
+
+            if not isinstance(item, dict):
+                skipped += 1
+                continue
+            text = item.get("text")
+            label_raw = item.get("toxicity", item.get("label"))
+            if not isinstance(text, str) or not text.strip():
+                skipped += 1
+                continue
+            if label_raw not in (0, 1):
+                skipped += 1
+                continue
+            rows.append({"text": text.strip(), "toxicity": int(label_raw)})
+    if skipped:
+        print(f"[WARN] Skipped {skipped} malformed rows in {path}")
+    return rows
+
+
+def downsample_rows(rows: list[dict[str, int | str]], max_rows: int) -> list[dict[str, int | str]]:
+    if max_rows <= 0 or len(rows) <= max_rows:
+        return rows
+    import random
+
+    rng = random.Random(SEED)
+    copied = rows[:]
+    rng.shuffle(copied)
+    return copied[:max_rows]
+
+
+def evaluate_split(name: str, y_true: list[int], y_pred: list[int]) -> dict[str, float]:
+    from sklearn.metrics import accuracy_score, f1_score
+
+    metrics = {
+        "accuracy": float(accuracy_score(y_true, y_pred)),
+        "macro_f1": float(f1_score(y_true, y_pred, average="macro", zero_division=0)),
+        "f1_toxic": float(f1_score(y_true, y_pred, pos_label=1, zero_division=0)),
+        "f1_clean": float(f1_score(y_true, y_pred, pos_label=0, zero_division=0)),
+    }
+    print(f"[{name}] {json.dumps(metrics, ensure_ascii=False)}")
+    return metrics
+
+
+def zip_dir(source_dir: pathlib.Path, zip_path: pathlib.Path) -> None:
+    with zipfile.ZipFile(zip_path, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for path in source_dir.rglob("*"):
+            if path.is_file():
+                zf.write(path, arcname=str(path.relative_to(source_dir)))
+
+
+def maybe_import_artifact(run_name: str, artifact_path: str) -> dict | None:
+    if not IMPORT_API_URL:
+        return None
+
+    payload = {
+        "run_name": run_name,
+        "artifact_path": IMPORT_ARTIFACT_PATH or artifact_path,
+        "notes": IMPORT_NOTES,
+    }
+    headers = {"Content-Type": "application/json"}
+    if IMPORT_API_TOKEN:
+        headers["Authorization"] = f"Bearer {IMPORT_API_TOKEN}"
+
+    req = Request(
+        IMPORT_API_URL,
+        data=json.dumps(payload).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with urlopen(req, timeout=45) as resp:  # nosec B310
+            raw = (resp.read() or b"").decode("utf-8", errors="replace")
+        return json.loads(raw) if raw.strip() else {"status": "empty_response"}
+    except HTTPError as exc:
+        detail = (exc.read() or b"").decode("utf-8", errors="replace")[:500]
+        msg = f"Import artifact failed with HTTP {exc.code}: {detail}"
+        if IMPORT_REQUIRED:
+            raise RuntimeError(msg) from exc
+        print(f"[WARN] {msg}")
+        return {"status": "error", "detail": msg}
+    except (URLError, json.JSONDecodeError) as exc:
+        msg = f"Import artifact failed: {exc}"
+        if IMPORT_REQUIRED:
+            raise RuntimeError(msg) from exc
+        print(f"[WARN] {msg}")
+        return {"status": "error", "detail": msg}
+
+
+def run_smoke_retrain() -> dict:
+    ensure_python_package("sklearn", "scikit-learn")
+    ensure_python_package("joblib")
+    if MLFLOW_ENABLED:
+        ensure_python_package("mlflow")
+
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    from sklearn.linear_model import LogisticRegression
+    import joblib
+
+    dataset_paths, bundle_profile = resolve_dataset_paths()
+    print(f"Resolved dataset profile: {bundle_profile}")
+    print(f"Dataset files: {dataset_paths}")
+
+    train_rows = downsample_rows(load_jsonl_dataset(dataset_paths["train"]), SMOKE_MAX_TRAIN)
+    val_rows = downsample_rows(load_jsonl_dataset(dataset_paths["validation"]), SMOKE_MAX_VAL)
+    test_rows = downsample_rows(load_jsonl_dataset(dataset_paths["test"]), SMOKE_MAX_TEST)
+
+    if not train_rows or not val_rows or not test_rows:
+        raise RuntimeError("Dataset is empty after loading/downsampling.")
+
+    y_train = [int(item["toxicity"]) for item in train_rows]
+    if len(set(y_train)) < 2:
+        raise RuntimeError("Train split has <2 classes; cannot train LogisticRegression.")
+
+    x_train = [str(item["text"]) for item in train_rows]
+    x_val = [str(item["text"]) for item in val_rows]
+    x_test = [str(item["text"]) for item in test_rows]
+    y_val = [int(item["toxicity"]) for item in val_rows]
+    y_test = [int(item["toxicity"]) for item in test_rows]
+
+    vectorizer = TfidfVectorizer(
+        ngram_range=(1, 2),
+        lowercase=False,
+        token_pattern=r"(?u)\b\w+\b",
+        min_df=1,
+    )
+    model = LogisticRegression(
+        class_weight="balanced",
+        max_iter=600,
+        random_state=SEED,
+        n_jobs=-1,
+    )
+
+    x_train_vec = vectorizer.fit_transform(x_train)
+    x_val_vec = vectorizer.transform(x_val)
+    x_test_vec = vectorizer.transform(x_test)
+
+    print("Training smoke model...")
+    model.fit(x_train_vec, y_train)
+    val_pred = model.predict(x_val_vec)
+    test_pred = model.predict(x_test_vec)
+
+    val_metrics = evaluate_split("validation", y_val, val_pred.tolist())
+    test_metrics = evaluate_split("test", y_test, test_pred.tolist())
+
+    artifact_dir = WORKDIR / "artifacts" / RUN_NAME
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+
+    model_path = artifact_dir / "model_lr.joblib"
+    vectorizer_path = artifact_dir / "vectorizer.joblib"
+    metrics_path = artifact_dir / "metrics.json"
+    summary_path = artifact_dir / "run_summary.json"
+    artifact_zip_path = WORKDIR / f"{RUN_NAME}.zip"
+
+    joblib.dump(model, model_path)
+    joblib.dump(vectorizer, vectorizer_path)
+
+    metrics_payload = {
+        "run_name": RUN_NAME,
+        "mode": "smoke_retrain_tfidf_lr",
+        "bundle_profile": bundle_profile,
+        "tracking_uri": MLFLOW_TRACKING_URI if MLFLOW_ENABLED else None,
+        "sizes": {"train": len(train_rows), "validation": len(val_rows), "test": len(test_rows)},
+        "validation": val_metrics,
+        "test": test_metrics,
+    }
+    metrics_path.write_text(json.dumps(metrics_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    mlflow_logged = False
+    if MLFLOW_ENABLED:
+        import mlflow
+
+        mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+        mlflow.set_experiment(MLFLOW_EXPERIMENT_NAME)
+        with mlflow.start_run(run_name=RUN_NAME):
+            for key, value in metrics_payload["sizes"].items():
+                mlflow.log_param(f"size_{key}", int(value))
+            mlflow.log_param("bundle_profile", bundle_profile)
+            mlflow.log_param("mode", "smoke_retrain_tfidf_lr")
+            for k, v in val_metrics.items():
+                mlflow.log_metric(f"val_{k}", float(v))
+            for k, v in test_metrics.items():
+                mlflow.log_metric(f"test_{k}", float(v))
+            mlflow.log_artifact(str(model_path))
+            mlflow.log_artifact(str(vectorizer_path))
+            mlflow.log_artifact(str(metrics_path))
+        mlflow_logged = True
+
+    summary_payload = {
+        "status": "ok",
+        "run_name": RUN_NAME,
+        "mlflow_logged": mlflow_logged,
+        "artifact_dir": str(artifact_dir),
+        "artifact_zip_local": str(artifact_zip_path),
+        "import_api_url": IMPORT_API_URL or None,
+        "import_artifact_path": IMPORT_ARTIFACT_PATH or str(artifact_zip_path),
+    }
+    summary_path.write_text(json.dumps(summary_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    zip_dir(artifact_dir, artifact_zip_path)
+    import_response = maybe_import_artifact(RUN_NAME, str(artifact_zip_path))
+    if import_response is not None:
+        summary_payload["import_response"] = import_response
+        summary_path.write_text(json.dumps(summary_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    return {
+        **summary_payload,
+        "metrics": metrics_payload,
+        "bundle_dir_exists": BUNDLE_DIR.exists(),
+        "bundle_url_set": bool(BUNDLE_URL),
+    }
 
 
 def main() -> None:
     print("Python:", sys.version)
     print("Workdir:", WORKDIR)
+    print("Test mode:", TEST_MODE)
     download_bundle_if_configured()
 
-    # TODO:
-    # - Dat training flow that su dung bundle/data cua ban.
-    # - Neu can, pip install them package tai day.
-    # - Chay train va ghi artifact vao /kaggle/working hoac /kaggle/output.
-    #
-    # Vi du:
-    # run([sys.executable, "-m", "pip", "install", "-r", "requirements-ml.txt"])
-    # run([sys.executable, "train.py", "--config", str(BUNDLE_DIR / "config" / "training_config.yaml")])
-    #
-    # Sau khi run xong, ban co the upload artifact qua API backend:
-    # POST /api/mlflow/manual/import-artifact
-    status = {
-        "status": "ok",
-        "bundle_url_set": bool(BUNDLE_URL),
-        "bundle_dir_exists": BUNDLE_DIR.exists(),
-    }
-    print(json.dumps(status, ensure_ascii=False, indent=2))
+    if TEST_MODE == "validate":
+        dataset_paths, bundle_profile = resolve_dataset_paths()
+        status = {
+            "status": "ok",
+            "mode": "validate",
+            "bundle_profile": bundle_profile,
+            "dataset_paths": {k: str(v) for k, v in dataset_paths.items()},
+            "bundle_url_set": bool(BUNDLE_URL),
+            "bundle_dir_exists": BUNDLE_DIR.exists(),
+        }
+        print(json.dumps(status, ensure_ascii=False, indent=2))
+        return
+
+    if TEST_MODE == "smoke":
+        status = run_smoke_retrain()
+        print(json.dumps(status, ensure_ascii=False, indent=2))
+        return
+
+    raise ValueError(f"Unsupported VIETTOXIC_TEST_MODE={TEST_MODE}. Use 'validate' or 'smoke'.")
 
 
 if __name__ == "__main__":
     main()
-

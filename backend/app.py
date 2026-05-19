@@ -58,6 +58,7 @@ MLFLOW_ACCEPT_THRESHOLD = float(os.getenv("MLFLOW_ACCEPT_THRESHOLD", "0.8"))
 MLFLOW_DISCARD_THRESHOLD = float(os.getenv("MLFLOW_DISCARD_THRESHOLD", "0.2"))
 MLFLOW_THRESHOLD_TARGET_MAX = max(1, int(os.getenv("MLFLOW_THRESHOLD_TARGET_MAX", "10")))
 MLFLOW_CLEAR_ALL_CONFIRM_TOKEN = os.getenv("MLFLOW_CLEAR_ALL_CONFIRM_TOKEN", "DELETE_ALL_MLFLOW_DATA")
+KAGGLE_WEBHOOK_TIMEOUT_SEC = max(10, int(os.getenv("KAGGLE_WEBHOOK_TIMEOUT_SEC", "180")))
 
 DO_API_BASE = "https://api.digitalocean.com/v2"
 DO_DEFAULT_REGION = "sgp1"
@@ -3762,7 +3763,7 @@ def _do_update_run(
     *,
     status: Optional[str] = None,
     stage: Optional[str] = None,
-    logs: Optional[List[str]] = None,
+    logs: Optional[List[Any]] = None,
     gpu_profile: Optional[str] = None,
     droplet_id: Optional[str] = None,
     artifact_uri: Optional[str] = None,
@@ -3809,23 +3810,107 @@ def _do_update_run(
 
 
 def _do_load_logs(row: sqlite3.Row) -> List[str]:
+    events = _do_load_log_events(row)
+    return [str(item.get("message") or "") for item in events if str(item.get("message") or "").strip()]
+
+
+def _do_load_log_events(row: sqlite3.Row) -> List[Dict[str, Any]]:
     raw_logs = row["logs_json"] if row else None
     if not raw_logs:
         return []
+
+    events: List[Dict[str, Any]] = []
     try:
         parsed = json.loads(raw_logs)
-        if isinstance(parsed, list):
-            return [str(x) for x in parsed]
     except Exception:
         return []
-    return []
+
+    if not isinstance(parsed, list):
+        return []
+
+    for entry in parsed:
+        if isinstance(entry, dict):
+            message = str(entry.get("message") or "").strip()
+            if not message:
+                continue
+            events.append(
+                {
+                    "ts": str(entry.get("ts") or "").strip() or None,
+                    "message": message,
+                    "stage": str(entry.get("stage") or "").strip() or None,
+                    "source": str(entry.get("source") or "").strip() or None,
+                }
+            )
+            continue
+
+        text = str(entry).strip()
+        if not text:
+            continue
+        events.append({"ts": None, "message": text, "stage": None, "source": None})
+
+    return events
 
 
-def _do_append_log(conn: sqlite3.Connection, run_id: str, message: str) -> None:
+def _do_append_log(
+    conn: sqlite3.Connection,
+    run_id: str,
+    message: str,
+    *,
+    stage: Optional[str] = None,
+    source: Optional[str] = None,
+) -> None:
     row = _do_get_run(conn, run_id)
-    logs = _do_load_logs(row) if row else []
-    logs.append(message)
+    events = _do_load_log_events(row) if row else []
+    events.append(
+        {
+            "ts": datetime.utcnow().isoformat() + "Z",
+            "message": message,
+            "stage": stage,
+            "source": source,
+        }
+    )
+    logs: List[Any] = events
     _do_update_run(conn, run_id, logs=logs)
+
+
+def _do_infer_run_mode(job_id: Optional[str], artifact_uri: Optional[str]) -> str:
+    jid = str(job_id or "").strip().lower()
+    uri = str(artifact_uri or "").strip().lower()
+    if jid.startswith("mock_") or uri.startswith("mock://"):
+        return "mock"
+    if jid or uri:
+        return "real"
+    return "unknown"
+
+
+def _do_infer_status_source(status_url: str, run_mode: str) -> str:
+    if run_mode == "mock":
+        return "mock_webhook"
+    if status_url:
+        return "status_webhook"
+    return "local_db"
+
+
+def _do_build_stage_timestamps(events: List[Dict[str, Any]], row: sqlite3.Row) -> Dict[str, Optional[str]]:
+    stage_ts: Dict[str, Optional[str]] = {stage: None for stage in KAGGLE_STAGES}
+
+    created_at = str(row["created_at"] or "").strip() or None
+    updated_at = str(row["updated_at"] or "").strip() or None
+    current_stage = str(row["current_stage"] or "").strip()
+
+    if created_at:
+        stage_ts[KAGGLE_STAGES[0]] = created_at
+
+    for event in events:
+        stage = str(event.get("stage") or "").strip()
+        ts = str(event.get("ts") or "").strip()
+        if stage and ts and stage in stage_ts and not stage_ts[stage]:
+            stage_ts[stage] = ts
+
+    if current_stage in stage_ts and updated_at:
+        stage_ts[current_stage] = stage_ts.get(current_stage) or updated_at
+
+    return stage_ts
 
 
 
@@ -4913,13 +4998,15 @@ def _kaggle_http_json(method: str, url: str, payload: Optional[Dict[str, Any]] =
         data=body,
     )
     try:
-        with urllib.request.urlopen(req, timeout=40) as resp:
+        with urllib.request.urlopen(req, timeout=KAGGLE_WEBHOOK_TIMEOUT_SEC) as resp:
             raw = (resp.read() or b"").decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
         raw = (exc.read() or b"").decode("utf-8", errors="replace")
-        raise HTTPException(status_code=502, detail=f"Kaggle webhook HTTP {exc.code}: {raw[:500]}") from exc
+        raise HTTPException(status_code=502, detail=f"Kaggle webhook HTTP {exc.code} ({url}): {raw[:500]}") from exc
+    except (TimeoutError, socket.timeout) as exc:
+        raise HTTPException(status_code=502, detail=f"Kaggle webhook timeout ({url}): {exc}") from exc
     except urllib.error.URLError as exc:
-        raise HTTPException(status_code=502, detail=f"Kaggle webhook unreachable: {exc.reason}") from exc
+        raise HTTPException(status_code=502, detail=f"Kaggle webhook unreachable ({url}): {exc.reason}") from exc
 
     if not raw.strip():
         return {}
@@ -4988,8 +5075,18 @@ def mlflow_kaggle_trigger(request: MlflowDOTriggerRequest) -> Dict[str, Any]:
                 KAGGLE_STAGES[0],
                 json.dumps(
                     [
-                        "Kaggle run queued.",
-                        f"[META] training_mode={training_mode} base_model={base_model or 'default'}",
+                        {
+                            "ts": now,
+                            "message": "Kaggle run queued.",
+                            "stage": KAGGLE_STAGES[0],
+                            "source": "backend",
+                        },
+                        {
+                            "ts": now,
+                            "message": f"[META] training_mode={training_mode} base_model={base_model or 'default'}",
+                            "stage": KAGGLE_STAGES[0],
+                            "source": "backend",
+                        },
                     ],
                     ensure_ascii=False,
                 ),
@@ -5007,7 +5104,13 @@ def mlflow_kaggle_trigger(request: MlflowDOTriggerRequest) -> Dict[str, Any]:
 
     if request.dry_run:
         with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
-            _do_append_log(conn, run_id, "Dry-run mode: no Kaggle cloud trigger executed.")
+            _do_append_log(
+                conn,
+                run_id,
+                "Dry-run mode: no Kaggle cloud trigger executed.",
+                stage=KAGGLE_STAGES[-1],
+                source="backend",
+            )
             _do_update_run(conn, run_id, status="dry_run", stage=KAGGLE_STAGES[-1])
             conn.commit()
         return {
@@ -5037,7 +5140,13 @@ def mlflow_kaggle_trigger(request: MlflowDOTriggerRequest) -> Dict[str, Any]:
 
     with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
         _do_update_run(conn, run_id, status="running", stage=KAGGLE_STAGES[1], droplet_id=cloud_job_id)
-        _do_append_log(conn, run_id, f"Kaggle cloud trigger accepted. job_id={cloud_job_id}")
+        _do_append_log(
+            conn,
+            run_id,
+            f"Kaggle cloud trigger accepted. job_id={cloud_job_id}",
+            stage=KAGGLE_STAGES[1],
+            source="mock_webhook" if cloud_job_id.lower().startswith("mock_") else "kaggle_webhook",
+        )
         conn.commit()
 
     return {
@@ -5065,6 +5174,9 @@ def mlflow_kaggle_status(run_id: str = Query(..., min_length=1)) -> Dict[str, An
 
     if status_url and cloud_job_id and row["status"] in {"queued", "running"}:
         try:
+            prev_status = str(row["status"] or "").strip().lower() or "queued"
+            prev_stage = str(row["current_stage"] or "").strip() or KAGGLE_STAGES[0]
+            prev_artifact_uri = str(row["artifact_uri"] or "").strip()
             remote = _kaggle_http_json("GET", f"{status_url}?job_id={urllib.parse.quote(cloud_job_id)}")
             remote_status = str(remote.get("status") or "").strip().lower()
             artifact_uri = str(remote.get("artifact_uri") or "").strip() or None
@@ -5093,6 +5205,15 @@ def mlflow_kaggle_status(run_id: str = Query(..., min_length=1)) -> Dict[str, An
                     artifact_checksum=artifact_checksum,
                     error_message=error_message,
                 )
+                status_changed = remote_status != prev_status or stage != prev_stage
+                artifact_became_available = bool(artifact_uri) and artifact_uri != prev_artifact_uri
+                if status_changed or artifact_became_available:
+                    source_tag = "mock_webhook" if cloud_job_id.lower().startswith("mock_") else "status_webhook"
+                    message = (
+                        f"Status polled: status={remote_status} stage={stage}"
+                        + (f" artifact_uri={artifact_uri}" if artifact_became_available else "")
+                    )
+                    _do_append_log(conn, run_id, message, stage=stage, source=source_tag)
                 conn.commit()
         except Exception:
             pass
@@ -5101,7 +5222,15 @@ def mlflow_kaggle_status(run_id: str = Query(..., min_length=1)) -> Dict[str, An
         row = _do_get_run(conn, run_id.strip())
 
     logs = _do_load_logs(row)
+    log_events = _do_load_log_events(row)
     runtime_meta = _do_extract_runtime_metadata(logs)
+    artifact_uri_value = str(row["artifact_uri"] or "").strip() or None
+    run_mode = _do_infer_run_mode(str(row["droplet_id"] or "").strip() or None, artifact_uri_value)
+    artifact_kind = "none"
+    if artifact_uri_value:
+        artifact_kind = "mock" if artifact_uri_value.lower().startswith("mock://") else "real"
+    status_source = _do_infer_status_source(status_url, run_mode)
+    stage_timestamps = _do_build_stage_timestamps(log_events, row)
 
     return {
         "run_id": row["run_id"],
@@ -5114,10 +5243,15 @@ def mlflow_kaggle_status(run_id: str = Query(..., min_length=1)) -> Dict[str, An
         "status": row["status"],
         "current_stage": row["current_stage"],
         "logs": logs,
+        "log_events": log_events,
         "stages": KAGGLE_STAGES,
         "artifact_uri": row["artifact_uri"],
+        "artifact_kind": artifact_kind,
         "artifact_checksum": row["artifact_checksum"],
         "error_message": row["error_message"],
+        "run_mode": run_mode,
+        "status_source": status_source,
+        "stage_timestamps": stage_timestamps,
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
         "job_id": (row["droplet_id"] or None),

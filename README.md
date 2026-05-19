@@ -227,6 +227,59 @@ Default local URLs:
 - Backend: `http://localhost:8000`
 - Frontend: `http://localhost:5173`
 
+### One-command startup (backend + frontend + webhook receiver + ngrok)
+
+Windows:
+
+```powershell
+cd D:\Code\Thesis\Thesis
+.\start.ps1
+```
+
+macOS/Linux:
+
+```bash
+cd /path/to/Thesis/Thesis
+chmod +x ./start.sh
+./start.sh
+```
+
+Default ports and tunnel:
+
+- Backend API: `http://127.0.0.1:8000`
+- Frontend UI: `http://127.0.0.1:5173`
+- Webhook receiver: `http://127.0.0.1:9000`
+- Webhook public URL: `https://living-rare-ram.ngrok-free.app`
+
+Optional:
+
+- Start extra frontend tunnel: `START_FRONTEND_NGROK=1 ./start.sh` or `.\start.ps1 -StartFrontendNgrok`
+- Override webhook domain: set `WEBHOOK_NGROK_DOMAIN` in `start.sh` env or use `-WebhookNgrokDomain` in `start.ps1`
+- Use template config for `ngrok start --all`: `scripts/ngrok.example.yml`
+
+### Mock Kaggle webhook receiver (for end-to-end local test)
+
+Added local service file:
+
+- `backend/kaggle_webhook_receiver.py`
+
+Exposed endpoints:
+
+- `POST /kaggle/trigger`
+- `GET /kaggle/status?job_id=...`
+
+This receiver is compatible with backend calls from:
+
+- `KAGGLE_WEBHOOK_URL`
+- `KAGGLE_STATUS_WEBHOOK_URL`
+
+Example in `backend/.env.local`:
+
+```env
+KAGGLE_WEBHOOK_URL=https://living-rare-ram.ngrok-free.app/kaggle/trigger
+KAGGLE_STATUS_WEBHOOK_URL=https://living-rare-ram.ngrok-free.app/kaggle/status
+```
+
 ---
 
 ## Kaggle Mirror Notebook Workflow

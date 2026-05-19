@@ -1,0 +1,15 @@
+version: 3
+
+tunnels:
+  viettoxic-webhook:
+    proto: http
+    addr: 9000
+    domain: living-rare-ram.ngrok-free.app
+
+  viettoxic-frontend:
+    proto: http
+    addr: 5173
+
+  viettoxic-backend:
+    proto: http
+    addr: 8000
