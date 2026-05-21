@@ -36,17 +36,21 @@ jobs:
       - name: Install base dependencies
         run: pip install --no-cache-dir -r requirements-base.txt
 
+      - name: Dependency import sanity
+        run: python -c "import fastapi, pydantic, sqlite3"
+
       - name: Lint with ruff
         run: |
           pip install ruff
           ruff check backend/ --select E,W,F --ignore E501
 
-      # TODO: remove continue-on-error once a tests/ directory is created
+      - name: QA compile sanity
+        run: python -m py_compile backend/app.py
+
       - name: Run pytest
         run: |
           pip install pytest
           pytest tests/ -q --tb=short
-        continue-on-error: true
 
   # ============================================================
   # Frontend — dependency install + production build check

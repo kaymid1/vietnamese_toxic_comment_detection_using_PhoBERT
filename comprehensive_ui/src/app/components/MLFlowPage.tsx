@@ -8,6 +8,14 @@ import { Badge } from "@/app/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/app/components/ui/tabs";
 import { Progress } from "@/app/components/ui/progress";
 import { Checkbox } from "@/app/components/ui/checkbox";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/app/components/ui/dialog";
 import { useMlflowStore, type MlflowUnusedScope } from "../../hooks/useMlflowStore";
 
 
@@ -68,7 +76,6 @@ export function MLFlowPage({ availableModels, onModelsChanged }: MLFlowPageProps
     crawlHistoryPage,
     comparePayload,
     lastBundlePath,
-    requiredZipContents,
     doStatus,
     doPreflight,
     ingest,
@@ -110,7 +117,6 @@ export function MLFlowPage({ availableModels, onModelsChanged }: MLFlowPageProps
     total_urls?: number;
   } | null>(null);
   const [activeTab, setActiveTab] = useState("step1");
-  const [manualTabUnlocked, setManualTabUnlocked] = useState(false);
   const [selectedTrainingMode, setSelectedTrainingMode] = useState<"retrain" | "finetune">("retrain");
   const [finetuneBaseModel, setFinetuneBaseModel] = useState("");
   const prevDoStatusRef = useRef<string>("idle");
@@ -154,13 +160,6 @@ export function MLFlowPage({ availableModels, onModelsChanged }: MLFlowPageProps
     setSelectedCandidateIds((prev) => prev.filter((id) => availableIds.has(id)));
   }, [candidates]);
 
-  useEffect(() => {
-    if (!manualTabUnlocked && activeTab === "step3") {
-      setActiveTab("step4");
-    }
-  }, [activeTab, manualTabUnlocked]);
-
-
   const parsedUrls = useMemo(
     () =>
       urlsText
@@ -175,6 +174,9 @@ export function MLFlowPage({ availableModels, onModelsChanged }: MLFlowPageProps
     const max = Math.max(1, thresholdStatus.target_max_test_stage || 10);
     return Math.min(100, (thresholdStatus.accepted_count / max) * 100);
   }, [thresholdStatus]);
+  const bundleAcceptedCount = thresholdStatus?.accepted_count ?? 0;
+  const bundleTargetCount = Math.max(1, thresholdStatus?.target_max_test_stage ?? 10);
+  const bundleReady = Boolean(thresholdStatus?.is_ready);
 
   const ingestStageMeta = useMemo(() => {
     if (ingestStage === "crawl") return { label: "Crawl", variant: "default" as const };
@@ -405,10 +407,9 @@ export function MLFlowPage({ availableModels, onModelsChanged }: MLFlowPageProps
         trainingMode: selectedTrainingMode,
         baseModel: resolvedBaseModel || undefined,
       });
-      const modeLabel = "COLAB";
       const trainingLabel = selectedTrainingMode === "finetune" ? "FINETUNE" : "RETRAIN";
       setStatusText(`Đã trigger Kaggle run ${payload.run_id} (${payload.status}) - ${trainingLabel}.`);
-      toast.success(`Đã trigger Kaggle ${modeLabel} run ${payload.run_id} (${trainingLabel}).`);
+      toast.success(`Đã trigger Kaggle run ${payload.run_id} (${trainingLabel}).`);
     } catch (error) {
       const detail = error instanceof Error && error.message ? error.message : "Không rõ nguyên nhân.";
       setStatusText(`Trigger Kaggle pipeline thất bại: ${detail}`);
@@ -487,7 +488,8 @@ export function MLFlowPage({ availableModels, onModelsChanged }: MLFlowPageProps
   const doArtifactUri = (doStatus?.artifact_uri as string | undefined) || "";
   const doArtifactKind = ((doStatus?.artifact_kind as string | undefined) || "none").toLowerCase();
   const doChecksum = (doStatus?.artifact_checksum as string | undefined) || "";
-  const doSignedUrl = (doStatus?.signed_download_url as string | undefined) || "";
+  const doArtifactDownloadUrl = doStatus?.artifact_download_url || "";
+  const doMetrics = doStatus?.metrics || null;
   const doErrorMessage = (doStatus?.error_message as string | undefined) || "";
   const doRunMode = ((doStatus?.run_mode as string | undefined) || "unknown").toLowerCase();
   const doStatusSource = ((doStatus?.status_source as string | undefined) || "local_db").toLowerCase();
@@ -515,6 +517,21 @@ export function MLFlowPage({ availableModels, onModelsChanged }: MLFlowPageProps
   const hasDoCpuPercent = Number.isFinite(doCpuPercent) && doCpuPercent >= 0;
   const hasDoMemoryPercent = Number.isFinite(doMemoryPercent) && doMemoryPercent >= 0;
   const hasDoTelemetrySample = doTelemetryLastSampleAt.length > 0;
+  const formatMetric = (value: number | null | undefined) =>
+    typeof value === "number" && Number.isFinite(value) ? value.toFixed(3) : "-";
+  const handleDownloadKaggleArtifact = () => {
+    if (!doArtifactDownloadUrl) return;
+    const href = doArtifactDownloadUrl.startsWith("http")
+      ? doArtifactDownloadUrl
+      : `${window.location.origin}${doArtifactDownloadUrl}`;
+    const anchor = document.createElement("a");
+    anchor.href = href;
+    anchor.rel = "noopener noreferrer";
+    anchor.download = doArtifactUri.split("/").pop() || "kaggle_exported_model.zip";
+    document.body.appendChild(anchor);
+    anchor.click();
+    document.body.removeChild(anchor);
+  };
 
   useEffect(() => {
     const prev = prevDoStatusRef.current;
@@ -560,9 +577,9 @@ export function MLFlowPage({ availableModels, onModelsChanged }: MLFlowPageProps
       <Card className="p-5 border-border/80 bg-gradient-to-br from-background to-muted/30">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="space-y-1">
-            <p className="text-xs uppercase tracking-wider text-muted-foreground">Admin / ML Flow</p>
-            <h1 className="text-2xl font-semibold">VietToxic Self-Learning Pipeline</h1>
-            <p className="text-sm text-muted-foreground">Ingest → Auto Gate Persisted DB → Verify → Retrain decision</p>
+            <p className="text-xs uppercase tracking-wider text-muted-foreground">Admin / Kaggle Retrain</p>
+            <h1 className="text-2xl font-semibold">VietToxic Kaggle Retrain Console</h1>
+            <p className="text-sm text-muted-foreground">Collect data → review & bundle → retrain on Kaggle → inspect metrics</p>
           </div>
           <div className="flex items-center gap-2">
             <Badge variant={ingestStageMeta.variant}>{ingestStageMeta.label}</Badge>
@@ -605,12 +622,10 @@ export function MLFlowPage({ availableModels, onModelsChanged }: MLFlowPageProps
       )}
 
       <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-4">
-        <TabsList className={`w-full grid ${manualTabUnlocked ? "grid-cols-5" : "grid-cols-4"} h-auto`}>
-          <TabsTrigger value="step1">Thu thập & Gán nhãn</TabsTrigger>
-          <TabsTrigger value="step2">Dataset</TabsTrigger>
-          {manualTabUnlocked && <TabsTrigger value="step3">Thủ công: Train & Import</TabsTrigger>}
-          <TabsTrigger value="step4">Tự động: Google Kaggle</TabsTrigger>
-          <TabsTrigger value="step5">Đánh giá & Gate</TabsTrigger>
+        <TabsList className="w-full grid grid-cols-3 h-auto">
+          <TabsTrigger value="step1">Data & Review</TabsTrigger>
+          <TabsTrigger value="step4">Kaggle Retrain</TabsTrigger>
+          <TabsTrigger value="step5">Results & Gate</TabsTrigger>
         </TabsList>
 
         <TabsContent value="step1" className="space-y-4">
@@ -680,17 +695,17 @@ export function MLFlowPage({ availableModels, onModelsChanged }: MLFlowPageProps
           </Card>
 
           <div className="grid gap-4 md:grid-cols-3">
-            <Card className="p-4 space-y-1">
+            <Card className="p-4 space-y-1 border-border/70 transition-colors hover:border-border">
               <p className="text-sm text-muted-foreground">Crawl mới</p>
               <p className="text-3xl font-semibold">{overview?.pipeline_counts?.crawled ?? 0}</p>
               <p className="text-xs text-muted-foreground">segments crawled</p>
             </Card>
-            <Card className="p-4 space-y-1">
+            <Card className="p-4 space-y-1 border-border/70 transition-colors hover:border-border">
               <p className="text-sm text-muted-foreground">Infer + Pseudo-label</p>
               <p className="text-3xl font-semibold">{overview?.pipeline_counts?.inferred ?? 0}</p>
               <p className="text-xs text-muted-foreground">model: {overview?.model_name || selectedModel || "-"}</p>
             </Card>
-            <Card className="p-4 space-y-1">
+            <Card className="p-4 space-y-1 border-border/70 transition-colors hover:border-border">
               <p className="text-sm text-muted-foreground">Gate 0.8 / 0.2</p>
               <p className="text-sm">
                 Accepted: <b>{overview?.pipeline_counts?.accepted ?? 0}</b>
@@ -728,6 +743,233 @@ export function MLFlowPage({ availableModels, onModelsChanged }: MLFlowPageProps
               {crawlHistory.length === 0 && (
                 <p className="rounded-md border border-dashed p-4 text-sm text-muted-foreground">
                   Chưa có lịch sử crawl.
+                </p>
+              )}
+            </div>
+          </Card>
+
+          <Card className="p-4 border-border/80 bg-gradient-to-br from-background to-muted/30 space-y-4">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <p className="text-xs uppercase tracking-wide text-muted-foreground">Dataset Bundle</p>
+                <h3 className="text-lg font-semibold">Bundle readiness</h3>
+              </div>
+              <Badge variant={bundleReady ? "secondary" : "outline"}>{bundleReady ? "Ready for retrain" : "Not ready"}</Badge>
+            </div>
+            <div className="grid gap-4 md:grid-cols-[1fr_auto] md:items-end">
+              <div className="space-y-2">
+                <p className="text-3xl font-semibold">
+                  {bundleAcceptedCount} <span className="text-base text-muted-foreground">/ {bundleTargetCount}</span>
+                </p>
+                <Progress value={thresholdProgress} className="h-2" />
+                <p className="text-xs text-muted-foreground">accepted count / target (all batches)</p>
+              </div>
+              <div className="flex flex-wrap gap-2 md:justify-end">
+                <Button onClick={handleExportBundle}>Download bundle</Button>
+                <Dialog>
+                  <DialogTrigger asChild>
+                    <Button variant="outline">Advanced bundle tools</Button>
+                  </DialogTrigger>
+                  <DialogContent className="sm:max-w-2xl">
+                    <DialogHeader>
+                      <DialogTitle>Advanced bundle tools</DialogTitle>
+                      <DialogDescription>Export options, model ZIP import, và refresh compare source.</DialogDescription>
+                    </DialogHeader>
+                    <div className="space-y-4">
+                      <div className="rounded-md border p-3 space-y-3 bg-muted/20">
+                        <div className="flex flex-wrap items-center justify-between gap-3">
+                          <div>
+                            <p className="text-sm font-medium">Export bundle</p>
+                            <p className="text-xs text-muted-foreground">
+                              Mặc định: accepted + candidate. Có thể thêm unused/discarded.
+                            </p>
+                          </div>
+                          <Button size="sm" onClick={handleExportBundle}>
+                            Download
+                          </Button>
+                        </div>
+                        <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border bg-background p-3">
+                          <div>
+                            <p className="text-sm font-medium">Include unused/discarded</p>
+                            <p className="text-xs text-muted-foreground">Bật để export thêm discarded theo scope.</p>
+                          </div>
+                          <label className="inline-flex items-center gap-2 text-sm">
+                            <Checkbox
+                              checked={includeUnusedInExport}
+                              onCheckedChange={(checked) => setIncludeUnusedInExport(checked === true)}
+                            />
+                            Include unused
+                          </label>
+                        </div>
+                        {includeUnusedInExport && (
+                          <div>
+                            <label className="text-xs text-muted-foreground">Unused scope</label>
+                            <select
+                              className="mt-1 w-full rounded-md border bg-background px-3 py-2 text-sm"
+                              value={unusedScope}
+                              onChange={(e) => setUnusedScope(e.target.value as MlflowUnusedScope)}
+                            >
+                              <option value="all">Tất cả discarded</option>
+                              <option value="auto_discarded">Auto discarded (theo ngưỡng)</option>
+                              <option value="manual_rejected">Manual rejected (do reviewer)</option>
+                            </select>
+                          </div>
+                        )}
+                        <p className="text-xs text-muted-foreground break-all">Last bundle path: {lastBundlePath || "-"}</p>
+                      </div>
+
+                      <div className="rounded-md border p-3 space-y-3 bg-muted/20">
+                        <p className="text-sm font-medium">Model ZIP import</p>
+                        <div className="grid gap-3 md:grid-cols-2">
+                          <Input
+                            placeholder="my_phobert_v3"
+                            value={importModelName}
+                            onChange={(e: ChangeEvent<HTMLInputElement>) => setImportModelName(e.target.value)}
+                          />
+                          <Input
+                            type="file"
+                            accept=".zip,application/zip"
+                            onChange={(e: ChangeEvent<HTMLInputElement>) => {
+                              const file = e.target.files?.[0] || null;
+                              setImportModelZipFile(file);
+                            }}
+                          />
+                        </div>
+                        <p className="text-xs text-muted-foreground">
+                          ZIP sẽ được giải nén vào models/options/phobert/&lt;model_name&gt; và tự refresh danh sách model.
+                        </p>
+                        <div className="flex flex-wrap gap-2">
+                          <Button onClick={handleImportModelZip}>Import ZIP model</Button>
+                          <Button variant="outline" onClick={() => refreshCompare()}>
+                            Refresh compare source
+                          </Button>
+                        </div>
+                      </div>
+                    </div>
+                  </DialogContent>
+                </Dialog>
+                <Button
+                  variant="outline"
+                  onClick={() => {
+                    void refreshThresholdStatus(activeBatchId);
+                    void refreshCandidates(undefined, candidatePage, "all_batches");
+                  }}
+                >
+                  Refresh
+                </Button>
+              </div>
+            </div>
+          </Card>
+
+          <Card className="p-4 space-y-3">
+            <div className="flex items-center justify-between gap-2">
+              <h3 className="font-medium">Manual verify (DB persisted pool)</h3>
+              <div className="text-sm text-muted-foreground">
+                {candidateTotal} items · page {candidatePage} · size {candidatePageSize}
+              </div>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Chọn Toxic/Clean/Remove để cập nhật trực tiếp trong DB trước khi export/retrain.
+            </p>
+
+            <div className="flex flex-wrap gap-2">
+              <Button size="sm" variant="outline" onClick={handleSelectAllCandidates} disabled={candidates.length === 0}>
+                Select all
+              </Button>
+              <Button size="sm" variant="outline" onClick={handleUnselectAllCandidates} disabled={selectedCandidateIds.length === 0}>
+                Unselect all
+              </Button>
+            </div>
+
+            <div className="space-y-1.5 max-h-[34rem] overflow-auto pr-1">
+              {candidates.map((item) => (
+                <div
+                  key={item.id}
+                  className="flex cursor-pointer items-start gap-2 rounded-md border border-border/70 p-2.5 transition-colors hover:border-primary/35 hover:bg-muted/30"
+                  onClick={(event) => handleCandidateRowToggle(event, item.id)}
+                >
+                  <Checkbox checked={selectedCandidateIds.includes(item.id)} onCheckedChange={() => toggleCandidate(item.id)} />
+                  <div className="min-w-0 flex-1 space-y-1">
+                    <p className="text-sm leading-relaxed line-clamp-2">{item.text}</p>
+                    <div className="flex flex-wrap gap-1.5 text-xs text-muted-foreground">
+                      <Badge variant="outline">domain={resolveDomainTag(item)}</Badge>
+                      <Badge variant="outline">score={item.score?.toFixed(3) ?? "-"}</Badge>
+                      <Badge variant="outline">pseudo={item.pseudo_label ?? "-"}</Badge>
+                      <Badge variant="outline">source={item.label_source ?? "-"}</Badge>
+                      <Badge variant="outline">conf={item.label_confidence ?? "-"}</Badge>
+                    </div>
+                    <p className="text-xs text-muted-foreground break-all">{item.url}</p>
+                  </div>
+                </div>
+              ))}
+              {candidates.length === 0 && (
+                <p className="rounded-md border border-dashed p-4 text-sm text-muted-foreground">
+                  Không có item để verify trong DB hiện tại.
+                </p>
+              )}
+            </div>
+
+            <div className="flex flex-wrap gap-2">
+              <Button disabled={selectedCandidateIds.length === 0} onClick={() => void handleBulkReview("include_toxic")}>
+                Toxic
+              </Button>
+              <Button disabled={selectedCandidateIds.length === 0} variant="secondary" onClick={() => void handleBulkReview("include_clean")}>
+                Clean
+              </Button>
+              <Button
+                disabled={selectedCandidateIds.length === 0}
+                variant="destructive"
+                onClick={() => void handleBulkReview("drop")}
+              >
+                Remove
+              </Button>
+              <Button size="icon" variant="outline" onClick={() => refreshCandidates(undefined, candidatePage, "all_batches")}>
+                <RotateCcw />
+              </Button>
+            </div>
+          </Card>
+
+          <Card className="p-4 space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h3 className="font-medium">Review history (persisted in DB)</h3>
+              <div className="flex items-center gap-2 text-sm">
+                <span className="text-muted-foreground">Filter</span>
+                <select
+                  className="rounded-md border bg-background px-3 py-2 text-sm"
+                  value={historyDecision}
+                  onChange={(e) => setHistoryDecision(e.target.value as "all" | "accepted" | "rejected" | "discarded")}
+                >
+                  <option value="all">All</option>
+                  <option value="accepted">Accepted</option>
+                  <option value="rejected">Rejected</option>
+                  <option value="discarded">Discarded</option>
+                </select>
+                <Button size="sm" variant="outline" onClick={() => refreshReviewHistory(undefined, historyDecision, reviewHistoryPage, "all_batches")}>
+                  Refresh history
+                </Button>
+              </div>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Total: <b>{reviewHistoryTotal}</b> · page <b>{reviewHistoryPage}</b>
+            </p>
+            <div className="space-y-1.5 max-h-72 overflow-auto pr-1">
+              {reviewHistory.map((item) => (
+                <div key={`history-${item.id}`} className="rounded-md border border-border/70 p-2.5 transition-colors hover:border-border hover:bg-muted/20">
+                  <p className="text-sm line-clamp-2">{item.text}</p>
+                  <div className="mt-1 flex flex-wrap gap-1.5 text-xs text-muted-foreground">
+                    <Badge variant="outline">{item.verification_status}</Badge>
+                    <Badge variant="outline">bucket={item.gate_bucket}</Badge>
+                    <Badge variant="outline">domain={resolveDomainTag(item)}</Badge>
+                    <Badge variant="outline">score={item.score?.toFixed(3) ?? "-"}</Badge>
+                    <Badge variant="outline">pseudo={item.pseudo_label ?? "-"}</Badge>
+                    <Badge variant="outline">source={item.label_source ?? "-"}</Badge>
+                    <Badge variant="outline">conf={item.label_confidence ?? "-"}</Badge>
+                  </div>
+                </div>
+              ))}
+              {reviewHistory.length === 0 && (
+                <p className="rounded-md border border-dashed p-4 text-sm text-muted-foreground">
+                  Chưa có history cho filter hiện tại.
                 </p>
               )}
             </div>
@@ -860,107 +1102,85 @@ export function MLFlowPage({ availableModels, onModelsChanged }: MLFlowPageProps
               )}
             </div>
           </Card>
-        </TabsContent>
 
-        {manualTabUnlocked && (
-          <TabsContent value="step3" className="space-y-4">
-            <Card className="p-4 space-y-3">
-            <div className="flex items-center justify-between">
-              <h3 className="font-medium">Bước 1 — Tải dataset bundle</h3>
-              <Button onClick={handleExportBundle}>Download</Button>
-            </div>
-            <p className="text-sm text-muted-foreground">Bundle mặc định gồm accepted + candidate. Bạn có thể bật thêm unused/discarded nếu cần phân tích sâu.</p>
-            <p className="text-xs text-muted-foreground">
-              Export bundle mặc định chạy theo scope all_batches, tự tạo bộ `dataset/victsd_gold/*` đã merge accepted vào train và vẫn giữ accepted/candidate/unused để tương thích ngược.
-            </p>
-            <div className="rounded-md border p-3 space-y-3 bg-muted/20">
-              <div className="flex items-center justify-between gap-3">
-                <div>
-                  <p className="text-sm font-medium">Bao gồm unused/discarded vào bundle</p>
-                  <p className="text-xs text-muted-foreground">OFF: chỉ accepted + candidate · ON: thêm discarded theo phạm vi chọn.</p>
+          <details className="rounded-lg border p-4">
+            <summary className="cursor-pointer text-sm font-medium">Advanced manual train/import tools</summary>
+            <div className="mt-4 grid gap-4">
+              <Card className="p-4 space-y-3">
+                <div className="flex items-center justify-between">
+                  <h3 className="font-medium">Manual dataset export</h3>
+                  <Button onClick={handleExportBundle}>Download</Button>
                 </div>
-                <label className="inline-flex items-center gap-2 text-sm">
-                  <input
-                    type="checkbox"
-                    checked={includeUnusedInExport}
-                    onChange={(e) => setIncludeUnusedInExport(e.target.checked)}
+                <p className="text-sm text-muted-foreground">Bundle mặc định gồm accepted + candidate. Bạn có thể bật thêm unused/discarded nếu cần phân tích sâu.</p>
+                <div className="rounded-md border p-3 space-y-3 bg-muted/20">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <p className="text-sm font-medium">Bao gồm unused/discarded vào bundle</p>
+                      <p className="text-xs text-muted-foreground">OFF: chỉ accepted + candidate · ON: thêm discarded theo phạm vi chọn.</p>
+                    </div>
+                    <label className="inline-flex items-center gap-2 text-sm">
+                      <input
+                        type="checkbox"
+                        checked={includeUnusedInExport}
+                        onChange={(e) => setIncludeUnusedInExport(e.target.checked)}
+                      />
+                      Include unused
+                    </label>
+                  </div>
+                  {includeUnusedInExport && (
+                    <div>
+                      <label className="text-xs text-muted-foreground">Phạm vi discarded</label>
+                      <select
+                        className="mt-1 w-full rounded-md border bg-background px-3 py-2 text-sm"
+                        value={unusedScope}
+                        onChange={(e) => setUnusedScope(e.target.value as MlflowUnusedScope)}
+                      >
+                        <option value="all">Tất cả discarded</option>
+                        <option value="auto_discarded">Auto discarded (theo ngưỡng)</option>
+                        <option value="manual_rejected">Manual rejected (do người review)</option>
+                      </select>
+                    </div>
+                  )}
+                </div>
+                {lastBundlePath && <p className="text-xs break-all">Bundle: {lastBundlePath}</p>}
+              </Card>
+
+              <Card className="p-4 space-y-3">
+                <h3 className="font-medium">Manual model import</h3>
+                <div className="grid md:grid-cols-2 gap-3">
+                  <Input
+                    placeholder="my_phobert_v3"
+                    value={importModelName}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) => setImportModelName(e.target.value)}
                   />
-                  Include unused
-                </label>
-              </div>
-              {includeUnusedInExport && (
-                <div>
-                  <label className="text-xs text-muted-foreground">Phạm vi discarded</label>
-                  <select
-                    className="mt-1 w-full rounded-md border bg-background px-3 py-2 text-sm"
-                    value={unusedScope}
-                    onChange={(e) => setUnusedScope(e.target.value as MlflowUnusedScope)}
-                  >
-                    <option value="all">Tất cả discarded</option>
-                    <option value="auto_discarded">Auto discarded (theo ngưỡng)</option>
-                    <option value="manual_rejected">Manual rejected (do người review)</option>
-                  </select>
+                  <Input
+                    type="file"
+                    accept=".zip,application/zip"
+                    onChange={(e: ChangeEvent<HTMLInputElement>) => {
+                      const file = e.target.files?.[0] || null;
+                      setImportModelZipFile(file);
+                    }}
+                  />
                 </div>
-              )}
+                <p className="text-xs text-muted-foreground">
+                  ZIP sẽ được giải nén vào models/options/phobert/&lt;model_name&gt; và tự refresh danh sách model.
+                </p>
+                <div className="flex gap-2">
+                  <Button onClick={handleImportModelZip}>Import ZIP model</Button>
+                  <Button variant="outline" onClick={() => refreshCompare()}>
+                    Refresh compare source
+                  </Button>
+                </div>
+              </Card>
             </div>
-            {lastBundlePath && <p className="text-xs break-all">Bundle: {lastBundlePath}</p>}
-            <div className="rounded-md border p-3 text-sm">
-              <p className="font-medium mb-2">Required zip contents</p>
-              <ul className="list-disc ml-5 space-y-1">
-                {(requiredZipContents.length > 0
-                  ? requiredZipContents
-                  : [
-                      "dataset/accepted_pseudo.jsonl",
-                      "dataset/candidates_unverified.jsonl",
-                      "manifest.json",
-                      "config/training_config.yaml",
-                      "config/gate_policy.json",
-                    ]
-                ).map((item) => (
-                  <li key={item}>{item}</li>
-                ))}
-              </ul>
-            </div>
-          </Card>
-
-            <Card className="p-4 space-y-3">
-              <h3 className="font-medium">Bước 2 — Import model</h3>
-              <div className="grid md:grid-cols-2 gap-3">
-                <Input
-                  placeholder="my_phobert_v3"
-                  value={importModelName}
-                  onChange={(e: ChangeEvent<HTMLInputElement>) => setImportModelName(e.target.value)}
-                />
-                <Input
-                  type="file"
-                  accept=".zip,application/zip"
-                  onChange={(e: ChangeEvent<HTMLInputElement>) => {
-                    const file = e.target.files?.[0] || null;
-                    setImportModelZipFile(file);
-                  }}
-                />
-              </div>
-              <p className="text-xs text-muted-foreground">
-                ZIP sẽ được giải nén vào models/options/phobert/&lt;model_name&gt; và tự refresh danh sách model.
-              </p>
-              <div className="flex gap-2">
-                <Button onClick={handleImportModelZip}>Import ZIP model</Button>
-                <Button variant="outline" onClick={() => refreshCompare()}>
-                  Refresh compare source
-                </Button>
-              </div>
-            </Card>
-          </TabsContent>
-        )}
+          </details>
+        </TabsContent>
 
         <TabsContent value="step4" className="space-y-4">
           <Card className="p-4 space-y-3">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <h3 className="font-medium">Pipeline tự động Google Kaggle (API trực tiếp)</h3>
               <div className="flex gap-2">
-                <Button variant="outline" onClick={() => refreshDOPreflight()}>
-                  Check preflight
-                </Button>
                 <Button variant="outline" onClick={handleRefreshDOStatus}>
                   Refresh status
                 </Button>
@@ -968,25 +1188,23 @@ export function MLFlowPage({ availableModels, onModelsChanged }: MLFlowPageProps
                   variant="outline"
                   onClick={() => {
                     clearDOSession();
-                    setStatusText("Đã clear session DO hiện tại. Sẵn sàng trigger run mới.");
+                    setStatusText("Đã clear Kaggle session hiện tại. Sẵn sàng trigger run mới.");
                   }}
                 >
                   Clear session
-                </Button>
-                <Button
-                  variant="outline"
-                  onClick={() => {
-                    setManualTabUnlocked(true);
-                    setActiveTab("step3");
-                  }}
-                >
-                  Thủ công
                 </Button>
                 <Button
                   onClick={handleTriggerDO}
                   disabled={doPreflight?.ready === false}
                 >
                   Kích hoạt Kaggle Pipeline
+                </Button>
+                <Button
+                  variant="secondary"
+                  onClick={handleDownloadKaggleArtifact}
+                  disabled={doStatusValue !== "completed" || !doHasRealArtifact || !doArtifactDownloadUrl}
+                >
+                  Download exported model
                 </Button>
               </div>
             </div>
@@ -1039,7 +1257,7 @@ export function MLFlowPage({ availableModels, onModelsChanged }: MLFlowPageProps
               </p>
             </div>
 
-            <div className="grid gap-3 md:grid-cols-3">
+            <div className="grid gap-3 md:grid-cols-4">
               <div className="rounded-md border p-3">
                 <p className="text-xs text-muted-foreground">Run ID</p>
                 <p className="text-sm font-medium break-all">{doRunId}</p>
@@ -1047,30 +1265,6 @@ export function MLFlowPage({ availableModels, onModelsChanged }: MLFlowPageProps
               <div className="rounded-md border p-3">
                 <p className="text-xs text-muted-foreground">Status</p>
                 <Badge variant={doBadgeVariant as "default" | "secondary" | "destructive" | "outline"}>{doStatusValue}</Badge>
-              </div>
-              <div className="rounded-md border p-3">
-                <p className="text-xs text-muted-foreground">Run mode</p>
-                <Badge variant={doIsMockRun ? "destructive" : "secondary"}>{doIsMockRun ? "MOCK" : "REAL"}</Badge>
-              </div>
-              <div className="rounded-md border p-3">
-                <p className="text-xs text-muted-foreground">Droplet ID</p>
-                <p className="text-sm font-medium break-all">{doDropletId}</p>
-              </div>
-              <div className="rounded-md border p-3">
-                <p className="text-xs text-muted-foreground">Provider</p>
-                <p className="text-sm font-medium break-all">{doProvider}</p>
-              </div>
-              <div className="rounded-md border p-3">
-                <p className="text-xs text-muted-foreground">Batch ID</p>
-                <p className="text-sm font-medium break-all">{doBatchId}</p>
-              </div>
-              <div className="rounded-md border p-3">
-                <p className="text-xs text-muted-foreground">Compute profile</p>
-                <p className="text-sm font-medium break-all">{doDropletProfile || "-"}</p>
-              </div>
-              <div className="rounded-md border p-3">
-                <p className="text-xs text-muted-foreground">Compute mode</p>
-                <p className="text-sm font-medium uppercase">{doComputeMode}</p>
               </div>
               <div className="rounded-md border p-3">
                 <p className="text-xs text-muted-foreground">Training mode</p>
@@ -1081,40 +1275,49 @@ export function MLFlowPage({ availableModels, onModelsChanged }: MLFlowPageProps
                 <p className="text-sm font-medium break-all">{doBaseModel || "default"}</p>
               </div>
               <div className="rounded-md border p-3">
-                <p className="text-xs text-muted-foreground">Status source</p>
-                <p className="text-sm font-medium break-all">{doStatusSource}</p>
-              </div>
-              <div className="rounded-md border p-3">
                 <p className="text-xs text-muted-foreground">Artifact type</p>
                 <Badge variant={doIsMockArtifact ? "destructive" : doHasRealArtifact ? "secondary" : "outline"}>
                   {doIsMockArtifact ? "PLACEHOLDER" : doHasRealArtifact ? "REAL" : "NONE"}
                 </Badge>
               </div>
               <div className="rounded-md border p-3">
-                <p className="text-xs text-muted-foreground">CPU usage</p>
-                <p className="text-sm font-medium">
-                  {hasDoCpuPercent ? `${doCpuPercent.toFixed(1)}%` : doStatusValue === "running" ? "Đang chờ sample..." : "-"}
-                </p>
-              </div>
-              <div className="rounded-md border p-3">
-                <p className="text-xs text-muted-foreground">Memory usage</p>
-                <p className="text-sm font-medium">
-                  {hasDoMemoryPercent ? `${doMemoryPercent.toFixed(1)}%` : doStatusValue === "running" ? "Đang chờ sample..." : "-"}
-                </p>
-              </div>
-              <div className="rounded-md border p-3">
-                <p className="text-xs text-muted-foreground">Last telemetry sample</p>
-                <p className="text-sm font-medium break-all">{hasDoTelemetrySample ? doTelemetryLastSampleAt : "-"}</p>
-              </div>
-              <div className="rounded-md border p-3">
-                <p className="text-xs text-muted-foreground">ETA train (ước tính)</p>
-                <p className="text-sm font-medium">{hasDoEtaEstimate ? `~${Math.round(doEtaEstimate)} phút` : "-"}</p>
-              </div>
-              <div className="rounded-md border p-3">
                 <p className="text-xs text-muted-foreground">Train duration (thực tế)</p>
                 <p className="text-sm font-medium">{hasDoTrainDuration ? `${doTrainDuration.toFixed(2)} phút` : "-"}</p>
               </div>
             </div>
+
+            {doStatusValue === "completed" && (
+              <Card className="p-4 border-primary/20 bg-primary/5 space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <h3 className="font-medium">Kaggle metrics</h3>
+                  <Badge variant={doHasRealArtifact ? "secondary" : "outline"}>{doHasRealArtifact ? "exported model ready" : "no real artifact"}</Badge>
+                </div>
+                <div className="grid gap-3 md:grid-cols-5">
+                  <div>
+                    <p className="text-xs text-muted-foreground">f1_toxic</p>
+                    <p className="text-xl font-semibold">{formatMetric(doMetrics?.f1_toxic)}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground">macro_f1</p>
+                    <p className="text-xl font-semibold">{formatMetric(doMetrics?.macro_f1)}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground">accuracy</p>
+                    <p className="text-xl font-semibold">{formatMetric(doMetrics?.accuracy)}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground">precision</p>
+                    <p className="text-xl font-semibold">{formatMetric(doMetrics?.precision)}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground">recall</p>
+                    <p className="text-xl font-semibold">{formatMetric(doMetrics?.recall)}</p>
+                  </div>
+                </div>
+                <p className="text-xs break-all text-muted-foreground">run={doRunId} · checksum={doChecksum || "-"}</p>
+                {!doMetrics && <p className="text-xs text-amber-700 dark:text-amber-300">Artifact hoàn tất nhưng chưa tìm thấy metrics.json trong ZIP.</p>}
+              </Card>
+            )}
 
             <div className="space-y-2">
               <div className="flex items-center justify-between text-sm">
@@ -1209,11 +1412,6 @@ export function MLFlowPage({ availableModels, onModelsChanged }: MLFlowPageProps
               )}
               <p className="text-xs break-all">URI: {doArtifactUri || "-"}</p>
               <p className="text-xs break-all">Checksum (sha256): {doChecksum || "-"}</p>
-              {doSignedUrl && (
-                <a className="text-xs underline text-primary break-all" href={doSignedUrl} target="_blank" rel="noreferrer">
-                  Download artifact (Spaces)
-                </a>
-              )}
               {doErrorMessage && <p className="text-xs text-destructive break-all">Error: {doErrorMessage}</p>}
             </div>
 
@@ -1274,10 +1472,31 @@ export function MLFlowPage({ availableModels, onModelsChanged }: MLFlowPageProps
                 <p>
                   macro_f1: {(comparePayload?.candidate?.metrics?.macro_f1 as number | null | undefined)?.toFixed?.(3) ?? "-"}
                 </p>
+                <p>
+                  accuracy: {(comparePayload?.candidate?.metrics?.accuracy as number | null | undefined)?.toFixed?.(3) ?? "-"}
+                </p>
+                <p>
+                  precision: {(comparePayload?.candidate?.metrics?.precision as number | null | undefined)?.toFixed?.(3) ?? "-"}
+                </p>
+                <p>
+                  recall: {(comparePayload?.candidate?.metrics?.recall as number | null | undefined)?.toFixed?.(3) ?? "-"}
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  source run: {comparePayload?.candidate?.source_run_id || "-"}
+                </p>
               </div>
-              <Button variant="outline" onClick={() => refreshCompare()}>
-                Refresh compare
-              </Button>
+              <div className="flex flex-wrap gap-2">
+                <Button variant="outline" onClick={() => refreshCompare()}>
+                  Refresh compare
+                </Button>
+                <Button
+                  variant="secondary"
+                  onClick={handleDownloadKaggleArtifact}
+                  disabled={doStatusValue !== "completed" || !doHasRealArtifact || !doArtifactDownloadUrl}
+                >
+                  Download exported model
+                </Button>
+              </div>
             </Card>
 
             <Card className="p-4 space-y-3">

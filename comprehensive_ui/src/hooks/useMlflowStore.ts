@@ -132,11 +132,52 @@ export interface MlflowComparePayload {
     artifact_path?: string | null;
     notes?: string | null;
     metrics?: Record<string, number | null>;
+    source_run_id?: string | null;
+    raw_metrics?: MlflowKaggleMetrics | null;
     created_at?: string | null;
   };
   gate_checks?: Array<{ name: string; delta: number | null; passed: boolean }>;
   promotion_enabled?: boolean;
   promotion_mode?: string;
+}
+
+export interface MlflowKaggleMetrics {
+  f1_toxic?: number | null;
+  macro_f1?: number | null;
+  accuracy?: number | null;
+  precision?: number | null;
+  recall?: number | null;
+  source_member?: string | null;
+  run_name?: string | null;
+  mode?: string | null;
+  splits?: Record<string, Record<string, number>>;
+}
+
+export interface MlflowKaggleStatus {
+  run_id?: string;
+  batch_id?: string | null;
+  provider?: string;
+  gpu_profile?: string | null;
+  compute_mode?: string;
+  training_mode?: string;
+  base_model?: string | null;
+  status?: string;
+  current_stage?: string | null;
+  logs?: string[];
+  log_events?: Array<Record<string, unknown>>;
+  stages?: string[];
+  artifact_uri?: string | null;
+  artifact_kind?: string;
+  artifact_download_url?: string | null;
+  artifact_checksum?: string | null;
+  metrics?: MlflowKaggleMetrics | null;
+  error_message?: string | null;
+  run_mode?: string;
+  status_source?: string;
+  stage_timestamps?: Record<string, string | null>;
+  created_at?: string | null;
+  updated_at?: string | null;
+  job_id?: string | null;
 }
 
 export interface MlflowDeletedRows {
@@ -212,7 +253,7 @@ export function useMlflowStore() {
   const [lastBundlePath, setLastBundlePath] = useState<string | null>(null);
   const [requiredZipContents, setRequiredZipContents] = useState<string[]>([]);
   const [doRunId, setDoRunId] = useState<string | null>(null);
-  const [doStatus, setDoStatus] = useState<Record<string, unknown> | null>(null);
+  const [doStatus, setDoStatus] = useState<MlflowKaggleStatus | null>(null);
   const [doPreflight, setDoPreflight] = useState<MlflowDOPreflight | null>(null);
   const [hasNoBatch, setHasNoBatch] = useState(false);
   const [ingestStage, setIngestStage] = useState<MlflowIngestStage>("idle");
@@ -532,7 +573,7 @@ export function useMlflowStore() {
       return run(async () => {
         const target = runId || doRunId;
         if (!target) return;
-        const payload = await parseJsonResponse<Record<string, unknown>>(
+        const payload = await parseJsonResponse<MlflowKaggleStatus>(
           await fetch(buildApiUrl(`/api/mlflow/kaggle/status?run_id=${encodeURIComponent(target)}`)),
         );
         setDoStatus(payload);

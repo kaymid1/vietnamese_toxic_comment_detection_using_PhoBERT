@@ -1824,6 +1824,15 @@ def init_feedback_db() -> None:
         ensure_table_column(conn, "mlflow_do_run", "spaces_bucket", "TEXT")
         ensure_table_column(conn, "mlflow_do_run", "spaces_key", "TEXT")
         ensure_table_column(conn, "mlflow_do_run", "error_message", "TEXT")
+        ensure_table_column(conn, "mlflow_training_artifact", "source_run_id", "TEXT")
+        ensure_table_column(conn, "mlflow_training_artifact", "metrics_json", "TEXT")
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_mlflow_training_artifact_source_run_id
+            ON mlflow_training_artifact(source_run_id)
+            WHERE source_run_id IS NOT NULL
+            """
+        )
 
         seed_training_tracker_default(conn)
         conn.commit()
@@ -4989,6 +4998,163 @@ KAGGLE_STAGES = [
 ]
 
 
+KAGGLE_ARTIFACT_ROOT = (BASE_DIR / ".runtime" / "kaggle_real_jobs").resolve()
+
+
+def _kaggle_artifact_download_url(run_id: str, artifact_uri: Optional[str]) -> Optional[str]:
+    if not artifact_uri or str(artifact_uri).lower().startswith("mock://"):
+        return None
+    return f"/api/mlflow/kaggle/artifact/download?run_id={urllib.parse.quote(run_id)}"
+
+
+def _resolve_kaggle_artifact_path(artifact_uri: Optional[str]) -> Path:
+    raw = str(artifact_uri or "").strip()
+    if not raw:
+        raise HTTPException(status_code=404, detail="Kaggle artifact is not available")
+    if raw.lower().startswith("mock://"):
+        raise HTTPException(status_code=400, detail="Mock Kaggle artifacts are not downloadable")
+    if raw.startswith("http://") or raw.startswith("https://"):
+        raise HTTPException(status_code=400, detail="Remote artifact downloads are not supported yet")
+
+    if raw.lower().startswith("file://"):
+        parsed = urllib.parse.urlparse(raw)
+        if parsed.netloc and re.fullmatch(r"[A-Za-z]:", parsed.netloc):
+            candidate = Path(urllib.request.url2pathname(f"{parsed.netloc}{parsed.path}"))
+        elif parsed.netloc and parsed.netloc not in {"", "localhost"}:
+            raise HTTPException(status_code=400, detail="Only local file:// artifacts are supported")
+        else:
+            candidate = Path(urllib.request.url2pathname(parsed.path))
+    else:
+        candidate = Path(raw)
+        if not candidate.is_absolute():
+            candidate = BASE_DIR / candidate
+
+    resolved = candidate.expanduser().resolve()
+    try:
+        resolved.relative_to(KAGGLE_ARTIFACT_ROOT)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid Kaggle artifact path") from exc
+    if "output" not in resolved.relative_to(KAGGLE_ARTIFACT_ROOT).parts:
+        raise HTTPException(status_code=400, detail="Kaggle artifact must be under a job output directory")
+    if not resolved.exists() or not resolved.is_file():
+        raise HTTPException(status_code=404, detail=f"Kaggle artifact file not found: {resolved.name}")
+    return resolved
+
+
+def _coerce_numeric_metric_map(value: Any) -> Dict[str, float]:
+    if not isinstance(value, dict):
+        return {}
+    out: Dict[str, float] = {}
+    for key, raw in value.items():
+        score = normalize_score(raw)
+        if score is not None:
+            out[str(key)] = score
+    return out
+
+
+def _extract_kaggle_metrics_from_zip(artifact_path: Path) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    if artifact_path.suffix.lower() != ".zip":
+        return None, None
+    try:
+        with zipfile.ZipFile(artifact_path, "r") as zf:
+            metric_members = [
+                name
+                for name in zf.namelist()
+                if not name.endswith("/") and Path(name).name.lower() == "metrics.json"
+            ]
+            if not metric_members:
+                return None, None
+
+            def rank_member(name: str) -> Tuple[int, int, str]:
+                lowered = name.lower()
+                if lowered == "metrics.json":
+                    return (0, len(name), name)
+                if lowered.endswith("/results/metrics.json"):
+                    return (1, len(name), name)
+                return (2, len(name), name)
+
+            member = sorted(metric_members, key=rank_member)[0]
+            with zf.open(member) as f:
+                payload = json.loads(f.read().decode("utf-8", errors="replace"))
+            return payload if isinstance(payload, dict) else None, member
+    except (zipfile.BadZipFile, OSError, json.JSONDecodeError) as exc:
+        logger.warning("Failed to parse Kaggle artifact metrics from %s: %s", artifact_path, exc)
+        return None, None
+
+
+def _normalize_kaggle_metrics(raw_metrics: Optional[Dict[str, Any]], source_member: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    if not isinstance(raw_metrics, dict):
+        return None
+
+    test_metrics = raw_metrics.get("test") if isinstance(raw_metrics.get("test"), dict) else None
+    validation_metrics = raw_metrics.get("validation") if isinstance(raw_metrics.get("validation"), dict) else None
+    final_metrics = raw_metrics.get("final_test_rich") if isinstance(raw_metrics.get("final_test_rich"), dict) else None
+    argmax_metrics = raw_metrics.get("test_argmax_basic") if isinstance(raw_metrics.get("test_argmax_basic"), dict) else None
+    primary = test_metrics or final_metrics or argmax_metrics or raw_metrics
+
+    normalized = {
+        "f1_toxic": normalize_score(primary.get("f1_toxic") or primary.get("toxic_f1")),
+        "macro_f1": normalize_score(primary.get("macro_f1") or primary.get("f1")),
+        "accuracy": normalize_score(primary.get("accuracy")),
+        "precision": normalize_score(primary.get("precision") or primary.get("precision_toxic")),
+        "recall": normalize_score(primary.get("recall") or primary.get("recall_toxic")),
+        "source_member": source_member,
+        "run_name": raw_metrics.get("run_name") if isinstance(raw_metrics.get("run_name"), str) else None,
+        "mode": raw_metrics.get("mode") if isinstance(raw_metrics.get("mode"), str) else None,
+        "splits": {
+            "validation": _coerce_numeric_metric_map(validation_metrics),
+            "test": _coerce_numeric_metric_map(test_metrics),
+        },
+    }
+    return normalized
+
+
+def _load_kaggle_artifact_metrics(artifact_uri: Optional[str]) -> Optional[Dict[str, Any]]:
+    try:
+        artifact_path = _resolve_kaggle_artifact_path(artifact_uri)
+    except HTTPException:
+        return None
+    raw_metrics, source_member = _extract_kaggle_metrics_from_zip(artifact_path)
+    return _normalize_kaggle_metrics(raw_metrics, source_member)
+
+
+def _record_kaggle_training_artifact(
+    run_id: str,
+    artifact_uri: Optional[str],
+    metrics: Optional[Dict[str, Any]],
+    notes: Optional[str] = None,
+) -> None:
+    if not artifact_uri or str(artifact_uri).lower().startswith("mock://"):
+        return
+    init_feedback_db()
+    now = datetime.utcnow().isoformat() + "Z"
+    run_name = str((metrics or {}).get("run_name") or run_id).strip() or run_id
+    metrics_json = json.dumps(metrics, ensure_ascii=False) if metrics else None
+    with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+        existing = conn.execute(
+            "SELECT id FROM mlflow_training_artifact WHERE source_run_id = ?",
+            (run_id,),
+        ).fetchone()
+        if existing:
+            conn.execute(
+                """
+                UPDATE mlflow_training_artifact
+                SET run_name = ?, artifact_path = ?, notes = ?, metrics_json = ?, created_at = ?
+                WHERE source_run_id = ?
+                """,
+                (run_name, artifact_uri, notes, metrics_json, now, run_id),
+            )
+        else:
+            conn.execute(
+                """
+                INSERT INTO mlflow_training_artifact (run_name, artifact_path, notes, created_at, source_run_id, metrics_json)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (run_name, artifact_uri, notes, now, run_id, metrics_json),
+            )
+        conn.commit()
+
+
 def _kaggle_http_json(method: str, url: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     body = None if payload is None else json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
@@ -5231,6 +5397,15 @@ def mlflow_kaggle_status(run_id: str = Query(..., min_length=1)) -> Dict[str, An
         artifact_kind = "mock" if artifact_uri_value.lower().startswith("mock://") else "real"
     status_source = _do_infer_status_source(status_url, run_mode)
     stage_timestamps = _do_build_stage_timestamps(log_events, row)
+    artifact_download_url = _kaggle_artifact_download_url(row["run_id"], artifact_uri_value) if artifact_kind == "real" else None
+    kaggle_metrics = _load_kaggle_artifact_metrics(artifact_uri_value) if artifact_kind == "real" else None
+    if row["status"] == "completed" and artifact_kind == "real":
+        _record_kaggle_training_artifact(
+            row["run_id"],
+            artifact_uri_value,
+            kaggle_metrics,
+            notes="Kaggle retrain artifact",
+        )
 
     return {
         "run_id": row["run_id"],
@@ -5247,7 +5422,9 @@ def mlflow_kaggle_status(run_id: str = Query(..., min_length=1)) -> Dict[str, An
         "stages": KAGGLE_STAGES,
         "artifact_uri": row["artifact_uri"],
         "artifact_kind": artifact_kind,
+        "artifact_download_url": artifact_download_url,
         "artifact_checksum": row["artifact_checksum"],
+        "metrics": kaggle_metrics,
         "error_message": row["error_message"],
         "run_mode": run_mode,
         "status_source": status_source,
@@ -5256,6 +5433,20 @@ def mlflow_kaggle_status(run_id: str = Query(..., min_length=1)) -> Dict[str, An
         "updated_at": row["updated_at"],
         "job_id": (row["droplet_id"] or None),
     }
+
+
+@app.get("/api/mlflow/kaggle/artifact/download")
+def mlflow_kaggle_artifact_download(run_id: str = Query(..., min_length=1)) -> FileResponse:
+    init_feedback_db()
+    with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+        row = _do_get_run(conn, run_id.strip())
+    if not row:
+        raise HTTPException(status_code=404, detail=f"Kaggle run not found: {run_id}")
+    if str(row["status"] or "").strip().lower() != "completed":
+        raise HTTPException(status_code=400, detail="Kaggle artifact is only downloadable after completion")
+
+    resolved = _resolve_kaggle_artifact_path(str(row["artifact_uri"] or "").strip())
+    return FileResponse(path=str(resolved), filename=resolved.name, media_type="application/zip")
 
 
 @app.get("/api/mlflow/compare/latest")
@@ -5269,7 +5460,7 @@ def mlflow_compare_latest() -> Dict[str, Any]:
         conn.row_factory = sqlite3.Row
         artifact_row = conn.execute(
             """
-            SELECT id, run_name, artifact_path, notes, created_at
+            SELECT id, run_name, artifact_path, notes, created_at, source_run_id, metrics_json
             FROM mlflow_training_artifact
             ORDER BY created_at DESC
             LIMIT 1
@@ -5289,9 +5480,21 @@ def mlflow_compare_latest() -> Dict[str, Any]:
         "macro_f1": normalize_score((current_run or {}).get("metrics", {}).get("f1") if isinstance(current_run, dict) else None),
         "val_loss": None,
     }
+    artifact_metrics: Optional[Dict[str, Any]] = None
+    if artifact_row and artifact_row["metrics_json"]:
+        try:
+            parsed_metrics = json.loads(artifact_row["metrics_json"])
+            if isinstance(parsed_metrics, dict):
+                artifact_metrics = parsed_metrics
+        except json.JSONDecodeError:
+            artifact_metrics = None
+
     candidate_metrics = {
-        "f1_toxic": normalize_score(tracker_row["f1_toxic"]) if tracker_row else None,
-        "macro_f1": normalize_score(tracker_row["macro_f1"]) if tracker_row else None,
+        "f1_toxic": normalize_score((artifact_metrics or {}).get("f1_toxic")) if artifact_metrics else normalize_score(tracker_row["f1_toxic"]) if tracker_row else None,
+        "macro_f1": normalize_score((artifact_metrics or {}).get("macro_f1")) if artifact_metrics else normalize_score(tracker_row["macro_f1"]) if tracker_row else None,
+        "accuracy": normalize_score((artifact_metrics or {}).get("accuracy")) if artifact_metrics else None,
+        "precision": normalize_score((artifact_metrics or {}).get("precision")) if artifact_metrics else None,
+        "recall": normalize_score((artifact_metrics or {}).get("recall")) if artifact_metrics else None,
         "val_loss": normalize_score(tracker_row["val_loss"]) if tracker_row else None,
     }
 
@@ -5334,6 +5537,8 @@ def mlflow_compare_latest() -> Dict[str, Any]:
             "artifact_path": artifact_row["artifact_path"] if artifact_row else None,
             "notes": artifact_row["notes"] if artifact_row else None,
             "metrics": candidate_metrics,
+            "source_run_id": artifact_row["source_run_id"] if artifact_row else None,
+            "raw_metrics": artifact_metrics,
             "created_at": artifact_row["created_at"] if artifact_row else None,
         },
         "gate_checks": gate_checks,
