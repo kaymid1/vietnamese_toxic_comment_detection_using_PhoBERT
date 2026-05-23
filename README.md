@@ -35,7 +35,6 @@ Main app: `comprehensive_ui/src/app/App.tsx`
 
 - Primary pages in top nav: `home`, `results`, `dataset`, `model`, `contact`, `admin_mlflow`
 - `dataset_synthetic` route exists in app shell but is **not shown in top navigation**
-- `protocol` route is reachable from Dataset page CTA (legacy dataset mode)
 - Theme and language are persisted in localStorage
 
 ### Analysis defaults sent by UI
@@ -56,7 +55,6 @@ Main app: `comprehensive_ui/src/app/App.tsx`
 - **Dataset page**: `/api/dataset/preview`, `/api/dataset/export`, `/api/feedback/segment/delete`
 - **Model page**: `/api/experiments/registry`, `/api/preprocessing/steps`, `/api/eval/policy` + training tracker store endpoints
 - **Admin MLflow page**: uses `/api/mlflow/*` endpoints + `/api/models/import-zip`
-- **Protocol page**: `/api/protocols/summary`
 - **Synthetic generation page**: `/api/dataset/synthetic/preview|generate|review|delete|export`
 
 ---
@@ -166,7 +164,7 @@ Source of truth: `backend/app.py`.
 - `POST /api/training-tracker/results`
 - `DELETE /api/training-tracker/results/{result_id}`
 
-### Experiment/policy/protocol utilities
+### Experiment/policy utilities
 
 - `POST /api/ask-ai`
 - `GET /api/gemini/models`
@@ -175,7 +173,6 @@ Source of truth: `backend/app.py`.
 - `GET /api/eval/policy`
 - `GET /api/eval/errors`
 - `GET /api/eval/hard-cases`
-- `GET /api/protocols/summary`
 
 ---
 
@@ -201,8 +198,9 @@ Deprecated model names (contains `deprecated`) are skipped when possible.
 
 `dataset_version` alias map in backend:
 
-- `v1` / `victsd_v1` → canonical `victsd_v1` directory: `data/victsd`
 - `latest` / `victsd_gold` → canonical `victsd_gold` directory: `data/processed/victsd_gold`
+
+Legacy `v1` / `victsd_v1` requests are rejected with `400`. The old protocol dataset directory `data/victsd` was removed. Raw source data under `data/raw/**` is intentionally kept.
 
 ---
 
@@ -213,6 +211,22 @@ Deprecated model names (contains `deprecated`) are skipped when possible.
 ```bash
 uvicorn backend.app:app --reload --port 8000
 ```
+
+### Admin access for MLflow
+
+MLflow admin UI and APIs require an admin session. Configure these in `.env.local` or `backend/.env.local` before using the MLflow page:
+
+```env
+VIETTOXIC_ADMIN_USERNAME=admin
+VIETTOXIC_ADMIN_PASSWORD=change-me
+VIETTOXIC_ADMIN_SESSION_SECRET=replace-with-a-long-random-secret
+VIETTOXIC_ADMIN_SESSION_TTL_SECONDS=28800
+```
+
+Protected routes:
+
+- `/api/mlflow/*`
+- `POST /api/models/import-zip`
 
 ### Frontend
 

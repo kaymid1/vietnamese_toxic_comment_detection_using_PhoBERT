@@ -35,8 +35,8 @@ def _insert_status_run(feedback_db: Path, run_id: str) -> None:
         conn.commit()
 
 
-def test_mlflow_overview_contract_shape(client):
-    response = client.get("/api/mlflow/overview")
+def test_mlflow_overview_contract_shape(client, admin_headers):
+    response = client.get("/api/mlflow/overview", headers=admin_headers)
     assert response.status_code == 200
     payload = response.json()
 
@@ -55,11 +55,11 @@ def test_mlflow_overview_contract_shape(client):
     assert expected_pipeline_keys.issubset((payload.get("pipeline_counts") or {}).keys())
 
 
-def test_mlflow_kaggle_status_contract_shape(client, qa_env):
+def test_mlflow_kaggle_status_contract_shape(client, qa_env, admin_headers):
     run_id = "run_contract"
     _insert_status_run(qa_env["feedback_db"], run_id)
 
-    response = client.get("/api/mlflow/kaggle/status", params={"run_id": run_id})
+    response = client.get("/api/mlflow/kaggle/status", params={"run_id": run_id}, headers=admin_headers)
     assert response.status_code == 200
     payload = response.json()
 

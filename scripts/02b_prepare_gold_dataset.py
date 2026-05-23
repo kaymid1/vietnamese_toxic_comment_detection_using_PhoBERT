@@ -115,8 +115,8 @@ def main() -> None:
     raw_dir = Path(os.getenv("DATA_RAW_DIR", "data/raw/victsd"))
     output_dir = Path(os.getenv("OUTPUT_DIR", "data/processed/victsd_gold"))
 
-    if output_dir.as_posix().rstrip("/") == "data/processed/victsd_v1":
-        raise SystemExit("Refusing to write to data/processed/victsd_v1. Use OUTPUT_DIR for victsd_gold.")
+    if output_dir.as_posix().rstrip("/") in {"data/processed/victsd_v1", "data/victsd"}:
+        raise SystemExit("Refusing to write to a legacy dataset path. Use OUTPUT_DIR for victsd_gold.")
 
     output_dir.mkdir(parents=True, exist_ok=True)
 

@@ -10,16 +10,17 @@ from sklearn.metrics import classification_report, confusion_matrix, f1_score
 # ================================================================
 # Config — match LoRA script data source / export layout
 # ================================================================
-DATA_DIR = os.environ.get("DATA_DIR", "/content/drive/MyDrive/victsd")
-DATASET_PREFIX = os.environ.get("DATASET_PREFIX", "victsd_v1_protocol_a")
+DATA_DIR = os.environ.get("DATA_DIR", "/content/drive/MyDrive/victsd_gold")
+DATASET_PREFIX = os.environ.get("DATASET_PREFIX", "")
 SEED = int(os.environ.get("SEED", "42"))
 
 MODEL_ID = "tfidf_lr/baseline"
-DATASET_VERSION = DATASET_PREFIX
+RUN_DATASET_TAG = DATASET_PREFIX if DATASET_PREFIX else "victsd_gold"
+DATASET_VERSION = RUN_DATASET_TAG
 IS_BASELINE = True
 
-OUTPUT_BASE = os.environ.get("OUTPUT_BASE", f"models/tfidf_lr/{DATASET_PREFIX}")
-RESULTS_BASE = os.environ.get("RESULTS_BASE", f"results/baseline/{DATASET_PREFIX}")
+OUTPUT_BASE = os.environ.get("OUTPUT_BASE", f"models/tfidf_lr/{RUN_DATASET_TAG}")
+RESULTS_BASE = os.environ.get("RESULTS_BASE", f"results/baseline/{RUN_DATASET_TAG}")
 
 random.seed(SEED)
 np.random.seed(SEED)
@@ -27,11 +28,19 @@ np.random.seed(SEED)
 # ================================================================
 # Dataset
 # ================================================================
-dataset_files = {
-    "train": f"{DATASET_PREFIX}_train_augmented.jsonl",
-    "validation": f"{DATASET_PREFIX}_validation_augmented.jsonl",
-    "test": f"{DATASET_PREFIX}_test_augmented.jsonl",
-}
+dataset_files = (
+    {
+        "train": f"{DATASET_PREFIX}_train_augmented.jsonl",
+        "validation": f"{DATASET_PREFIX}_validation_augmented.jsonl",
+        "test": f"{DATASET_PREFIX}_test_augmented.jsonl",
+    }
+    if DATASET_PREFIX
+    else {
+        "train": "train.jsonl",
+        "validation": "validation.jsonl",
+        "test": "test.jsonl",
+    }
+)
 for split, fname in dataset_files.items():
     path = f"{DATA_DIR}/{fname}"
     assert os.path.exists(path), f"Missing {split} file: {path}"
@@ -176,8 +185,8 @@ with open(f"{OUTPUT_BASE}/best/training_curve.json", "w", encoding="utf-8") as f
 import shutil
 
 zip_names = {
-    "best": f"best_model_tfidf_lr_{DATASET_PREFIX}",
-    "results": f"results_tfidf_lr_{DATASET_PREFIX}",
+    "best": f"best_model_tfidf_lr_{RUN_DATASET_TAG}",
+    "results": f"results_tfidf_lr_{RUN_DATASET_TAG}",
 }
 for name, path in [
     (zip_names["best"], f"{OUTPUT_BASE}/best"),

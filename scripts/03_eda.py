@@ -63,7 +63,7 @@ def plot_bar(counter: Counter, title: str, out_path: str, topk: int = 20):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--data_dir", default="data/processed/victsd_v1", help="Folder containing train/validation/test jsonl")
+    ap.add_argument("--data_dir", default="data/processed/victsd_gold", help="Folder containing train/validation/test jsonl")
     ap.add_argument("--out_dir", default="reports/eda", help="Output folder for EDA report/plots")
     ap.add_argument("--topk", type=int, default=20)
     ap.add_argument("--max_samples", type=int, default=0, help="0 = use all, else cap samples per split for speed")

@@ -40,8 +40,6 @@ interface DatasetStats {
   by_source: Record<string, { total: number; clean: number; toxic: number }>;
 }
 
-type DatasetVersion = "v1" | "latest";
-
 interface DatasetPreviewResponse {
   page: number;
   page_size: number;
@@ -65,13 +63,9 @@ interface DatasetExportResponse {
   };
 }
 
-interface DatasetPageProps {
-  datasetVersion: DatasetVersion;
-  onNavigateToProtocol?: () => void;
-}
-
 const RAW_API_BASE = import.meta.env.VITE_API_BASE_URL?.trim() ?? "";
 const API_BASE = RAW_API_BASE.replace(/\/+$/, "");
+const DATASET_VERSION_PARAM = "latest";
 
 const buildApiUrl = (path: string) => {
   if (!path.startsWith("/")) {
@@ -98,12 +92,12 @@ const sourceLabel = (source: string, t: (key: string) => string) => {
 
 const SOURCE_ORDER: string[] = ["victsd", "victsd_augmented", "vihsd", "uit-vihsd_augmented", "new_collected"];
 
-const LATEST_HIDDEN_SOURCES = new Set(["vihsd", "vihsd_augmented", "uit-vihsd_augmented"]);
+const HIDDEN_SOURCES = new Set(["vihsd", "vihsd_augmented", "uit-vihsd_augmented"]);
 
-const isVisibleSourceOption = (source: string, isLegacyDataset: boolean) => {
+const isVisibleSourceOption = (source: string) => {
   const normalized = source.trim().toLowerCase();
   if (normalized === "all") return false;
-  if (!isLegacyDataset && LATEST_HIDDEN_SOURCES.has(normalized)) return false;
+  if (HIDDEN_SOURCES.has(normalized)) return false;
   return true;
 };
 
@@ -126,12 +120,9 @@ const formatPercent = (value: number, total: number) => {
   return `${((value / total) * 100).toFixed(1)}%`;
 };
 
-const resolveDatasetVersionParam = (datasetVersion: DatasetVersion) =>
-  datasetVersion === "latest" ? "latest" : "v1";
-
-export function DatasetPage({ datasetVersion, onNavigateToProtocol }: DatasetPageProps) {
+export function DatasetPage() {
   const { t } = useI18n();
-  const isLegacyDataset = datasetVersion === "v1";
+  const isLegacyDataset = false;
   const [rows, setRows] = useState<DatasetRow[]>([]);
   const [stats, setStats] = useState<DatasetStats | null>(null);
   const [page, setPage] = useState(1);
@@ -148,8 +139,7 @@ export function DatasetPage({ datasetVersion, onNavigateToProtocol }: DatasetPag
   const [deleteStatus, setDeleteStatus] = useState<string | null>(null);
   const [deleteLoading, setDeleteLoading] = useState(false);
   const [sourceOptions, setSourceOptions] = useState<string[]>([
-    "victsd_augmented",
-    "uit-vihsd_augmented",
+    "victsd",
     "new_collected",
   ]);
 
@@ -158,16 +148,16 @@ export function DatasetPage({ datasetVersion, onNavigateToProtocol }: DatasetPag
     if (!keys.length) return;
     setSourceOptions((prev) => {
       const merged = new Set([...prev, ...keys]);
-      const filtered = Array.from(merged).filter((source) => isVisibleSourceOption(source, isLegacyDataset));
+      const filtered = Array.from(merged).filter((source) => isVisibleSourceOption(source));
       return sortSourcesByPreferredOrder(filtered);
     });
-  }, [isLegacyDataset, stats]);
+  }, [stats]);
 
   const availableSources = useMemo(() => {
     const merged = new Set([...sourceOptions, sourceFilter]);
-    const filtered = Array.from(merged).filter((source) => isVisibleSourceOption(source, isLegacyDataset));
+    const filtered = Array.from(merged).filter((source) => isVisibleSourceOption(source));
     return ["all", ...sortSourcesByPreferredOrder(filtered)];
-  }, [isLegacyDataset, sourceFilter, sourceOptions]);
+  }, [sourceFilter, sourceOptions]);
 
   const aggregatedStats = useMemo(() => {
     const bySource = stats?.by_source || {};
@@ -204,10 +194,9 @@ export function DatasetPage({ datasetVersion, onNavigateToProtocol }: DatasetPag
 
   const latestSourceSummary = useMemo(() => {
     const bySource = stats?.by_source || {};
-    const hiddenLatestSources = new Set(["vihsd", "vihsd_augmented", "uit-vihsd_augmented"]);
 
     return Object.entries(bySource)
-      .filter(([source]) => !hiddenLatestSources.has(source.trim().toLowerCase()))
+      .filter(([source]) => !HIDDEN_SOURCES.has(source.trim().toLowerCase()))
       .filter(([, counts]) => (counts?.total ?? 0) > 0)
       .sort((a, b) => (b[1]?.total ?? 0) - (a[1]?.total ?? 0));
   }, [stats]);
@@ -242,7 +231,7 @@ export function DatasetPage({ datasetVersion, onNavigateToProtocol }: DatasetPag
       if (sourceFilter !== "all") params.set("source", sourceFilter);
       if (labelFilter !== "all") params.set("label", labelFilter === "toxic" ? "1" : "0");
       if (splitFilter !== "all") params.set("split", splitFilter);
-      params.set("dataset_version", resolveDatasetVersionParam(datasetVersion));
+      params.set("dataset_version", DATASET_VERSION_PARAM);
 
       const response = await fetch(buildApiUrl(`/api/dataset/preview?${params.toString()}`));
       const data = (await response.json()) as DatasetPreviewResponse;
@@ -265,11 +254,11 @@ export function DatasetPage({ datasetVersion, onNavigateToProtocol }: DatasetPag
   useEffect(() => {
     setPage(1);
     setSelectedFeedback([]);
-  }, [sourceFilter, labelFilter, splitFilter, pageSize, datasetVersion]);
+  }, [sourceFilter, labelFilter, splitFilter, pageSize]);
 
   useEffect(() => {
     void fetchPreview(page, pageSize);
-  }, [page, pageSize, sourceFilter, labelFilter, splitFilter, datasetVersion]);
+  }, [page, pageSize, sourceFilter, labelFilter, splitFilter]);
 
   const handleExport = async () => {
     setExportStatus(null);
@@ -279,7 +268,7 @@ export function DatasetPage({ datasetVersion, onNavigateToProtocol }: DatasetPag
       if (labelFilter !== "all") body.label = [labelFilter === "toxic" ? 1 : 0];
       if (splitFilter !== "all") body.split = [splitFilter];
 
-      body.dataset_version = resolveDatasetVersionParam(datasetVersion);
+      body.dataset_version = DATASET_VERSION_PARAM;
       body.model_version = "phobert/baseline";
       body.policy_version = "policy-v1";
 
@@ -391,7 +380,7 @@ export function DatasetPage({ datasetVersion, onNavigateToProtocol }: DatasetPag
   };
 
   return (
-    <div className="min-h-screen bg-background py-12 px-4 sm:px-6 lg:px-8" >
+    <div className="dashboard-page" >
       <div className="max-w-6xl mx-auto">
         <div className="mb-10 text-center">
           <h1 className="text-4xl mb-3 text-primary">
@@ -410,24 +399,10 @@ export function DatasetPage({ datasetVersion, onNavigateToProtocol }: DatasetPag
               </h2>
               <p className="text-sm text-muted-foreground">{t("dataset.analysis.subtitle")}</p>
             </div>
-            {isLegacyDataset && onNavigateToProtocol && (
-              <Button
-                type="button"
-                variant="outline"
-                onClick={onNavigateToProtocol}
-                className="border-2 border-foreground text-text-danger hover:text-text-danger"
-              >
-                {t("dataset.analysis.protocolPageCta")}
-              </Button>
-            )}
           </div>
           <Tabs defaultValue="overview" className="mt-2">
             <TabsList className="w-full flex flex-wrap justify-start gap-2">
               <TabsTrigger value="overview">{t("dataset.tabs.overview")}</TabsTrigger>
-              {isLegacyDataset && <TabsTrigger value="compare">{t("dataset.tabs.compare")}</TabsTrigger>}
-              {isLegacyDataset && <TabsTrigger value="annotation">{t("dataset.tabs.annotation")}</TabsTrigger>}
-              {isLegacyDataset && <TabsTrigger value="limitation">{t("dataset.tabs.limitation")}</TabsTrigger>}
-              {isLegacyDataset && <TabsTrigger value="definition">{t("dataset.tabs.definition")}</TabsTrigger>}
             </TabsList>
 
             <TabsContent value="overview" className="mt-4 space-y-6">

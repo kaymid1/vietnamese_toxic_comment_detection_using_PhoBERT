@@ -31,6 +31,12 @@ from urllib.parse import urljoin, urlparse, parse_qs
 from datetime import datetime
 from typing import Dict, List, Optional
 
+try:
+    from backend.system_settings import get_int_setting as _runtime_int_setting
+except Exception:
+    _runtime_int_setting = None
+
+
 def ensure_runtime_deps():
     """
     Ensure all required packages are installed into the CURRENT active venv.
@@ -170,6 +176,9 @@ def ensure_vncorenlp_assets():
 # =========================
 
 def _env_int(name: str, default: Optional[int]) -> Optional[int]:
+    if _runtime_int_setting is not None and name in {"VIDEO_LONG_SECONDS", "VIDEO_TRANSCRIPT_LIMIT_SECONDS", "ASR_TRIM_SECONDS"}:
+        value = _runtime_int_setting(name, default or 0, min_value=0)
+        return value if value > 0 else None
     raw = os.getenv(name)
     if raw is None or raw == "":
         return default

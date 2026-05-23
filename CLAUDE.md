@@ -22,7 +22,7 @@ Snapshot verified on **2026-04-10**.
 Thesis/capstone project for **Vietnamese toxic content detection** with two lanes:
 
 1. **Research/training lane**
-   - dataset export/preprocess/protocol build
+   - dataset export/preprocess
    - baseline + PhoBERT/LoRA training
    - experiment tracking and plots
 
@@ -55,7 +55,7 @@ Core label semantics remain binary:
 - `comprehensive_ui/src/app/App.tsx`
   - frontend app shell + API calls for analyze flow
 - `comprehensive_ui/src/app/components/Navigation.tsx`
-  - top-level navigable routes and dataset-version switch
+  - top-level navigable routes
 - `comprehensive_ui/src/app/components/DatasetPage.tsx`
   - preview/export wiring + segment-feedback deletion
 - `comprehensive_ui/src/app/components/ModelPage.tsx`
@@ -139,6 +139,12 @@ In `comment_crawl.crawl_urls(...)`, legacy parameters exist but are currently di
 
 ### Endpoint groups (current code)
 
+Admin auth:
+- `POST /api/admin/login`
+- `GET /api/admin/session`
+- MLflow endpoints and `POST /api/models/import-zip` require `Authorization: Bearer <admin_token>`.
+- Credentials/session config come from `VIETTOXIC_ADMIN_USERNAME`, `VIETTOXIC_ADMIN_PASSWORD`, `VIETTOXIC_ADMIN_SESSION_SECRET`, and optional `VIETTOXIC_ADMIN_SESSION_TTL_SECONDS`.
+
 #### Core infer/model
 - `GET /`
 - `GET /health`
@@ -201,7 +207,7 @@ In `comment_crawl.crawl_urls(...)`, legacy parameters exist but are currently di
 - `POST /api/training-tracker/results`
 - `DELETE /api/training-tracker/results/{result_id}`
 
-#### Experiment/policy/protocol helpers
+#### Experiment/policy helpers
 - `POST /api/ask-ai`
 - `GET /api/gemini/models`
 - `GET /api/preprocessing/steps`
@@ -209,7 +215,6 @@ In `comment_crawl.crawl_urls(...)`, legacy parameters exist but are currently di
 - `GET /api/eval/policy`
 - `GET /api/eval/errors`
 - `GET /api/eval/hard-cases`
-- `GET /api/protocols/summary`
 
 ---
 
@@ -227,7 +232,6 @@ In `comment_crawl.crawl_urls(...)`, legacy parameters exist but are currently di
 - Stores:
   - theme: `viettoxic:theme`
   - language: `viettoxic:language`
-  - dataset version: `viettoxic:dataset-version`
   - model selection: `viettoxic:models`, `viettoxic:model`
   - scan history: `viettoxic:scan-history`
 
@@ -253,7 +257,7 @@ Uses:
 - `POST /api/dataset/export`
 - `POST /api/feedback/segment/delete`
 
-Legacy dataset mode (`v1`) exposes Protocol CTA to `protocol` page.
+Dataset page uses the fixed `latest` dataset version (`victsd_gold`). The legacy protocol page and v1 switch were removed.
 
 ### Model page
 
@@ -321,16 +325,14 @@ Required artifacts:
 ## 8) Dataset version aliasing and UI wiring
 
 Backend alias map (`DATASET_VERSION_ALIASES`):
-- `v1` / `victsd_v1` -> canonical `victsd_v1`
 - `latest` / `victsd_gold` -> canonical `victsd_gold`
 
 Backend directory map (`DATASET_VERSION_DIRS`):
-- `victsd_v1` -> `data/victsd`
 - `victsd_gold` -> `data/processed/victsd_gold`
 
-Frontend `DatasetPage` sends `dataset_version` based on toggle:
-- UI `v1`
-- UI `latest`
+Legacy `v1` / `victsd_v1` requests return `400`. `data/victsd` and `data/processed/victsd_v1` are not active repo data; keep `data/raw/**`.
+
+Frontend `DatasetPage` sends `dataset_version=latest`.
 
 ---
 
@@ -339,17 +341,11 @@ Frontend `DatasetPage` sends `dataset_version` based on toggle:
 Main scripts still used for thesis workflow:
 - `scripts/01_export_raw.py`
 - `scripts/02_preprocess.py`
-- `scripts/02a_build_protocol_datasets.py`
 - `scripts/02b_prepare_gold_dataset.py`
 - `scripts/03_eda.py`
 - `scripts/04_baseline_tfidf_lr.py`
 - `scripts/05_train_phobert.py`
 - `scripts/06_train_phobert_lora.py`
-
-Protocol semantics:
-- A: ViCTSD-only anchor
-- B: ViCTSD + ViHSD OFFENSIVE in train only
-- C: merged benchmark with strict split dedup
 
 ---
 

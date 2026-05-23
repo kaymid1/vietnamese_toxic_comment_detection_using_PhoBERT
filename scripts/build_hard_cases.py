@@ -22,8 +22,7 @@ def load_wordlist(path: Path) -> List[str]:
 
 
 def load_dataset_rows() -> List[Dict[str, Any]]:
-    preferred = BASE_DIR / "data" / "processed" / "victsd_v1"
-    fallback = BASE_DIR / "data" / "victsd"
+    preferred = BASE_DIR / "data" / "processed" / "victsd_gold"
     rows: List[Dict[str, Any]] = []
 
     def read_jsonl(path: Path, source_label: str) -> None:
@@ -53,12 +52,8 @@ def load_dataset_rows() -> List[Dict[str, Any]]:
                     }
                 )
 
-    if preferred.exists():
-        for split in ["train", "validation", "test"]:
-            read_jsonl(preferred / f"{split}.jsonl", "victsd")
-    elif fallback.exists():
-        for split in ["train", "validation", "test"]:
-            read_jsonl(fallback / f"{split}.jsonl", "victsd")
+    for split in ["train", "validation", "test"]:
+        read_jsonl(preferred / f"{split}.jsonl", "victsd")
 
     return rows
 

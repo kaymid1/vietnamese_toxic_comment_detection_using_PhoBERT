@@ -16,12 +16,14 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/app/components/ui/dialog";
-import { useMlflowStore, type MlflowUnusedScope } from "../../hooks/useMlflowStore";
+import { buildApiUrl, useMlflowStore, type MlflowUnusedScope } from "../../hooks/useMlflowStore";
 
 
 interface MLFlowPageProps {
   availableModels: string[];
   onModelsChanged?: () => Promise<void> | void;
+  adminToken: string;
+  onAdminUnauthorized: () => void;
 }
 
 const MLFLOW_URLS_DRAFT_KEY = "viettoxic:mlflow:urlsText";
@@ -52,7 +54,7 @@ const safeWriteLocalStorageString = (key: string, value: string) => {
   }
 };
 
-export function MLFlowPage({ availableModels, onModelsChanged }: MLFlowPageProps) {
+export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdminUnauthorized }: MLFlowPageProps) {
   const isDeprecatedModel = (model: string) => model.toLowerCase().includes("deprecated");
   const {
     loading,
@@ -94,7 +96,7 @@ export function MLFlowPage({ availableModels, onModelsChanged }: MLFlowPageProps
     clearDOSession,
     refreshCompare,
     promote,
-  } = useMlflowStore();
+  } = useMlflowStore({ adminToken, onUnauthorized: onAdminUnauthorized });
 
   const [urlsText, setUrlsText] = useState(() => {
     if (typeof window === "undefined") return "";
@@ -336,6 +338,31 @@ export function MLFlowPage({ availableModels, onModelsChanged }: MLFlowPageProps
     }
   };
 
+  const downloadAdminFile = async (url: string, filename: string) => {
+    const response = await fetch(buildApiUrl(url), {
+      headers: { Authorization: `Bearer ${adminToken}` },
+    });
+    if (response.status === 401) {
+      onAdminUnauthorized();
+      throw new Error("Admin session expired");
+    }
+    if (!response.ok) {
+      const raw = await response.text();
+      throw new Error(raw || "Download failed");
+    }
+
+    const blob = await response.blob();
+    const objectUrl = window.URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = objectUrl;
+    anchor.rel = "noopener noreferrer";
+    anchor.download = filename;
+    document.body.appendChild(anchor);
+    anchor.click();
+    document.body.removeChild(anchor);
+    window.URL.revokeObjectURL(objectUrl);
+  };
+
   const handleExportBundle = async () => {
     try {
       const payload = await exportBundle(activeBatchId, {
@@ -344,16 +371,7 @@ export function MLFlowPage({ availableModels, onModelsChanged }: MLFlowPageProps
         unusedScope,
       });
 
-      const downloadHref = payload.download_url.startsWith("http")
-        ? payload.download_url
-        : `${window.location.origin}${payload.download_url}`;
-      const anchor = document.createElement("a");
-      anchor.href = downloadHref;
-      anchor.rel = "noopener noreferrer";
-      anchor.download = payload.bundle_path.split("/").pop() || "mlflow_bundle.zip";
-      document.body.appendChild(anchor);
-      anchor.click();
-      document.body.removeChild(anchor);
+      await downloadAdminFile(payload.download_url, payload.bundle_path.split("/").pop() || "mlflow_bundle.zip");
 
       const merge = payload.merge_stats;
       const mergeText = merge
@@ -521,16 +539,7 @@ export function MLFlowPage({ availableModels, onModelsChanged }: MLFlowPageProps
     typeof value === "number" && Number.isFinite(value) ? value.toFixed(3) : "-";
   const handleDownloadKaggleArtifact = () => {
     if (!doArtifactDownloadUrl) return;
-    const href = doArtifactDownloadUrl.startsWith("http")
-      ? doArtifactDownloadUrl
-      : `${window.location.origin}${doArtifactDownloadUrl}`;
-    const anchor = document.createElement("a");
-    anchor.href = href;
-    anchor.rel = "noopener noreferrer";
-    anchor.download = doArtifactUri.split("/").pop() || "kaggle_exported_model.zip";
-    document.body.appendChild(anchor);
-    anchor.click();
-    document.body.removeChild(anchor);
+    void downloadAdminFile(doArtifactDownloadUrl, doArtifactUri.split("/").pop() || "kaggle_exported_model.zip");
   };
 
   useEffect(() => {
@@ -573,7 +582,7 @@ export function MLFlowPage({ availableModels, onModelsChanged }: MLFlowPageProps
           : "outline";
 
   return (
-    <div className="max-w-7xl mx-auto px-4 py-8 space-y-6">
+    <div className="dashboard-page max-w-7xl mx-auto space-y-6">
       <Card className="p-5 border-border/80 bg-gradient-to-br from-background to-muted/30">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="space-y-1">

@@ -1,9 +1,23 @@
-import { Moon, Shield, Sun } from "lucide-react";
-import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/app/components/ui/hover-card";
+import { useMemo, useState } from "react";
+import {
+  BarChart3,
+  ChevronRight,
+  Cpu,
+  Database,
+  FlaskConical,
+  Home,
+  Mail,
+  Menu,
+  Moon,
+  ScrollText,
+  Settings,
+  Shield,
+  Sparkles,
+  Sun,
+  X,
+} from "lucide-react";
 import type { Language } from "@/app/i18n/messages";
 import { useI18n } from "@/app/i18n/context";
-
-type DatasetVersion = "v1" | "latest";
 
 interface NavigationProps {
   currentPage: string;
@@ -12,8 +26,9 @@ interface NavigationProps {
   onToggleTheme: () => void;
   language: Language;
   onSetLanguage: (language: Language) => void;
-  datasetVersion: DatasetVersion;
-  onSetDatasetVersion: (version: DatasetVersion) => void;
+  adminAuthenticated: boolean;
+  adminUsername?: string;
+  onAdminLogout: () => void;
 }
 
 export function Navigation({
@@ -23,159 +38,180 @@ export function Navigation({
   onToggleTheme,
   language,
   onSetLanguage,
-  datasetVersion,
-  onSetDatasetVersion,
+  adminAuthenticated,
+  adminUsername,
+  onAdminLogout,
 }: NavigationProps) {
   const { t } = useI18n();
-  const userNavItems = [
-    { name: t("nav.home"), id: "home" },
-    { name: t("nav.results"), id: "results" },
-    { name: t("nav.dataset"), id: "dataset" },
-    { name: t("nav.model"), id: "model" },
-    { name: t("nav.contact"), id: "contact" },
+  const [mobileOpen, setMobileOpen] = useState(false);
+
+  const mainNavItems = [
+    { name: t("nav.home"), id: "home", icon: Home },
+    { name: t("nav.results"), id: "results", icon: BarChart3 },
+    { name: t("nav.model"), id: "model", icon: Cpu },
+    { name: t("nav.contact"), id: "contact", icon: Mail },
   ];
 
-  const adminNavItems = [{ name: t("nav.adminMlflow"), id: "admin_mlflow" }];
+  const datasetNavItems = [
+    { name: t("nav.datasetOverview"), id: "dataset", icon: Database },
+    { name: t("nav.datasetSynthetic"), id: "dataset_synthetic", icon: Sparkles },
+  ];
+
+  const adminNavItems = [
+    {
+      name: adminAuthenticated ? t("nav.adminMlflow") : t("nav.adminLogin"),
+      id: adminAuthenticated ? "admin_mlflow" : "admin_login",
+      icon: FlaskConical,
+    },
+    ...(adminAuthenticated
+      ? [
+          {
+            name: t("nav.adminSystemSettings"),
+            id: "admin_system_settings",
+            icon: Settings,
+          },
+        ]
+      : []),
+  ];
+
+  const pageTitle = useMemo(() => {
+    const allItems = [...mainNavItems, ...datasetNavItems, ...adminNavItems];
+    if (currentPage === "admin_login") return t("nav.adminLogin");
+    return allItems.find((item) => item.id === currentPage || (item.id === "admin_mlflow" && currentPage === "mlflow"))?.name ?? t("nav.home");
+  }, [adminNavItems, currentPage, datasetNavItems, mainNavItems, t]);
+
+  const navigate = (page: string) => {
+    onNavigate(page);
+    setMobileOpen(false);
+  };
+
+  const renderNavButton = (item: { name: string; id: string; icon: typeof Home }, nested = false) => {
+    const Icon = item.icon;
+    const isActive = currentPage === item.id || (item.id === "admin_mlflow" && currentPage === "mlflow");
+    return (
+      <button
+        key={item.id}
+        type="button"
+        onClick={() => navigate(item.id)}
+        className={`dashboard-nav-item ${nested ? "dashboard-nav-item-nested" : ""} ${isActive ? "is-active" : ""}`}
+        aria-current={isActive ? "page" : undefined}
+      >
+        <Icon className="h-4 w-4" />
+        <span>{item.name}</span>
+        {isActive && <ChevronRight className="ml-auto h-4 w-4" />}
+      </button>
+    );
+  };
+
+  const controls = (
+    <>
+      <div className="dashboard-language" aria-label={t("nav.language")}>
+        <button
+          type="button"
+          onClick={() => onSetLanguage("vi")}
+          className={language === "vi" ? "is-active" : ""}
+        >
+          VN
+        </button>
+        <button
+          type="button"
+          onClick={() => onSetLanguage("en")}
+          className={language === "en" ? "is-active" : ""}
+        >
+          EN
+        </button>
+      </div>
+
+      <button
+        type="button"
+        onClick={onToggleTheme}
+        aria-label={theme === "dark" ? t("nav.themeToLight") : t("nav.themeToDark")}
+        title={theme === "dark" ? t("nav.lightMode") : t("nav.darkMode")}
+        className="dashboard-icon-button"
+      >
+        {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+      </button>
+
+      {adminAuthenticated && (
+        <button
+          type="button"
+          onClick={onAdminLogout}
+          className="dashboard-nav-item dashboard-nav-item-nested"
+          title={adminUsername || "Admin"}
+        >
+          <span>{t("nav.adminLogout")}</span>
+        </button>
+      )}
+    </>
+  );
+
+  const sidebarContent = (
+    <>
+      <button type="button" className="dashboard-brand" onClick={() => navigate("home")}>
+        <span className="dashboard-brand-mark">
+          <Shield className="h-5 w-5" />
+        </span>
+        <span>
+          <span className="dashboard-brand-title">VietToxic</span>
+          <span className="dashboard-brand-subtitle">Detector</span>
+        </span>
+      </button>
+
+      <div className="dashboard-sidebar-section">
+        <p>{t("nav.mainSection")}</p>
+        {mainNavItems.map((item) => renderNavButton(item))}
+      </div>
+
+      <div className="dashboard-sidebar-section">
+        <p>{t("nav.datasetSection")}</p>
+        {datasetNavItems.map((item) => renderNavButton(item, true))}
+      </div>
+
+      <div className="dashboard-sidebar-section">
+        <p>{t("nav.adminSection")}</p>
+        {adminNavItems.map((item) => renderNavButton(item))}
+      </div>
+    </>
+  );
 
   return (
-    <nav className="sticky top-0 z-50 border-b border-border bg-background/95 shadow-sm backdrop-blur">
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        <div className="flex justify-between items-center h-16">
-          {/* Logo */}
-          <div className="flex cursor-pointer items-center gap-2" onClick={() => onNavigate("home")}>
-            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary">
-              <Shield className="h-6 w-6 text-primary-foreground" />
-            </div>
-            <span className="text-xl tracking-tight text-primary">VietToxic Detector</span>
-          </div>
+    <>
+      <aside className="dashboard-sidebar">{sidebarContent}</aside>
 
-          <div className="flex items-center gap-3">
-            <div className="hidden md:flex items-center gap-3">
-              <div className="flex items-center gap-8">
-                {userNavItems.map((item) => {
-                  const isActive = currentPage === item.id;
-                  const buttonClass = `rounded-lg px-3 py-2 transition-colors ${
-                    isActive ? "font-medium" : "text-foreground/80 hover:bg-accent"
-                  }`;
-                  const buttonStyle = {
-                    color: isActive ? "var(--primary)" : undefined,
-                    backgroundColor: isActive ? "color-mix(in srgb, var(--primary) 14%, transparent)" : "transparent",
-                  };
-
-                  if (item.id === "dataset") {
-                    return (
-                      <HoverCard key={item.id} openDelay={120} closeDelay={100}>
-                        <HoverCardTrigger asChild>
-                          <button
-                            type="button"
-                            onClick={() => onNavigate(item.id)}
-                            className={buttonClass}
-                            style={buttonStyle}
-                          >
-                            {item.name}
-                          </button>
-                        </HoverCardTrigger>
-                        <HoverCardContent align="start" className="w-56 p-2">
-                          <p className="px-2 py-1 text-xs text-muted-foreground">{t("nav.datasetVersionLabel")}</p>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              onSetDatasetVersion("v1");
-                              onNavigate("dataset");
-                            }}
-                            className={`w-full rounded-md px-2 py-1.5 text-left text-sm transition-colors ${
-                              datasetVersion === "v1" ? "bg-accent" : "hover:bg-accent"
-                            }`}
-                          >
-                            {t("nav.datasetVersionV1Deprecated")}
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              onSetDatasetVersion("latest");
-                              onNavigate("dataset");
-                            }}
-                            className={`w-full rounded-md px-2 py-1.5 text-left text-sm transition-colors ${
-                              datasetVersion === "latest" ? "bg-accent" : "hover:bg-accent"
-                            }`}
-                          >
-                            {t("nav.datasetVersionLatest")}
-                          </button>
-                        </HoverCardContent>
-                      </HoverCard>
-                    );
-                  }
-
-                  return (
-                    <button
-                      key={item.id}
-                      onClick={() => onNavigate(item.id)}
-                      className={buttonClass}
-                      style={buttonStyle}
-                    >
-                      {item.name}
-                    </button>
-                  );
-                })}
-              </div>
-
-              <div className="h-6 w-px bg-border" aria-hidden="true" />
-
-              <div className="flex items-center gap-2">
-                <span className="text-xs uppercase tracking-wide text-muted-foreground">{t("nav.adminSection")}</span>
-                {adminNavItems.map((item) => {
-                  const isActive = currentPage === item.id || (item.id === "admin_mlflow" && currentPage === "mlflow");
-                  return (
-                    <button
-                      key={item.id}
-                      type="button"
-                      onClick={() => onNavigate(item.id)}
-                      className={`rounded-lg px-3 py-2 text-sm transition-colors ${
-                        isActive
-                          ? "bg-primary/15 text-primary font-medium"
-                          : "text-foreground/80 hover:bg-accent"
-                      }`}
-                    >
-                      {item.name}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-
-            <div className="inline-flex items-center gap-1 rounded-full border border-border bg-muted/70 p-1" aria-label={t("nav.language")}>
-              <button
-                type="button"
-                onClick={() => onSetLanguage("vi")}
-                className={`rounded-full px-2 py-1 text-xs transition-colors ${
-                  language === "vi" ? "bg-primary text-primary-foreground" : "text-foreground/80 hover:bg-accent"
-                }`}
-              >
-                VN
-              </button>
-              <button
-                type="button"
-                onClick={() => onSetLanguage("en")}
-                className={`rounded-full px-2 py-1 text-xs transition-colors ${
-                  language === "en" ? "bg-primary text-primary-foreground" : "text-foreground/80 hover:bg-accent"
-                }`}
-              >
-                EN
-              </button>
-            </div>
-
-            <button
-              type="button"
-              onClick={onToggleTheme}
-              aria-label={theme === "dark" ? t("nav.themeToLight") : t("nav.themeToDark")}
-              title={theme === "dark" ? t("nav.lightMode") : t("nav.darkMode")}
-              className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-border bg-muted/70 text-foreground/80 transition-colors hover:bg-accent"
-            >
-              {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
-            </button>
+      <header className="dashboard-topbar">
+        <div className="dashboard-topbar-title">
+          <button
+            type="button"
+            onClick={() => setMobileOpen(true)}
+            className="dashboard-icon-button lg:hidden"
+            aria-label={t("nav.openMenu")}
+          >
+            <Menu className="h-4 w-4" />
+          </button>
+          <ScrollText className="hidden h-5 w-5 text-primary sm:block" />
+          <div>
+            <p>{t("nav.workspaceLabel")}</p>
+            <h1>{pageTitle}</h1>
           </div>
         </div>
-      </div>
-    </nav>
+        <div className="dashboard-topbar-actions">{controls}</div>
+      </header>
+
+      {mobileOpen && (
+        <div className="dashboard-mobile-layer lg:hidden">
+          <button className="dashboard-mobile-backdrop" type="button" onClick={() => setMobileOpen(false)} aria-label={t("nav.closeMenu")} />
+          <div className="dashboard-mobile-panel">
+            <div className="mb-4 flex items-center justify-between">
+              <span className="text-sm font-semibold text-foreground">{t("nav.menu")}</span>
+              <button type="button" onClick={() => setMobileOpen(false)} className="dashboard-icon-button" aria-label={t("nav.closeMenu")}>
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            {sidebarContent}
+            <div className="mt-5 flex items-center gap-2">{controls}</div>
+          </div>
+        </div>
+      )}
+    </>
   );
 }

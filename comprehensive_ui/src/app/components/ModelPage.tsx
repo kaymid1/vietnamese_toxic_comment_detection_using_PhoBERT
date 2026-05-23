@@ -33,6 +33,8 @@ import {
   ResponsiveContainer,
   BarChart,
   Bar,
+  XAxis,
+  YAxis,
 } from "recharts";
 import { useI18n } from "@/app/i18n/context";
 import { TrainingChecklist } from "../../components/TrainingChecklist";
@@ -222,7 +224,7 @@ export function ModelPage({ onTryNow }: ModelPageProps) {
   const demoOutput = applyActiveSteps(demoInput, pipelineSteps);
 
   return (
-    <div style={{ backgroundColor: "var(--background)" }} className="min-h-screen py-12 px-4 sm:px-6 lg:px-8">
+    <div className="dashboard-page">
       <div className="max-w-6xl mx-auto">
         {/* Header */}
         <div className="mb-12 text-center">

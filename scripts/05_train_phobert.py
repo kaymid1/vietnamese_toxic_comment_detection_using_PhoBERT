@@ -61,8 +61,8 @@ os.environ["WANDB_DISABLED"] = "true"
 # ================================================================
 # Config — tune here
 # ================================================================
-DATA_DIR = os.environ.get("DATA_DIR", "/content/drive/MyDrive/victsd")
-DATASET_PREFIX = os.environ.get("DATASET_PREFIX", "victsd_v1_protocol_a")
+DATA_DIR = os.environ.get("DATA_DIR", "/content/drive/MyDrive/victsd_gold")
+DATASET_PREFIX = os.environ.get("DATASET_PREFIX", "")
 MODEL_NAME = "vinai/phobert-base"
 MAX_LENGTH = 256
 
@@ -85,10 +85,11 @@ TOXIC_WEIGHT_SCALE = 0.5
 
 SEED = int(os.environ.get("SEED", "42"))
 
-OUTPUT_BASE = os.environ.get("OUTPUT_BASE", f"models/phobert/{DATASET_PREFIX}")
-RESULTS_BASE = os.environ.get("RESULTS_BASE", f"results/phobert/{DATASET_PREFIX}")
+RUN_DATASET_TAG = DATASET_PREFIX if DATASET_PREFIX else "victsd_gold"
+OUTPUT_BASE = os.environ.get("OUTPUT_BASE", f"models/phobert/{RUN_DATASET_TAG}")
+RESULTS_BASE = os.environ.get("RESULTS_BASE", f"results/phobert/{RUN_DATASET_TAG}")
 
-RUN_ID = f"{DATASET_PREFIX}_{RUN_TIMESTAMP}_{RUN_SUFFIX}"
+RUN_ID = f"{RUN_DATASET_TAG}_{RUN_TIMESTAMP}_{RUN_SUFFIX}"
 
 if ENABLE_MLFLOW:
     try:
@@ -133,11 +134,19 @@ show_gpu()
 # Dataset
 # ================================================================
 log("Checking dataset files...")
-dataset_files = {
-    "train": f"{DATASET_PREFIX}_train_augmented.jsonl",
-    "validation": f"{DATASET_PREFIX}_validation_augmented.jsonl",
-    "test": f"{DATASET_PREFIX}_test_augmented.jsonl",
-}
+dataset_files = (
+    {
+        "train": f"{DATASET_PREFIX}_train_augmented.jsonl",
+        "validation": f"{DATASET_PREFIX}_validation_augmented.jsonl",
+        "test": f"{DATASET_PREFIX}_test_augmented.jsonl",
+    }
+    if DATASET_PREFIX
+    else {
+        "train": "train.jsonl",
+        "validation": "validation.jsonl",
+        "test": "test.jsonl",
+    }
+)
 for split, fname in dataset_files.items():
     path = f"{DATA_DIR}/{fname}"
     assert os.path.exists(path), f"Missing {split} file: {path}"
@@ -662,7 +671,7 @@ with open(f"{RESULTS_BASE}/error_analysis.json","w",encoding="utf-8") as f:
 # Full metrics bundle
 # ================================================================
 results = {
-    "dataset_version": DATASET_PREFIX, "model": MODEL_NAME,
+    "dataset_version": RUN_DATASET_TAG, "model": MODEL_NAME,
     "env": {"torch": torch.__version__, "cuda_available": torch.cuda.is_available()},
     "config": {
         "MODEL_NAME": MODEL_NAME, "MAX_LENGTH": MAX_LENGTH,
@@ -713,7 +722,7 @@ log("Done. Saved model + metrics + calibration + error analysis.")
 from datetime import datetime
 
 MODEL_ID = MODEL_VERSION
-DATASET_VERSION = DATASET_PREFIX
+DATASET_VERSION = RUN_DATASET_TAG
 IS_BASELINE = True
 
 # --- training curve from trainer log_history ---
@@ -822,8 +831,8 @@ if mlflow_active and mlflow is not None:
 import shutil
 
 zip_names = {
-    "best": f"best_model_full_{DATASET_PREFIX}",
-    "results": f"results_full_{DATASET_PREFIX}",
+    "best": f"best_model_full_{RUN_DATASET_TAG}",
+    "results": f"results_full_{RUN_DATASET_TAG}",
 }
 for name, path in [
     (zip_names["best"], best_model_path),

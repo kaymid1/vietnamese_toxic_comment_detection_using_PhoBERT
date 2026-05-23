@@ -23,7 +23,6 @@ def qa_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict:
     feedback_db = feedback_dir / "feedback.db"
     processed_dir = base_dir / "data" / "processed"
     victsd_gold_dir = processed_dir / "victsd_gold"
-    victsd_v1_dir = base_dir / "data" / "victsd"
     models_dir = base_dir / "models" / "options"
     kaggle_root = base_dir / ".runtime" / "kaggle_real_jobs"
 
@@ -38,16 +37,6 @@ def qa_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict:
                 }
             ],
         )
-        _write_jsonl(
-            victsd_v1_dir / f"{split}.jsonl",
-            [
-                {
-                    "text": f"v1 {split} text",
-                    "label": 0,
-                    "meta": {"source": "victsd"},
-                }
-            ],
-        )
 
     monkeypatch.setattr(app_module, "BASE_DIR", base_dir)
     monkeypatch.setattr(app_module, "FEEDBACK_DIR", feedback_dir)
@@ -57,11 +46,13 @@ def qa_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict:
         app_module,
         "DATASET_VERSION_DIRS",
         {
-            "victsd_v1": victsd_v1_dir,
             "victsd_gold": victsd_gold_dir,
         },
     )
     monkeypatch.setattr(app_module, "KAGGLE_ARTIFACT_ROOT", kaggle_root)
+    monkeypatch.setenv("VIETTOXIC_ADMIN_USERNAME", "admin")
+    monkeypatch.setenv("VIETTOXIC_ADMIN_PASSWORD", "admin-password")
+    monkeypatch.setenv("VIETTOXIC_ADMIN_SESSION_SECRET", "test-admin-session-secret")
 
     app_module.init_feedback_db()
 
@@ -77,3 +68,14 @@ def qa_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict:
 @pytest.fixture()
 def client(qa_env: dict) -> TestClient:
     return TestClient(qa_env["app_module"].app)
+
+
+@pytest.fixture()
+def admin_headers(client: TestClient) -> dict[str, str]:
+    response = client.post(
+        "/api/admin/login",
+        json={"username": "admin", "password": "admin-password"},
+    )
+    assert response.status_code == 200
+    token = response.json()["token"]
+    return {"Authorization": f"Bearer {token}"}

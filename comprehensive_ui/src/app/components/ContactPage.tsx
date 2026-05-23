@@ -6,7 +6,7 @@ export function ContactPage() {
   const { t } = useI18n();
 
   return (
-    <div className="min-h-screen bg-background py-12 px-4 sm:px-6 lg:px-8">
+    <div className="dashboard-page">
       <div className="max-w-4xl mx-auto">
         <div className="mb-12 text-center">
           <h1 className="text-4xl mb-4 text-primary">{t("contact.title")}</h1>

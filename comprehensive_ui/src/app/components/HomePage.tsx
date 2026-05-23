@@ -124,7 +124,7 @@ export function HomePage({
   };
 
   return (
-    <div className="min-h-screen bg-background px-4 py-16 sm:px-6 lg:px-8">
+    <div className="dashboard-page">
       <div className="mx-auto w-full max-w-5xl">
         <div className="mb-8 text-center">
           <h1 className="text-4xl tracking-tight text-primary">VietToxic Detector</h1>

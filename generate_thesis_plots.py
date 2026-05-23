@@ -10,7 +10,7 @@ LIGHTWEIGHT PLOT GENERATION FOR THESIS
   plots/confusion_matrix.png
 
 CLI example:
-python generate_thesis_plots.py --data-dir "./data/victsd" --results-dir "./results/phobert_v2" --plots-dir "./plots"
+python generate_thesis_plots.py --data-dir "./data/processed/victsd_gold" --results-dir "./results/phobert_v2" --plots-dir "./plots"
 """
 
 from __future__ import annotations

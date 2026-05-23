@@ -3,18 +3,91 @@ import { useCallback, useEffect, useRef, useState } from "react";
 const RAW_API_BASE = import.meta.env.VITE_API_BASE_URL?.trim() ?? "";
 const API_BASE = RAW_API_BASE.replace(/\/+$/, "");
 const API_BASE_WITHOUT_API_SUFFIX = API_BASE.replace(/\/api$/i, "");
+const API_FALLBACK_BASES = Array.from(
+  new Set(
+    ["", API_BASE, "http://127.0.0.1:8000", "http://localhost:8000", "http://127.0.0.1:8001", "http://localhost:8001"]
+      .map((value) => value.trim().replace(/\/+$/, ""))
+      .filter(Boolean),
+  ),
+);
+const API_FALLBACK_FAILURE_COOLDOWN_MS = 30000;
+let lastSuccessfulApiBase: string | null = null;
+const apiBaseFailureUntil = new Map<string, number>();
 
-const buildApiUrl = (path: string) => {
+const buildApiUrlFromBase = (base: string, path: string) => {
+  if (/^https?:\/\//i.test(path)) return path;
+  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+  if (!base) return normalizedPath;
+
+  const baseEndsWithApi = /\/api$/i.test(base);
+  const pathStartsWithApi = /^\/api(?:\/|$)/i.test(normalizedPath);
+  if (baseEndsWithApi && pathStartsWithApi) {
+    return `${base.replace(/\/api$/i, "")}${normalizedPath}`;
+  }
+
+  return `${base}${normalizedPath}`;
+};
+
+const isNetworkFetchError = (error: unknown) =>
+  error instanceof TypeError && /failed to fetch|networkerror|load failed/i.test(error.message.toLowerCase());
+
+export const buildApiUrl = (path: string) => {
+  if (/^https?:\/\//i.test(path)) return path;
   const normalizedPath = path.startsWith("/") ? path : `/${path}`;
   if (!API_BASE) return normalizedPath;
-
   const baseEndsWithApi = /\/api$/i.test(API_BASE);
   const pathStartsWithApi = /^\/api(?:\/|$)/i.test(normalizedPath);
   if (baseEndsWithApi && pathStartsWithApi) {
     return `${API_BASE_WITHOUT_API_SUFFIX}${normalizedPath}`;
   }
-
   return `${API_BASE}${normalizedPath}`;
+};
+
+export const fetchApiWithFallback = async (urlOrPath: string, init?: RequestInit): Promise<Response> => {
+  const normalizedPath = /^https?:\/\//i.test(urlOrPath)
+    ? (() => {
+        try {
+          const parsed = new URL(urlOrPath);
+          return `${parsed.pathname}${parsed.search}`;
+        } catch {
+          return urlOrPath;
+        }
+      })()
+    : urlOrPath;
+
+  const now = Date.now();
+  const candidateBases = [lastSuccessfulApiBase || "", ...API_FALLBACK_BASES, API_BASE]
+    .map((value) => value.trim())
+    .filter((value, index, values) => values.indexOf(value) === index);
+
+  let lastError: unknown = null;
+  const tried: string[] = [];
+
+  for (const base of candidateBases) {
+    const blockedUntil = apiBaseFailureUntil.get(base) || 0;
+    if (base !== (lastSuccessfulApiBase || "") && blockedUntil > now) {
+      continue;
+    }
+    const url = /^https?:\/\//i.test(urlOrPath) ? buildApiUrlFromBase(base, normalizedPath) : buildApiUrlFromBase(base, urlOrPath);
+    tried.push(url);
+    try {
+      const response = await fetch(url, init);
+      lastSuccessfulApiBase = base;
+      apiBaseFailureUntil.delete(base);
+      return response;
+    } catch (error) {
+      if (!isNetworkFetchError(error)) throw error;
+      lastError = error;
+      apiBaseFailureUntil.set(base, Date.now() + API_FALLBACK_FAILURE_COOLDOWN_MS);
+      if (lastSuccessfulApiBase === base) {
+        lastSuccessfulApiBase = null;
+      }
+    }
+  }
+
+  throw new Error(
+    `Cannot reach backend API for ${urlOrPath}. Tried: ${tried.join(" | ")}. ${(lastError as Error | null)?.message || ""}`.trim(),
+  );
 };
 
 class ApiError extends Error {
@@ -26,6 +99,11 @@ class ApiError extends Error {
     this.status = status;
     this.detail = detail;
   }
+}
+
+interface UseMlflowStoreOptions {
+  adminToken?: string | null;
+  onUnauthorized?: () => void;
 }
 
 const parseJsonResponse = async <T,>(response: Response): Promise<T> => {
@@ -231,7 +309,8 @@ const DO_TERMINAL_STATUSES = new Set(["completed", "failed", "dry_run", "placeho
 const DO_POLL_INTERVAL_MS = 4000;
 const DO_MAX_POLL_ATTEMPTS = 21600;
 
-export function useMlflowStore() {
+export function useMlflowStore(options: UseMlflowStoreOptions = {}) {
+  const { adminToken, onUnauthorized } = options;
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [activeBatchId, setActiveBatchId] = useState<string | null>(null);
@@ -261,6 +340,21 @@ export function useMlflowStore() {
   const [ingestStageMessage, setIngestStageMessage] = useState<string | null>(null);
   const doPollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const doPollAttemptRef = useRef(0);
+
+  const authorizedFetch = useCallback(
+    async (url: string, init?: RequestInit) => {
+      const headers = new Headers(init?.headers);
+      if (adminToken) {
+        headers.set("Authorization", `Bearer ${adminToken}`);
+      }
+      const response = await fetchApiWithFallback(url, { ...init, headers });
+      if (response.status === 401) {
+        onUnauthorized?.();
+      }
+      return response;
+    },
+    [adminToken, onUnauthorized],
+  );
 
   const run = useCallback(async <T,>(fn: () => Promise<T>) => {
     setLoading(true);
@@ -297,13 +391,13 @@ export function useMlflowStore() {
     async (limit = 50) => {
       return run(async () => {
         const payload = await parseJsonResponse<{ items: MlflowBatchSummary[]; total: number }>(
-          await fetch(buildApiUrl(`/api/mlflow/batches?limit=${limit}`)),
+          await authorizedFetch(buildApiUrl(`/api/mlflow/batches?limit=${limit}`)),
         );
         setBatches(payload.items || []);
         return payload;
       });
     },
-    [run],
+    [authorizedFetch, run],
   );
 
   const refreshOverview = useCallback(
@@ -313,7 +407,7 @@ export function useMlflowStore() {
           ? `?batch_id=${encodeURIComponent(batchId)}&strict_batch=true`
           : "";
         try {
-          const payload = await parseJsonResponse<MlflowOverview>(await fetch(buildApiUrl(`/api/mlflow/overview${qs}`)));
+          const payload = await parseJsonResponse<MlflowOverview>(await authorizedFetch(buildApiUrl(`/api/mlflow/overview${qs}`)));
           const isNoBatch = payload.has_data === false || !payload.active_batch_id;
           setHasNoBatch(isNoBatch);
           setOverview(payload);
@@ -342,7 +436,7 @@ export function useMlflowStore() {
         }
       });
     },
-    [run],
+    [authorizedFetch, run],
   );
 
   const refreshCandidates = useCallback(
@@ -361,14 +455,14 @@ export function useMlflowStore() {
         }
 
         const payload = await parseJsonResponse<{ items: MlflowCandidate[]; total: number; page: number }>(
-          await fetch(buildApiUrl(`/api/mlflow/candidates?${query.toString()}`)),
+          await authorizedFetch(buildApiUrl(`/api/mlflow/candidates?${query.toString()}`)),
         );
         setCandidates(payload.items || []);
         setCandidateTotal(payload.total || 0);
         setCandidatePage(payload.page || page);
       });
     },
-    [activeBatchId, candidatePage, candidatePageSize, run],
+    [activeBatchId, authorizedFetch, candidatePage, candidatePageSize, run],
   );
 
   const refreshThresholdStatus = useCallback(
@@ -379,7 +473,7 @@ export function useMlflowStore() {
           ? `?batch_id=${encodeURIComponent(useBatch)}&strict_batch=true`
           : "";
         const payload = await parseJsonResponse<MlflowThresholdStatus>(
-          await fetch(buildApiUrl(`/api/mlflow/threshold-status${qs}`)),
+          await authorizedFetch(buildApiUrl(`/api/mlflow/threshold-status${qs}`)),
         );
         if (payload.has_data === false) {
           setHasNoBatch(true);
@@ -388,7 +482,7 @@ export function useMlflowStore() {
         return payload;
       });
     },
-    [activeBatchId, run],
+    [activeBatchId, authorizedFetch, run],
   );
 
   const refreshReviewHistory = useCallback(
@@ -409,7 +503,7 @@ export function useMlflowStore() {
         }
 
         const payload = await parseJsonResponse<{ items: MlflowCandidate[]; total: number; page: number }>(
-          await fetch(buildApiUrl(`/api/mlflow/review-history?${query.toString()}`)),
+          await authorizedFetch(buildApiUrl(`/api/mlflow/review-history?${query.toString()}`)),
         );
         setReviewHistory(payload.items || []);
         setReviewHistoryTotal(payload.total || 0);
@@ -417,7 +511,7 @@ export function useMlflowStore() {
         return payload;
       });
     },
-    [activeBatchId, reviewHistoryPage, candidatePageSize, run],
+    [activeBatchId, authorizedFetch, reviewHistoryPage, candidatePageSize, run],
   );
 
   const refreshCrawlHistory = useCallback(
@@ -438,7 +532,7 @@ export function useMlflowStore() {
 
         try {
           const payload = await parseJsonResponse<{ items: MlflowCrawlHistoryItem[]; total: number; page: number }>(
-            await fetch(buildApiUrl(`/api/mlflow/crawl-history?${query.toString()}`)),
+            await authorizedFetch(buildApiUrl(`/api/mlflow/crawl-history?${query.toString()}`)),
           );
           setCrawlHistoryUnavailable(false);
           setCrawlHistory(payload.items || []);
@@ -458,7 +552,7 @@ export function useMlflowStore() {
         }
       });
     },
-    [crawlHistoryPage, candidatePageSize, crawlHistoryUnavailable, run],
+    [authorizedFetch, crawlHistoryPage, candidatePageSize, crawlHistoryUnavailable, run],
   );
 
   const exportBundle = useCallback(
@@ -489,7 +583,7 @@ export function useMlflowStore() {
             final_train_count: number;
           };
         }>(
-          await fetch(buildApiUrl("/api/mlflow/manual/export-bundle"), {
+          await authorizedFetch(buildApiUrl("/api/mlflow/manual/export-bundle"), {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -505,14 +599,14 @@ export function useMlflowStore() {
         return payload;
       });
     },
-    [activeBatchId, run],
+    [activeBatchId, authorizedFetch, run],
   );
 
   const importArtifact = useCallback(
     async (runName: string, artifactPath: string, notes?: string) => {
       return run(async () => {
         return parseJsonResponse<{ import_id: number; status: string }>(
-          await fetch(buildApiUrl("/api/mlflow/manual/import-artifact"), {
+          await authorizedFetch(buildApiUrl("/api/mlflow/manual/import-artifact"), {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ run_name: runName, artifact_path: artifactPath, notes }),
@@ -520,7 +614,7 @@ export function useMlflowStore() {
         );
       });
     },
-    [run],
+    [authorizedFetch, run],
   );
 
   const importModelZip = useCallback(
@@ -530,21 +624,21 @@ export function useMlflowStore() {
         formData.append("model_name", modelName);
         formData.append("model_zip", modelZip);
         return parseJsonResponse<MlflowImportModelZipResponse>(
-          await fetch(buildApiUrl("/api/models/import-zip"), {
+          await authorizedFetch(buildApiUrl("/api/models/import-zip"), {
             method: "POST",
             body: formData,
           }),
         );
       });
     },
-    [run],
+    [authorizedFetch, run],
   );
 
   const refreshDOPreflight = useCallback(async () => {
     return run(async () => {
       try {
         const payload = await parseJsonResponse<MlflowDOPreflight>(
-          await fetch(buildApiUrl("/api/mlflow/kaggle/preflight")),
+          await authorizedFetch(buildApiUrl("/api/mlflow/kaggle/preflight")),
         );
         setDoPreflight(payload);
         return payload;
@@ -566,7 +660,7 @@ export function useMlflowStore() {
         throw err;
       }
     });
-  }, [run]);
+  }, [authorizedFetch, run]);
 
   const refreshDOStatus = useCallback(
     async (runId?: string | null) => {
@@ -574,13 +668,13 @@ export function useMlflowStore() {
         const target = runId || doRunId;
         if (!target) return;
         const payload = await parseJsonResponse<MlflowKaggleStatus>(
-          await fetch(buildApiUrl(`/api/mlflow/kaggle/status?run_id=${encodeURIComponent(target)}`)),
+          await authorizedFetch(buildApiUrl(`/api/mlflow/kaggle/status?run_id=${encodeURIComponent(target)}`)),
         );
         setDoStatus(payload);
         return payload;
       });
     },
-    [doRunId, run],
+    [authorizedFetch, doRunId, run],
   );
 
   const stopDOPolling = useCallback(() => {
@@ -658,7 +752,7 @@ export function useMlflowStore() {
           training_mode?: "retrain" | "finetune";
           base_model?: string | null;
         }>(
-          await fetch(buildApiUrl("/api/mlflow/kaggle/trigger"), {
+          await authorizedFetch(buildApiUrl("/api/mlflow/kaggle/trigger"), {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(payloadBody),
@@ -680,24 +774,24 @@ export function useMlflowStore() {
         return payload;
       });
     },
-    [activeBatchId, doPreflight, refreshDOStatus, run, startDOPolling],
+    [activeBatchId, authorizedFetch, doPreflight, refreshDOStatus, run, startDOPolling],
   );
 
   const refreshCompare = useCallback(async () => {
     return run(async () => {
       const payload = await parseJsonResponse<MlflowComparePayload>(
-        await fetch(buildApiUrl("/api/mlflow/compare/latest")),
+        await authorizedFetch(buildApiUrl("/api/mlflow/compare/latest")),
       );
       setComparePayload(payload);
       return payload;
     });
-  }, [run]);
+  }, [authorizedFetch, run]);
 
   const promote = useCallback(
     async (candidateModel: string) => {
       return run(async () => {
         return parseJsonResponse<{ status: string; message?: string }>(
-          await fetch(buildApiUrl("/api/mlflow/promote"), {
+          await authorizedFetch(buildApiUrl("/api/mlflow/promote"), {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ candidate_model: candidateModel }),
@@ -705,7 +799,7 @@ export function useMlflowStore() {
         );
       });
     },
-    [run],
+    [authorizedFetch, run],
   );
 
   const reviewCandidates = useCallback(
@@ -719,7 +813,7 @@ export function useMlflowStore() {
     ) => {
       return run(async () => {
         const payload = await parseJsonResponse<{ updated: number }>(
-          await fetch(buildApiUrl("/api/mlflow/candidates/review"), {
+          await authorizedFetch(buildApiUrl("/api/mlflow/candidates/review"), {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ updates }),
@@ -740,7 +834,7 @@ export function useMlflowStore() {
         return payload;
       });
     },
-    [refreshCandidates, refreshCrawlHistory, refreshOverview, refreshReviewHistory, refreshThresholdStatus, run],
+    [authorizedFetch, refreshCandidates, refreshCrawlHistory, refreshOverview, refreshReviewHistory, refreshThresholdStatus, run],
   );
 
   const clearMlflowBatch = useCallback(
@@ -752,7 +846,7 @@ export function useMlflowStore() {
         }
 
         const payload = await parseJsonResponse<MlflowClearBatchResponse>(
-          await fetch(buildApiUrl("/api/mlflow/clear-batch"), {
+          await authorizedFetch(buildApiUrl("/api/mlflow/clear-batch"), {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ batch_id: useBatch }),
@@ -775,14 +869,14 @@ export function useMlflowStore() {
         return payload;
       });
     },
-    [activeBatchId, refreshBatches, refreshCandidates, refreshCrawlHistory, refreshOverview, refreshReviewHistory, refreshThresholdStatus, run],
+    [activeBatchId, authorizedFetch, refreshBatches, refreshCandidates, refreshCrawlHistory, refreshOverview, refreshReviewHistory, refreshThresholdStatus, run],
   );
 
   const clearMlflowAll = useCallback(
     async (confirmToken: string) => {
       return run(async () => {
         const payload = await parseJsonResponse<MlflowClearAllResponse>(
-          await fetch(buildApiUrl("/api/mlflow/clear-all"), {
+          await authorizedFetch(buildApiUrl("/api/mlflow/clear-all"), {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ confirm_token: confirmToken }),
@@ -805,7 +899,7 @@ export function useMlflowStore() {
         return payload;
       });
     },
-    [refreshBatches, run],
+    [authorizedFetch, refreshBatches, run],
   );
 
   const ingest = useCallback(
@@ -855,7 +949,7 @@ export function useMlflowStore() {
               total_urls?: number;
             };
           }>(
-            await fetch(buildApiUrl("/api/mlflow/ingest"), {
+            await authorizedFetch(buildApiUrl("/api/mlflow/ingest"), {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
@@ -909,7 +1003,7 @@ export function useMlflowStore() {
         throw err;
       }
     },
-    [refreshBatches, refreshCandidates, refreshCrawlHistory, refreshOverview, refreshReviewHistory, refreshThresholdStatus, run],
+    [authorizedFetch, refreshBatches, refreshCandidates, refreshCrawlHistory, refreshOverview, refreshReviewHistory, refreshThresholdStatus, run],
   );
 
   return {

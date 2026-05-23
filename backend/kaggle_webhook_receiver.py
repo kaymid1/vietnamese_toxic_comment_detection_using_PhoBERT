@@ -14,6 +14,13 @@ from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
+from backend.system_settings import (
+    DEFAULT_SETTINGS_DB_PATH,
+    get_bool_setting as get_runtime_bool_setting,
+    get_int_setting as get_runtime_int_setting,
+    get_setting as get_runtime_setting,
+)
+
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 RUNTIME_DIR = BASE_DIR / ".runtime"
@@ -63,6 +70,23 @@ REAL_NOTEBOOK_SOURCE = Path(
 _LOCK = threading.Lock()
 
 app = FastAPI(title="VietToxic Kaggle Webhook Receiver")
+
+
+def _setting(key: str, default: str = "") -> str:
+    return str(get_runtime_setting(key, default, db_path=DEFAULT_SETTINGS_DB_PATH) or "")
+
+
+def _int_setting(key: str, default: int, min_value: Optional[int] = None) -> int:
+    return get_runtime_int_setting(key, default, db_path=DEFAULT_SETTINGS_DB_PATH, min_value=min_value)
+
+
+def _bool_setting(key: str, default: bool = False) -> bool:
+    return get_runtime_bool_setting(key, default, db_path=DEFAULT_SETTINGS_DB_PATH)
+
+
+def _webhook_mode() -> str:
+    mode = _setting("KAGGLE_WEBHOOK_MODE", WEBHOOK_MODE).strip().lower()
+    return mode if mode in {"mock", "real"} else "mock"
 
 
 class TriggerRequest(BaseModel):
@@ -116,6 +140,12 @@ def _status_for_mock_job(job: Dict[str, Any]) -> str:
 
 def _build_subprocess_env() -> Dict[str, str]:
     env = dict(os.environ)
+    kaggle_username = _setting("KAGGLE_USERNAME", "").strip()
+    kaggle_key = _setting("KAGGLE_KEY", "").strip()
+    if kaggle_username:
+        env["KAGGLE_USERNAME"] = kaggle_username
+    if kaggle_key:
+        env["KAGGLE_KEY"] = kaggle_key
     # Force UTF-8 for Python-based CLIs (including kaggle) to avoid Windows cp1252/charmap failures.
     env.setdefault("PYTHONUTF8", "1")
     env.setdefault("PYTHONIOENCODING", "utf-8")
@@ -168,8 +198,8 @@ def _resolve_bundle_url(batch_id: Optional[str], run_id: str) -> str:
 
 
 def _resolve_owner_slug(notebook_url: Optional[str]) -> tuple[str, str]:
-    owner = REAL_KERNEL_OWNER
-    slug = REAL_KERNEL_SLUG
+    owner = _setting("KAGGLE_KERNEL_OWNER", REAL_KERNEL_OWNER).strip()
+    slug = _setting("KAGGLE_KERNEL_SLUG", REAL_KERNEL_SLUG).strip()
     if owner and slug:
         return owner, slug
 
@@ -196,12 +226,13 @@ def _slugify_title(text: str) -> str:
 
 
 def _build_real_script_content(payload: TriggerRequest) -> str:
-    if not REAL_NOTEBOOK_SOURCE.exists():
-        raise RuntimeError(f"Notebook source not found: {REAL_NOTEBOOK_SOURCE}")
+    notebook_source = Path(_setting("KAGGLE_REAL_NOTEBOOK_SOURCE", str(REAL_NOTEBOOK_SOURCE)).strip())
+    if not notebook_source.exists():
+        raise RuntimeError(f"Notebook source not found: {notebook_source}")
 
-    source_text = REAL_NOTEBOOK_SOURCE.read_text(encoding="utf-8")
+    source_text = notebook_source.read_text(encoding="utf-8")
     env_overrides = {
-        "VIETTOXIC_TEST_MODE": REAL_TEST_MODE,
+        "VIETTOXIC_TEST_MODE": _setting("KAGGLE_REAL_TEST_MODE", REAL_TEST_MODE).strip() or "smoke",
         "VIETTOXIC_BUNDLE_URL": _resolve_bundle_url(payload.batch_id, payload.run_id),
         "VIETTOXIC_RUN_NAME": payload.run_id,
         "VIETTOXIC_IMPORT_API_URL": REAL_IMPORT_API_URL,
@@ -264,22 +295,25 @@ def _build_kernel_metadata(
     kernel_sources: Optional[list[str]] = None,
     model_sources: Optional[list[str]] = None,
 ) -> Dict[str, Any]:
+    kernel_title = _setting("KAGGLE_KERNEL_TITLE", REAL_KERNEL_TITLE).strip()
+    accelerator = _setting("KAGGLE_KERNEL_ACCELERATOR", REAL_ACCELERATOR).strip()
+    private = _bool_setting("KAGGLE_KERNEL_PRIVATE", REAL_PRIVATE)
     metadata: Dict[str, Any] = {
         "id": f"{owner}/{slug}",
-        "title": title or REAL_KERNEL_TITLE or slug,
+        "title": title or kernel_title or slug,
         "code_file": code_file,
         "language": "python",
         "kernel_type": kernel_type,
-        "is_private": REAL_PRIVATE,
-        "enable_gpu": REAL_ACCELERATOR.lower() != "none",
+        "is_private": private,
+        "enable_gpu": accelerator.lower() != "none",
         "enable_internet": True,
         "dataset_sources": dataset_sources or [],
         "competition_sources": competition_sources or [],
         "kernel_sources": kernel_sources or [],
         "model_sources": model_sources or [],
     }
-    if REAL_ACCELERATOR and REAL_ACCELERATOR.lower() != "none":
-        metadata["accelerator"] = REAL_ACCELERATOR
+    if accelerator and accelerator.lower() != "none":
+        metadata["accelerator"] = accelerator
     return metadata
 
 
@@ -367,8 +401,10 @@ def _is_kaggle_push_conflict(text: str) -> bool:
 def _run_kaggle_push_with_retry(job_dir: Path) -> str:
     cmd = ["kaggle", "kernels", "push", "-p", str(job_dir)]
     logs: list[str] = []
+    retry_attempts = _int_setting("KAGGLE_PUSH_RETRY_ATTEMPTS", REAL_PUSH_RETRY_ATTEMPTS, min_value=1)
+    retry_delay_sec = _int_setting("KAGGLE_PUSH_RETRY_DELAY_SEC", REAL_PUSH_RETRY_DELAY_SEC, min_value=1)
 
-    for attempt in range(1, REAL_PUSH_RETRY_ATTEMPTS + 1):
+    for attempt in range(1, retry_attempts + 1):
         proc = subprocess.run(
             cmd,
             check=False,
@@ -391,8 +427,8 @@ def _run_kaggle_push_with_retry(job_dir: Path) -> str:
         if _extract_push_error(combined):
             return "\n\n".join(logs)
 
-        if _is_kaggle_push_conflict(combined) and attempt < REAL_PUSH_RETRY_ATTEMPTS:
-            time.sleep(REAL_PUSH_RETRY_DELAY_SEC * attempt)
+        if _is_kaggle_push_conflict(combined) and attempt < retry_attempts:
+            time.sleep(retry_delay_sec * attempt)
             continue
 
         detail = combined or f"exit_code={proc.returncode}"
@@ -490,9 +526,9 @@ def _trigger_real(payload: TriggerRequest) -> Dict[str, Any]:
     existing_kernel_sources = _coerce_string_list((kernel_meta or {}).get("kernel_sources"))
     existing_model_sources = _coerce_string_list((kernel_meta or {}).get("model_sources"))
 
-    env_dataset_sources = _parse_csv_list(REAL_DATASET_SOURCES)
+    env_dataset_sources = _parse_csv_list(_setting("KAGGLE_KERNEL_DATASET_SOURCES", REAL_DATASET_SOURCES))
     dataset_sources = env_dataset_sources or existing_dataset_sources
-    metadata_title = existing_title or REAL_KERNEL_TITLE or slug
+    metadata_title = existing_title or _setting("KAGGLE_KERNEL_TITLE", REAL_KERNEL_TITLE).strip() or slug
     if _slugify_title(metadata_title) != slug:
         metadata_title = slug
 
@@ -695,12 +731,12 @@ def _status_real(job_id: str, job: Dict[str, Any], jobs: Dict[str, Any]) -> Dict
 
 @app.get("/health")
 def health() -> Dict[str, str]:
-    return {"status": "ok", "mode": WEBHOOK_MODE if WEBHOOK_MODE in {"mock", "real"} else "mock"}
+    return {"status": "ok", "mode": _webhook_mode()}
 
 
 @app.post("/kaggle/trigger")
 def kaggle_trigger(payload: TriggerRequest) -> Dict[str, Any]:
-    mode = WEBHOOK_MODE if WEBHOOK_MODE in {"mock", "real"} else "mock"
+    mode = _webhook_mode()
     if mode == "real":
         return _trigger_real(payload)
     return _trigger_mock(payload)

@@ -1,10 +1,11 @@
+import base64
 import csv
 import hashlib
+import hmac
 import json
 import logging
 import math
 import os
-import statistics
 import re
 import shlex
 import shutil
@@ -21,17 +22,26 @@ import urllib.parse
 import urllib.request
 import unicodedata
 import zipfile
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from domain_classifier import CATEGORY_THRESHOLDS
 from backend.crawl_adapter import crawl_urls
+from backend.system_settings import (
+    ensure_system_settings_table,
+    get_bool_setting as get_runtime_bool_setting,
+    get_int_setting as get_runtime_int_setting,
+    get_setting as get_runtime_setting,
+    list_system_settings,
+    reveal_system_setting,
+    update_system_settings,
+)
 from infer_crawled_local import infer_crawled, build_segment_hash, build_context_segment_hash
 
 BASE_DIR = Path(__file__).resolve().parents[1]
@@ -45,11 +55,9 @@ EXPERIMENT_REGISTRY_PATH = BASE_DIR / "experiments" / "registry.json"
 EVAL_POLICY_PATH = BASE_DIR / "config" / "eval_policy.json"
 ERROR_ANALYSIS_PATH = BASE_DIR / "data" / "processed" / "error_analysis.json"
 HARD_CASES_PATH = BASE_DIR / "data" / "processed" / "hard_case_candidates.json"
-PROTOCOL_BUILD_REPORT_PATH = BASE_DIR / "data" / "victsd" / "victsd_v1_protocol_build_report.json"
-PROTOCOL_METRICS_ROOT = BASE_DIR / "viettoxic_outputs"
 LOCAL_M1_ARTIFACT_DIR = BASE_DIR / "data" / "processed" / "mlflow_local_artifacts"
 
-DEFAULT_DATASET_VERSION = os.getenv("VIETTOXIC_DATASET_VERSION", "victsd_v1")
+DEFAULT_DATASET_VERSION = os.getenv("VIETTOXIC_DATASET_VERSION", "victsd_gold")
 DEFAULT_MODEL_VERSION = os.getenv("VIETTOXIC_MODEL_VERSION", "unknown")
 DEFAULT_POLICY_VERSION = os.getenv("VIETTOXIC_POLICY_VERSION", "policy-v1")
 REQUIRED_VERSION_KEYS = ("dataset_version", "model_version", "policy_version")
@@ -89,13 +97,10 @@ LOCAL_M1_STAGES = [
 ]
 
 DATASET_VERSION_ALIASES: Dict[str, str] = {
-    "v1": "victsd_v1",
-    "victsd_v1": "victsd_v1",
     "latest": "victsd_gold",
     "victsd_gold": "victsd_gold",
 }
 DATASET_VERSION_DIRS: Dict[str, Path] = {
-    "victsd_v1": BASE_DIR / "data" / "victsd",
     "victsd_gold": BASE_DIR / "data" / "processed" / "victsd_gold",
 }
 
@@ -293,6 +298,18 @@ def load_env_files() -> None:
 load_env_files()
 
 
+def get_setting(key: str, default: Optional[str] = None) -> Optional[str]:
+    return get_runtime_setting(key, default, db_path=FEEDBACK_DB_PATH)
+
+
+def get_int_setting(key: str, default: int, min_value: Optional[int] = None) -> int:
+    return get_runtime_int_setting(key, default, db_path=FEEDBACK_DB_PATH, min_value=min_value)
+
+
+def get_bool_setting(key: str, default: bool = False) -> bool:
+    return get_runtime_bool_setting(key, default, db_path=FEEDBACK_DB_PATH)
+
+
 DO_API_BASE = os.getenv("DO_API_BASE", "https://api.digitalocean.com/v2").rstrip("/")
 DO_DEFAULT_REGION = os.getenv("DO_DEFAULT_REGION", "sgp1")
 DO_DEFAULT_IMAGE = os.getenv("DO_DEFAULT_IMAGE", "ubuntu-24-04-x64")
@@ -354,6 +371,95 @@ def load_job_meta(out_dir: Path) -> Dict[str, Any]:
         return {}
 
 
+def _admin_config() -> Tuple[str, str, str, int]:
+    username = os.getenv("VIETTOXIC_ADMIN_USERNAME", "").strip()
+    password = os.getenv("VIETTOXIC_ADMIN_PASSWORD", "")
+    secret = os.getenv("VIETTOXIC_ADMIN_SESSION_SECRET", "").strip()
+    try:
+        ttl_seconds = int(os.getenv("VIETTOXIC_ADMIN_SESSION_TTL_SECONDS", str(8 * 60 * 60)))
+    except ValueError:
+        ttl_seconds = 8 * 60 * 60
+    ttl_seconds = max(300, ttl_seconds)
+    missing = []
+    if not username:
+        missing.append("VIETTOXIC_ADMIN_USERNAME")
+    if not password:
+        missing.append("VIETTOXIC_ADMIN_PASSWORD")
+    if not secret:
+        missing.append("VIETTOXIC_ADMIN_SESSION_SECRET")
+    if missing:
+        raise HTTPException(status_code=503, detail=f"Admin auth is not configured; missing: {', '.join(missing)}")
+    return username, password, secret, ttl_seconds
+
+
+def _b64url_encode(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _b64url_decode(raw: str) -> bytes:
+    padding = "=" * (-len(raw) % 4)
+    return base64.urlsafe_b64decode((raw + padding).encode("ascii"))
+
+
+def _sign_admin_payload(payload_b64: str, secret: str) -> str:
+    digest = hmac.new(secret.encode("utf-8"), payload_b64.encode("ascii"), hashlib.sha256).digest()
+    return _b64url_encode(digest)
+
+
+def _create_admin_token(username: str, secret: str, ttl_seconds: int) -> Tuple[str, str]:
+    now = int(time.time())
+    expires_at_ts = now + ttl_seconds
+    payload = {"sub": username, "iat": now, "exp": expires_at_ts}
+    payload_b64 = _b64url_encode(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
+    signature = _sign_admin_payload(payload_b64, secret)
+    expires_at = datetime.fromtimestamp(expires_at_ts, timezone.utc).isoformat().replace("+00:00", "Z")
+    return f"{payload_b64}.{signature}", expires_at
+
+
+def _verify_admin_token(token: str) -> Tuple[str, str]:
+    username, _, secret, _ = _admin_config()
+    try:
+        payload_b64, signature = token.split(".", 1)
+    except ValueError as exc:
+        raise HTTPException(status_code=401, detail="Invalid admin token") from exc
+
+    expected_signature = _sign_admin_payload(payload_b64, secret)
+    if not hmac.compare_digest(signature, expected_signature):
+        raise HTTPException(status_code=401, detail="Invalid admin token")
+
+    try:
+        payload = json.loads(_b64url_decode(payload_b64).decode("utf-8"))
+    except Exception as exc:
+        raise HTTPException(status_code=401, detail="Invalid admin token") from exc
+
+    try:
+        token_username = str(payload.get("sub") or "")
+        expires_at_ts = int(payload.get("exp") or 0)
+    except Exception as exc:
+        raise HTTPException(status_code=401, detail="Invalid admin token") from exc
+    if token_username != username:
+        raise HTTPException(status_code=401, detail="Invalid admin token")
+    if expires_at_ts <= int(time.time()):
+        raise HTTPException(status_code=401, detail="Admin session expired")
+
+    expires_at = datetime.fromtimestamp(expires_at_ts, timezone.utc).isoformat().replace("+00:00", "Z")
+    return token_username, expires_at
+
+
+def _admin_session_from_authorization(authorization: Optional[str]) -> Tuple[str, str]:
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Admin authorization required")
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not token.strip():
+        raise HTTPException(status_code=401, detail="Admin bearer token required")
+    return _verify_admin_token(token.strip())
+
+
+def require_admin(authorization: Optional[str] = Header(default=None)) -> str:
+    username, _ = _admin_session_from_authorization(authorization)
+    return username
+
+
 app = FastAPI(title="VietToxic Local API")
 app.add_middleware(
     CORSMiddleware,
@@ -407,6 +513,78 @@ class AnalyzeOptions(BaseModel):
 class AnalyzeRequest(BaseModel):
     urls: List[str] = Field(min_items=1)
     options: Optional[AnalyzeOptions] = None
+
+
+class AdminLoginRequest(BaseModel):
+    username: str = Field(min_length=1)
+    password: str = Field(min_length=1)
+
+
+class AdminLoginResponse(BaseModel):
+    token: str
+    expires_at: str
+    username: str
+
+
+class SystemSettingsUpdateRequest(BaseModel):
+    settings: Dict[str, Any] = Field(default_factory=dict)
+    clear: List[str] = Field(default_factory=list)
+
+
+class SystemSettingRevealRequest(BaseModel):
+    key: str = Field(min_length=1)
+
+
+@app.post("/api/admin/login", response_model=AdminLoginResponse)
+def admin_login(request: AdminLoginRequest) -> Dict[str, str]:
+    username, password, secret, ttl_seconds = _admin_config()
+    if not hmac.compare_digest(request.username.strip(), username) or not hmac.compare_digest(request.password, password):
+        raise HTTPException(status_code=401, detail="Invalid admin credentials")
+    token, expires_at = _create_admin_token(username, secret, ttl_seconds)
+    return {"token": token, "expires_at": expires_at, "username": username}
+
+
+@app.get("/api/admin/session")
+def admin_session(authorization: Optional[str] = Header(default=None)) -> Dict[str, Any]:
+    username, expires_at = _admin_session_from_authorization(authorization)
+    return {"authenticated": True, "username": username, "expires_at": expires_at}
+
+
+@app.get("/api/admin/system-settings", dependencies=[Depends(require_admin)])
+def admin_system_settings() -> Dict[str, Any]:
+    init_feedback_db()
+    return list_system_settings(FEEDBACK_DB_PATH)
+
+
+@app.patch("/api/admin/system-settings")
+def admin_update_system_settings(
+    request: SystemSettingsUpdateRequest,
+    admin_username: str = Depends(require_admin),
+) -> Dict[str, Any]:
+    init_feedback_db()
+    try:
+        return update_system_settings(
+            FEEDBACK_DB_PATH,
+            request.settings,
+            clear=request.clear,
+            updated_by=admin_username,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/admin/system-settings/reveal-secret")
+def admin_reveal_system_setting_secret(
+    request: SystemSettingRevealRequest,
+    _: str = Depends(require_admin),
+) -> Dict[str, Any]:
+    init_feedback_db()
+    try:
+        return reveal_system_setting(FEEDBACK_DB_PATH, request.key.strip())
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown system setting key: {request.key}") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 class FeedbackPageItem(BaseModel):
@@ -971,8 +1149,8 @@ def normalize_gemini_model_name(value: Optional[str]) -> Optional[str]:
 
 
 def get_gemini_model_candidates() -> List[str]:
-    primary = normalize_gemini_model_name(os.getenv("GEMINI_MODEL", "gemini-1.5-flash-latest"))
-    fallback_raw = os.getenv("GEMINI_FALLBACK_MODELS", "")
+    primary = normalize_gemini_model_name(get_setting("GEMINI_MODEL", "gemini-1.5-flash-latest"))
+    fallback_raw = get_setting("GEMINI_FALLBACK_MODELS", "") or ""
     tokens = fallback_raw.replace(";", ",").replace("|", ",").split(",") if fallback_raw else []
     fallbacks = [normalize_gemini_model_name(token) for token in tokens if token.strip()]
     candidates: List[str] = []
@@ -998,15 +1176,12 @@ def is_gemini_rate_limited(status_code: int, detail: str) -> bool:
 
 
 def call_gemini(prompt: str) -> str:
-    api_key = os.getenv("GEMINI_API_KEY")
+    api_key = get_setting("GEMINI_API_KEY", "")
     if not api_key:
         raise HTTPException(status_code=400, detail="Missing GEMINI_API_KEY")
 
-    api_version = os.getenv("GEMINI_API_VERSION", "v1beta")
-    try:
-        max_tokens = int(os.getenv("GEMINI_MAX_TOKENS", "1024"))
-    except ValueError:
-        max_tokens = 1024
+    api_version = get_setting("GEMINI_API_VERSION", "v1beta") or "v1beta"
+    max_tokens = get_int_setting("GEMINI_MAX_TOKENS", 1024, min_value=1)
 
     payload = {
         "contents": [
@@ -1068,11 +1243,11 @@ def call_gemini(prompt: str) -> str:
 
 
 def list_gemini_models() -> Dict[str, Any]:
-    api_key = os.getenv("GEMINI_API_KEY")
+    api_key = get_setting("GEMINI_API_KEY", "")
     if not api_key:
         raise HTTPException(status_code=400, detail="Missing GEMINI_API_KEY")
 
-    api_version = os.getenv("GEMINI_API_VERSION", "v1beta")
+    api_version = get_setting("GEMINI_API_VERSION", "v1beta") or "v1beta"
     url = gemini_base_url(api_version, api_key, "models")
     req = urllib.request.Request(url, headers={"Content-Type": "application/json"}, method="GET")
     try:
@@ -1091,9 +1266,9 @@ def list_gemini_models() -> Dict[str, Any]:
 
     return {
         "api_version": api_version,
-        "model": os.getenv("GEMINI_MODEL", "gemini-1.5-flash-latest"),
+        "model": get_setting("GEMINI_MODEL", "gemini-1.5-flash-latest"),
         "fallback_models": get_gemini_model_candidates()[1:],
-        "max_tokens": int(os.getenv("GEMINI_MAX_TOKENS", "1024")),
+        "max_tokens": get_int_setting("GEMINI_MAX_TOKENS", 1024, min_value=1),
         "models": parsed.get("models", []),
     }
 
@@ -1214,9 +1389,9 @@ def get_synthetic_length_bounds() -> Tuple[int, int, int]:
 
     lengths: List[int] = []
     source_files = [
-        BASE_DIR / "data" / "processed" / "victsd_v1" / "train.jsonl",
-        BASE_DIR / "data" / "processed" / "victsd_v1" / "validation.jsonl",
-        BASE_DIR / "data" / "processed" / "victsd_v1" / "test.jsonl",
+        BASE_DIR / "data" / "processed" / "victsd_gold" / "train.jsonl",
+        BASE_DIR / "data" / "processed" / "victsd_gold" / "validation.jsonl",
+        BASE_DIR / "data" / "processed" / "victsd_gold" / "test.jsonl",
     ]
 
     for file_path in source_files:
@@ -1405,15 +1580,12 @@ def build_synthetic_prompt(
 
 
 def call_gemini_with_model(prompt: str, model_name: Optional[str] = None) -> str:
-    api_key = os.getenv("GEMINI_API_KEY")
+    api_key = get_setting("GEMINI_API_KEY", "")
     if not api_key:
         raise HTTPException(status_code=400, detail="Missing GEMINI_API_KEY")
 
-    api_version = os.getenv("GEMINI_API_VERSION", "v1beta")
-    try:
-        max_tokens = int(os.getenv("GEMINI_MAX_TOKENS", "1024"))
-    except ValueError:
-        max_tokens = 1024
+    api_version = get_setting("GEMINI_API_VERSION", "v1beta") or "v1beta"
+    max_tokens = get_int_setting("GEMINI_MAX_TOKENS", 1024, min_value=1)
 
     requested = normalize_gemini_model_name(model_name)
     candidates: List[str] = []
@@ -1554,6 +1726,7 @@ def init_feedback_db() -> None:
     FEEDBACK_DIR.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
         conn.execute("PRAGMA foreign_keys = ON")
+        ensure_system_settings_table(conn)
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS feedback_page (
@@ -2519,7 +2692,7 @@ def normalize_source(value: Optional[str]) -> str:
     cleaned = value.strip().lower()
     if cleaned in {"vihsd", "vihsd_v1", "vihsd_v2"}:
         return "vihsd"
-    if cleaned in {"victsd", "victsd_v1"}:
+    if cleaned == "victsd":
         return "victsd"
     return cleaned
 
@@ -2676,43 +2849,6 @@ def find_missing_required_versions(versions: Dict[str, str]) -> List[str]:
         if not isinstance(value, str) or not value.strip():
             missing.append(key)
     return missing
-
-
-def build_domain_mismatch_note(protocol_id: str, train_stats: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    stats = train_stats if isinstance(train_stats, dict) else {}
-    sources = stats.get("sources") if isinstance(stats, dict) else {}
-    source_map = {str(k): int(v) for k, v in (sources or {}).items() if isinstance(v, (int, float))}
-    total = sum(source_map.values())
-    vihsd_total = source_map.get("UIT-ViHSD", 0)
-    vihsd_ratio = (vihsd_total / total) if total else 0.0
-
-    if protocol_id == "a":
-        summary = "ViCTSD-only training set (closest to clean benchmark anchor)."
-    elif protocol_id == "b":
-        summary = (
-            "Train includes ViHSD OFFENSIVE injections while validation/test stay ViCTSD; "
-            "watch for social-style toxic bias against formal news text."
-        )
-    elif protocol_id == "c":
-        summary = (
-            "Merged benchmark across ViCTSD+ViHSD with global dedup/split; "
-            "still requires caution when deploying to formal news domain."
-        )
-    else:
-        summary = "Domain mismatch risk unknown."
-
-    risk_level = "low"
-    if vihsd_ratio >= 0.40:
-        risk_level = "high"
-    elif vihsd_ratio >= 0.20:
-        risk_level = "medium"
-
-    return {
-        "risk_level": risk_level,
-        "vihsd_train_ratio": vihsd_ratio,
-        "train_source_mix": source_map,
-        "summary": summary,
-    }
 
 
 def filter_dataset_rows(
@@ -3923,7 +4059,7 @@ def _do_build_stage_timestamps(events: List[Dict[str, Any]], row: sqlite3.Row) -
 
 
 
-@app.post("/api/mlflow/ingest")
+@app.post("/api/mlflow/ingest", dependencies=[Depends(require_admin)])
 def mlflow_ingest(request: MlflowIngestRequest) -> Dict[str, Any]:
     try:
         cleanup_old_jobs(float(os.getenv("JOB_RETENTION_HOURS", "24")))
@@ -4165,7 +4301,7 @@ def mlflow_ingest(request: MlflowIngestRequest) -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail=f"MLFlow ingest failed: {exc}")
 
 
-@app.get("/api/mlflow/overview")
+@app.get("/api/mlflow/overview", dependencies=[Depends(require_admin)])
 def mlflow_overview(
     batch_id: Optional[str] = None,
     strict_batch: bool = Query(default=False),
@@ -4220,7 +4356,7 @@ def mlflow_overview(
     }
 
 
-@app.get("/api/mlflow/batches")
+@app.get("/api/mlflow/batches", dependencies=[Depends(require_admin)])
 def mlflow_batches(limit: int = Query(default=50, ge=1, le=200)) -> Dict[str, Any]:
     init_feedback_db()
     with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
@@ -4254,7 +4390,7 @@ def mlflow_batches(limit: int = Query(default=50, ge=1, le=200)) -> Dict[str, An
     return {"items": items, "total": len(items)}
 
 
-@app.get("/api/mlflow/crawl-history")
+@app.get("/api/mlflow/crawl-history", dependencies=[Depends(require_admin)])
 def mlflow_crawl_history(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=200),
@@ -4316,7 +4452,7 @@ def mlflow_crawl_history(
     }
 
 
-@app.post("/api/mlflow/clear-batch")
+@app.post("/api/mlflow/clear-batch", dependencies=[Depends(require_admin)])
 def mlflow_clear_batch(request: MlflowClearBatchRequest) -> Dict[str, Any]:
     batch_id = resolve_mlflow_batch_id(request.batch_id, strict=True)
 
@@ -4347,7 +4483,7 @@ def mlflow_clear_batch(request: MlflowClearBatchRequest) -> Dict[str, Any]:
     }
 
 
-@app.post("/api/mlflow/clear-all")
+@app.post("/api/mlflow/clear-all", dependencies=[Depends(require_admin)])
 def mlflow_clear_all(request: MlflowClearAllRequest) -> Dict[str, Any]:
     confirm_token = (request.confirm_token or "").strip()
     if confirm_token != MLFLOW_CLEAR_ALL_CONFIRM_TOKEN:
@@ -4375,7 +4511,7 @@ def mlflow_clear_all(request: MlflowClearAllRequest) -> Dict[str, Any]:
     }
 
 
-@app.get("/api/mlflow/review-history")
+@app.get("/api/mlflow/review-history", dependencies=[Depends(require_admin)])
 def mlflow_review_history(
     batch_id: Optional[str] = None,
     decision: str = Query(default="all"),
@@ -4441,7 +4577,7 @@ def mlflow_review_history(
     }
 
 
-@app.get("/api/mlflow/candidates")
+@app.get("/api/mlflow/candidates", dependencies=[Depends(require_admin)])
 def mlflow_candidates(
     batch_id: Optional[str] = None,
     page: int = Query(default=1, ge=1),
@@ -4501,7 +4637,7 @@ def mlflow_candidates(
     }
 
 
-@app.post("/api/mlflow/candidates/review")
+@app.post("/api/mlflow/candidates/review", dependencies=[Depends(require_admin)])
 def mlflow_candidates_review(request: MlflowCandidateReviewRequest) -> Dict[str, Any]:
     init_feedback_db()
     ids = [item.id for item in request.updates]
@@ -4596,7 +4732,7 @@ def mlflow_candidates_review(request: MlflowCandidateReviewRequest) -> Dict[str,
     }
 
 
-@app.get("/api/mlflow/threshold-status")
+@app.get("/api/mlflow/threshold-status", dependencies=[Depends(require_admin)])
 def mlflow_threshold_status(
     batch_id: Optional[str] = None,
     strict_batch: bool = Query(default=False),
@@ -4647,7 +4783,7 @@ def mlflow_threshold_status(
     }
 
 
-@app.post("/api/mlflow/manual/export-bundle")
+@app.post("/api/mlflow/manual/export-bundle", dependencies=[Depends(require_admin)])
 def mlflow_manual_export_bundle(request: MlflowManualExportBundleRequest) -> Dict[str, Any]:
     init_feedback_db()
     scope = request.scope
@@ -4944,7 +5080,7 @@ def mlflow_manual_export_bundle(request: MlflowManualExportBundleRequest) -> Dic
     }
 
 
-@app.get("/api/mlflow/manual/export-bundle/download")
+@app.get("/api/mlflow/manual/export-bundle/download", dependencies=[Depends(require_admin)])
 def mlflow_manual_export_bundle_download(bundle_path: str = Query(..., min_length=1)) -> FileResponse:
     candidate = (bundle_path or "").strip()
     if not candidate:
@@ -4964,7 +5100,7 @@ def mlflow_manual_export_bundle_download(bundle_path: str = Query(..., min_lengt
     return FileResponse(path=str(resolved), filename=resolved.name, media_type="application/zip")
 
 
-@app.post("/api/mlflow/manual/import-artifact")
+@app.post("/api/mlflow/manual/import-artifact", dependencies=[Depends(require_admin)])
 def mlflow_manual_import_artifact(request: MlflowManualImportArtifactRequest) -> Dict[str, Any]:
     init_feedback_db()
     with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
@@ -5164,7 +5300,8 @@ def _kaggle_http_json(method: str, url: str, payload: Optional[Dict[str, Any]] =
         data=body,
     )
     try:
-        with urllib.request.urlopen(req, timeout=KAGGLE_WEBHOOK_TIMEOUT_SEC) as resp:
+        timeout_sec = get_int_setting("KAGGLE_WEBHOOK_TIMEOUT_SEC", 180, min_value=10)
+        with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
             raw = (resp.read() or b"").decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
         raw = (exc.read() or b"").decode("utf-8", errors="replace")
@@ -5183,16 +5320,24 @@ def _kaggle_http_json(method: str, url: str, payload: Optional[Dict[str, Any]] =
         return {}
 
 
-@app.get("/api/mlflow/kaggle/preflight")
+@app.get("/api/mlflow/kaggle/preflight", dependencies=[Depends(require_admin)])
 def mlflow_kaggle_preflight() -> Dict[str, Any]:
     checked_at = datetime.utcnow().isoformat() + "Z"
+    webhook_mode = (get_setting("KAGGLE_WEBHOOK_MODE", "mock") or "mock").strip().lower()
+    if webhook_mode not in {"mock", "real"}:
+        webhook_mode = "mock"
     required = {
-        "KAGGLE_NOTEBOOK_URL": bool(os.getenv("KAGGLE_NOTEBOOK_URL", "").strip()),
-        "KAGGLE_WEBHOOK_URL": bool(os.getenv("KAGGLE_WEBHOOK_URL", "").strip()),
+        "KAGGLE_NOTEBOOK_URL": bool((get_setting("KAGGLE_NOTEBOOK_URL", "") or "").strip()),
+        "KAGGLE_WEBHOOK_URL": bool((get_setting("KAGGLE_WEBHOOK_URL", "") or "").strip()),
     }
+    if webhook_mode == "real":
+        required["KAGGLE_USERNAME"] = bool((get_setting("KAGGLE_USERNAME", "") or "").strip())
+        required["KAGGLE_KEY"] = bool((get_setting("KAGGLE_KEY", "") or "").strip())
     missing = [key for key, ok in required.items() if not ok]
     warnings: List[str] = []
-    if not os.getenv("KAGGLE_STATUS_WEBHOOK_URL", "").strip():
+    if webhook_mode == "mock":
+        warnings.append("KAGGLE_WEBHOOK_MODE=mock: trigger will run in simulation mode and skip credential validation.")
+    if not (get_setting("KAGGLE_STATUS_WEBHOOK_URL", "") or "").strip():
         warnings.append("KAGGLE_STATUS_WEBHOOK_URL chưa cấu hình: status chỉ hiển thị từ DB local, không poll cloud realtime.")
 
     return {
@@ -5200,16 +5345,19 @@ def mlflow_kaggle_preflight() -> Dict[str, Any]:
         "missing": missing,
         "warnings": warnings,
         "checks": required,
-        "config": {"provider": "kaggle", "stages": KAGGLE_STAGES},
+        "config": {"provider": "kaggle", "stages": KAGGLE_STAGES, "webhook_mode": webhook_mode},
         "checked_at": checked_at,
     }
 
 
-@app.post("/api/mlflow/kaggle/trigger")
+@app.post("/api/mlflow/kaggle/trigger", dependencies=[Depends(require_admin)])
 def mlflow_kaggle_trigger(request: MlflowDOTriggerRequest) -> Dict[str, Any]:
     init_feedback_db()
     run_id = f"kaggle_{uuid.uuid4().hex[:12]}"
     now = datetime.utcnow().isoformat() + "Z"
+    webhook_mode = (get_setting("KAGGLE_WEBHOOK_MODE", "mock") or "mock").strip().lower()
+    if webhook_mode not in {"mock", "real"}:
+        webhook_mode = "mock"
 
     training_mode = _do_resolve_training_mode(request)
     try:
@@ -5223,6 +5371,14 @@ def mlflow_kaggle_trigger(request: MlflowDOTriggerRequest) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail="Kaggle automation only supports finetune/retrain")
     if training_mode == "retrain" and not base_model:
         raise HTTPException(status_code=400, detail="Light retrain on Kaggle requires base_model")
+    if webhook_mode == "real":
+        kaggle_username = (get_setting("KAGGLE_USERNAME", "") or "").strip()
+        kaggle_key = (get_setting("KAGGLE_KEY", "") or "").strip()
+        if not kaggle_username or not kaggle_key:
+            raise HTTPException(
+                status_code=400,
+                detail="KAGGLE_WEBHOOK_MODE=real requires KAGGLE_USERNAME and KAGGLE_KEY",
+            )
 
     with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
         conn.execute(
@@ -5289,7 +5445,7 @@ def mlflow_kaggle_trigger(request: MlflowDOTriggerRequest) -> Dict[str, Any]:
             "base_model": base_model,
         }
 
-    webhook_url = os.getenv("KAGGLE_WEBHOOK_URL", "").strip()
+    webhook_url = (get_setting("KAGGLE_WEBHOOK_URL", "") or "").strip()
     if not webhook_url:
         raise HTTPException(status_code=400, detail="KAGGLE_WEBHOOK_URL is not configured")
 
@@ -5299,10 +5455,33 @@ def mlflow_kaggle_trigger(request: MlflowDOTriggerRequest) -> Dict[str, Any]:
         "training_mode": training_mode,
         "base_model": base_model,
         "requested_at": now,
-        "notebook_url": os.getenv("KAGGLE_NOTEBOOK_URL", "").strip() or None,
+        "notebook_url": (get_setting("KAGGLE_NOTEBOOK_URL", "") or "").strip() or None,
     }
     remote = _kaggle_http_json("POST", webhook_url, payload)
+    remote_status = str(remote.get("status") or "").strip().lower()
+    remote_accepted_raw = remote.get("accepted")
+    remote_accepted = bool(remote_accepted_raw) if remote_accepted_raw is not None else True
+    remote_error_message = (
+        str(remote.get("error_message") or remote.get("message") or remote.get("detail") or "").strip()
+    )
     cloud_job_id = str(remote.get("job_id") or remote.get("run_id") or "").strip() or run_id
+    if not remote_accepted or remote_status in {"failed", "error", "rejected"}:
+        detail = remote_error_message or f"Kaggle webhook rejected run (status={remote_status or 'unknown'})"
+        with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+            _do_append_log(conn, run_id, detail, stage=KAGGLE_STAGES[-1], source="kaggle_webhook")
+            _do_update_run(conn, run_id, status="failed", stage=KAGGLE_STAGES[-1], error_message=detail)
+            conn.commit()
+        raise HTTPException(status_code=502, detail=detail)
+    if webhook_mode == "real" and cloud_job_id.lower().startswith("mock_"):
+        detail = (
+            "KAGGLE_WEBHOOK_MODE=real but webhook returned a mock job_id. "
+            "Check receiver KAGGLE_WEBHOOK_MODE and restart webhook service."
+        )
+        with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+            _do_append_log(conn, run_id, detail, stage=KAGGLE_STAGES[-1], source="backend")
+            _do_update_run(conn, run_id, status="failed", stage=KAGGLE_STAGES[-1], error_message=detail)
+            conn.commit()
+        raise HTTPException(status_code=502, detail=detail)
 
     with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
         _do_update_run(conn, run_id, status="running", stage=KAGGLE_STAGES[1], droplet_id=cloud_job_id)
@@ -5327,7 +5506,7 @@ def mlflow_kaggle_trigger(request: MlflowDOTriggerRequest) -> Dict[str, Any]:
     }
 
 
-@app.get("/api/mlflow/kaggle/status")
+@app.get("/api/mlflow/kaggle/status", dependencies=[Depends(require_admin)])
 def mlflow_kaggle_status(run_id: str = Query(..., min_length=1)) -> Dict[str, Any]:
     init_feedback_db()
     with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
@@ -5336,7 +5515,7 @@ def mlflow_kaggle_status(run_id: str = Query(..., min_length=1)) -> Dict[str, An
         raise HTTPException(status_code=404, detail=f"Kaggle run not found: {run_id}")
 
     cloud_job_id = str(row["droplet_id"] or "").strip()
-    status_url = os.getenv("KAGGLE_STATUS_WEBHOOK_URL", "").strip()
+    status_url = (get_setting("KAGGLE_STATUS_WEBHOOK_URL", "") or "").strip()
 
     if status_url and cloud_job_id and row["status"] in {"queued", "running"}:
         try:
@@ -5435,7 +5614,7 @@ def mlflow_kaggle_status(run_id: str = Query(..., min_length=1)) -> Dict[str, An
     }
 
 
-@app.get("/api/mlflow/kaggle/artifact/download")
+@app.get("/api/mlflow/kaggle/artifact/download", dependencies=[Depends(require_admin)])
 def mlflow_kaggle_artifact_download(run_id: str = Query(..., min_length=1)) -> FileResponse:
     init_feedback_db()
     with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
@@ -5449,7 +5628,7 @@ def mlflow_kaggle_artifact_download(run_id: str = Query(..., min_length=1)) -> F
     return FileResponse(path=str(resolved), filename=resolved.name, media_type="application/zip")
 
 
-@app.get("/api/mlflow/compare/latest")
+@app.get("/api/mlflow/compare/latest", dependencies=[Depends(require_admin)])
 def mlflow_compare_latest() -> Dict[str, Any]:
     init_feedback_db()
     registry = load_json_file(EXPERIMENT_REGISTRY_PATH, {"runs": []})
@@ -5547,7 +5726,7 @@ def mlflow_compare_latest() -> Dict[str, Any]:
     }
 
 
-@app.post("/api/mlflow/promote")
+@app.post("/api/mlflow/promote", dependencies=[Depends(require_admin)])
 def mlflow_promote(request: MlflowPromoteRequest) -> Dict[str, Any]:
     return {
         "status": "placeholder",
@@ -5726,7 +5905,7 @@ def get_models() -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail=f"Failed to list models: {exc}") from exc
 
 
-@app.post("/api/models/import-zip")
+@app.post("/api/models/import-zip", dependencies=[Depends(require_admin)])
 async def import_model_zip(request: Request) -> Dict[str, Any]:
     try:
         form = await request.form()
@@ -6427,7 +6606,7 @@ def synthetic_generate(request: SyntheticGenerateRequest) -> Dict[str, Any]:
     expected_label = int(request.label)
     domain = request.domain
     style = request.style
-    model_name = normalize_gemini_model_name(request.model) or os.getenv("GEMINI_MODEL", SYNTHETIC_FALLBACK_MODEL)
+    model_name = normalize_gemini_model_name(request.model) or get_setting("GEMINI_MODEL", SYNTHETIC_FALLBACK_MODEL)
 
     existing_rows = load_synthetic_rows(domain=domain, style=style, label=expected_label)
     seen_hashes = {build_text_hash(row.get("text") or "") for row in existing_rows}
@@ -6727,218 +6906,3 @@ def eval_errors() -> Dict[str, Any]:
 def eval_hard_cases() -> Dict[str, Any]:
     rows = load_json_file(HARD_CASES_PATH, [])
     return {"items": rows if isinstance(rows, list) else [], "last_updated": file_last_updated(HARD_CASES_PATH)}
-
-
-def _parse_optional_seed(value: Any) -> Optional[int]:
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, float) and value.is_integer():
-        return int(value)
-    if isinstance(value, str):
-        raw = value.strip()
-        if raw.startswith("-"):
-            digits = raw[1:]
-            if digits.isdigit():
-                return int(raw)
-        elif raw.isdigit():
-            return int(raw)
-    return None
-
-
-def _collect_protocol_seed_runs(protocol_id: str) -> List[Dict[str, Any]]:
-    prefix = f"protocol_{protocol_id}"
-    runs: List[Dict[str, Any]] = []
-
-    if not PROTOCOL_METRICS_ROOT.exists():
-        return runs
-
-    for candidate in sorted(PROTOCOL_METRICS_ROOT.iterdir(), key=lambda p: p.name):
-        if not candidate.is_dir() or not candidate.name.startswith(prefix):
-            continue
-
-        metrics_path = candidate / "results" / "metrics.json"
-        metrics_json = load_json_file(metrics_path, {})
-        if not isinstance(metrics_json, dict):
-            continue
-
-        final_metrics = metrics_json.get("final_test_rich")
-        if not isinstance(final_metrics, dict):
-            continue
-
-        run_config = load_json_file(candidate / "models" / "best" / "run_config.json", {})
-        seed = None
-        if isinstance(run_config, dict):
-            seed = _parse_optional_seed((run_config.get("config") or {}).get("SEED"))
-        if seed is None:
-            seed = _parse_optional_seed((metrics_json.get("hyperparameters") or {}).get("SEED"))
-
-        runs.append(
-            {
-                "run_key": candidate.name,
-                "run_id": metrics_json.get("run_id") if isinstance(metrics_json.get("run_id"), str) else candidate.name,
-                "seed": seed,
-                "macro_f1": final_metrics.get("macro_f1"),
-                "f1_toxic": final_metrics.get("f1_toxic"),
-                "accuracy": final_metrics.get("accuracy"),
-                "ece": final_metrics.get("ece"),
-                "brier": final_metrics.get("brier"),
-                "metrics_last_updated": file_last_updated(metrics_path),
-            }
-        )
-
-    runs.sort(
-        key=lambda r: (
-            -1 if isinstance(r.get("f1_toxic"), (int, float)) else 1,
-            -(r.get("f1_toxic") or -1),
-            -(r.get("macro_f1") or -1),
-            r.get("seed") is None,
-            r.get("seed") if isinstance(r.get("seed"), int) else 0,
-            r.get("run_key") or "",
-        )
-    )
-    return runs
-
-
-@app.get("/api/protocols/summary")
-def protocol_summary() -> Dict[str, Any]:
-    report = load_json_file(PROTOCOL_BUILD_REPORT_PATH, {})
-    report_protocols = report.get("protocols") if isinstance(report, dict) else {}
-
-    dataset_version = (
-        (report.get("config") or {}).get("dataset_prefix") if isinstance(report, dict) else None
-    ) or DEFAULT_DATASET_VERSION
-    versions = build_artifact_versions(
-        dataset_version=dataset_version,
-        model_version=DEFAULT_MODEL_VERSION,
-        policy_version=DEFAULT_POLICY_VERSION,
-    )
-    missing_versions = find_missing_required_versions(versions)
-
-    warnings: List[str] = []
-    if missing_versions:
-        warnings.append(f"Missing required version metadata: {missing_versions}")
-
-    protocols: List[Dict[str, Any]] = []
-
-    for protocol_id in ["a", "b", "c"]:
-        report_entry = report_protocols.get(protocol_id, {}) if isinstance(report_protocols, dict) else {}
-        stats = report_entry.get("stats", {}) if isinstance(report_entry, dict) else {}
-        overlap = report_entry.get("overlap_exact", {}) if isinstance(report_entry, dict) else {}
-
-        metrics_path = (
-            PROTOCOL_METRICS_ROOT
-            / f"protocol_{protocol_id}"
-            / "results"
-            / "metrics.json"
-        )
-        metrics_json = load_json_file(metrics_path, {})
-        final_metrics = metrics_json.get("final_test_rich", {}) if isinstance(metrics_json, dict) else {}
-
-        available = bool(final_metrics)
-        if not available:
-            warnings.append(f"Missing or invalid metrics for protocol_{protocol_id}: {metrics_path}")
-
-        seed_runs = _collect_protocol_seed_runs(protocol_id)
-        macro_values = [
-            float(run["macro_f1"]) for run in seed_runs if isinstance(run.get("macro_f1"), (int, float))
-        ]
-        f1_toxic_values = [
-            float(run["f1_toxic"]) for run in seed_runs if isinstance(run.get("f1_toxic"), (int, float))
-        ]
-
-        train_stats = stats.get("train") if isinstance(stats, dict) else None
-        source_mix_by_split = {
-            "train": (train_stats.get("sources") if isinstance(train_stats, dict) else {}) or {},
-            "validation": ((stats.get("validation") or {}).get("sources") if isinstance(stats, dict) else {}) or {},
-            "test": ((stats.get("test") or {}).get("sources") if isinstance(stats, dict) else {}) or {},
-        }
-
-        overlap_exact = overlap if isinstance(overlap, dict) else {}
-        train_validation_overlap = int(overlap_exact.get("train_validation") or 0)
-        train_test_overlap = int(overlap_exact.get("train_test") or 0)
-        validation_test_overlap = int(overlap_exact.get("validation_test") or 0)
-
-        leakage_evidence = {
-            "train_validation": train_validation_overlap,
-            "train_test": train_test_overlap,
-            "validation_test": validation_test_overlap,
-            "has_train_test_leakage": train_test_overlap > 0,
-            "has_any_overlap": (train_validation_overlap + train_test_overlap + validation_test_overlap) > 0,
-        }
-
-        domain_mismatch = build_domain_mismatch_note(protocol_id, train_stats if isinstance(train_stats, dict) else None)
-
-        protocols.append(
-            {
-                "id": protocol_id,
-                "name": f"Protocol {protocol_id.upper()}",
-                "available": available,
-                "metrics": {
-                    "macro_f1": final_metrics.get("macro_f1"),
-                    "f1_toxic": final_metrics.get("f1_toxic"),
-                    "accuracy": final_metrics.get("accuracy"),
-                    "ece": final_metrics.get("ece"),
-                    "brier": final_metrics.get("brier"),
-                    "threshold": final_metrics.get("threshold"),
-                    "support_clean": final_metrics.get("support_clean"),
-                    "support_toxic": final_metrics.get("support_toxic"),
-                },
-                "stats": {
-                    "train": train_stats,
-                    "validation": stats.get("validation") if isinstance(stats, dict) else None,
-                    "test": stats.get("test") if isinstance(stats, dict) else None,
-                },
-                "source_mix_by_split": source_mix_by_split,
-                "overlap_exact": overlap_exact,
-                "leakage_evidence": leakage_evidence,
-                "domain_mismatch": domain_mismatch,
-                "artifact_versions": versions,
-                "metrics_last_updated": file_last_updated(metrics_path),
-                "seed_runs": seed_runs,
-                "seed_summary": {
-                    "n_runs": len(seed_runs),
-                    "n_with_seed": sum(1 for run in seed_runs if isinstance(run.get("seed"), int)),
-                    "macro_f1_mean": statistics.fmean(macro_values) if macro_values else None,
-                    "macro_f1_std": statistics.stdev(macro_values) if len(macro_values) >= 2 else None,
-                    "f1_toxic_mean": statistics.fmean(f1_toxic_values) if f1_toxic_values else None,
-                    "f1_toxic_std": statistics.stdev(f1_toxic_values) if len(f1_toxic_values) >= 2 else None,
-                },
-            }
-        )
-
-    best_protocol = None
-    scored = [
-        p for p in protocols
-        if p.get("available") and isinstance((p.get("metrics") or {}).get("f1_toxic"), (int, float))
-    ]
-    if scored:
-        best_protocol = max(
-            scored,
-            key=lambda p: (
-                (p.get("metrics") or {}).get("f1_toxic", float("-inf")),
-                (p.get("metrics") or {}).get("macro_f1", float("-inf")),
-            ),
-        ).get("id")
-
-    if isinstance(report, dict):
-        report_warnings = report.get("warnings")
-        if isinstance(report_warnings, list):
-            warnings.extend(str(w) for w in report_warnings)
-
-    return {
-        "dataset_version": dataset_version,
-        "model_version": versions["model_version"],
-        "policy_version": versions["policy_version"],
-        "artifact_versions": versions,
-        "missing_required_versions": missing_versions,
-        "build_report_last_updated": file_last_updated(PROTOCOL_BUILD_REPORT_PATH),
-        "protocols": protocols,
-        "winner": best_protocol,
-        "warnings": warnings,
-        "source_note": (
-            "Source: data/victsd/*_protocol_build_report.json + "
-            "viettoxic_outputs/protocol_{a,b,c}/results/metrics.json (final_test_rich)"
-        ),
-    }

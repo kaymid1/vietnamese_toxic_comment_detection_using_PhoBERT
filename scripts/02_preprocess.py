@@ -104,7 +104,7 @@ def overlap_count(a: Set[str], b: Set[str]) -> int:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Preprocess ViCTSD and run cross-split leakage check")
     parser.add_argument("--input-dir", default="data/raw/victsd")
-    parser.add_argument("--output-dir", default="data/processed/victsd_v1")
+    parser.add_argument("--output-dir", default="data/processed/victsd_gold")
     parser.add_argument("--leakage-gate", choices=["off", "warn", "fail"], default="warn")
     parser.add_argument("--leakage-report-path", default=None)
     args = parser.parse_args()
@@ -149,7 +149,7 @@ def main() -> None:
         raise SystemExit(f"Leakage gate failed: {overlap_exact}")
 
     print(f"✅ Leakage report written to: {report_path}")
-    print("✅ Preprocessing victsd_v1 hoàn tất – version này sẽ dùng cho baseline + PhoBERT đầu tiên")
+    print("✅ Preprocessing victsd_gold hoàn tất.")
 
 
 if __name__ == "__main__":

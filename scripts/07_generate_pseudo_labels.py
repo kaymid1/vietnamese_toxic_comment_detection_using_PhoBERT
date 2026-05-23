@@ -6,7 +6,7 @@ Generate pseudo-labels from existing crawl artifacts.
 
 IMPORTANT:
 - Independent from eval pipeline.
-- Never writes to data/processed/victsd_gold/ or data/victsd/.
+- Never writes to data/processed/victsd_gold/ or legacy dataset folders.
 """
 
 import argparse
