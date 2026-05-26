@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+﻿import { useMemo, useState } from "react";
 import {
   BarChart3,
   ChevronRight,
@@ -152,7 +152,7 @@ export function Navigation({
           <Shield className="h-5 w-5" />
         </span>
         <span>
-          <span className="dashboard-brand-title">VietToxic</span>
+          <span className="dashboard-brand-title">VietComment Analyzer</span>
           <span className="dashboard-brand-subtitle">Detector</span>
         </span>
       </button>
@@ -215,3 +215,4 @@ export function Navigation({
     </>
   );
 }
+

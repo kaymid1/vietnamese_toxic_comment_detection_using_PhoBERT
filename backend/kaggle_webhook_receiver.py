@@ -1,4 +1,4 @@
-import hashlib
+﻿import hashlib
 import json
 import os
 import re
@@ -37,7 +37,7 @@ DEFAULT_ARTIFACT_CHECKSUM = os.getenv("KAGGLE_WEBHOOK_DEFAULT_ARTIFACT_CHECKSUM"
 
 REAL_KERNEL_OWNER = os.getenv("KAGGLE_KERNEL_OWNER", "").strip()
 REAL_KERNEL_SLUG = os.getenv("KAGGLE_KERNEL_SLUG", "").strip()
-REAL_KERNEL_TITLE = os.getenv("KAGGLE_KERNEL_TITLE", "VietToxic MLflow Retrain").strip()
+REAL_KERNEL_TITLE = os.getenv("KAGGLE_KERNEL_TITLE", "VietComment Analyzer MLflow Retrain").strip()
 REAL_ACCELERATOR = os.getenv("KAGGLE_KERNEL_ACCELERATOR", "NvidiaTeslaT4").strip()
 REAL_PRIVATE = os.getenv("KAGGLE_KERNEL_PRIVATE", "true").strip().lower() in {"1", "true", "yes", "on"}
 REAL_PUSH_TIMEOUT_SEC = max(30, int(os.getenv("KAGGLE_KERNEL_PUSH_TIMEOUT_SEC", "600")))
@@ -69,7 +69,7 @@ REAL_NOTEBOOK_SOURCE = Path(
 
 _LOCK = threading.Lock()
 
-app = FastAPI(title="VietToxic Kaggle Webhook Receiver")
+app = FastAPI(title="VietComment Analyzer Kaggle Webhook Receiver")
 
 
 def _setting(key: str, default: str = "") -> str:
@@ -760,3 +760,4 @@ def kaggle_status(job_id: str = Query(..., min_length=1)) -> Dict[str, Any]:
         state["jobs"] = jobs
         _save_state(state)
         return payload
+

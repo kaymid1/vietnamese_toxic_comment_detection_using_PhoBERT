@@ -324,8 +324,56 @@ def predict_probs(
     )
     inputs = {k: v.to(device) for k, v in inputs.items()}
     outputs = model(**inputs)
+    config = getattr(model, "config", None)
+    problem_type = getattr(config, "problem_type", None)
+    id2label = getattr(config, "id2label", {}) or {}
+    labels = {str(v).lower(): int(k) for k, v in id2label.items()}
+    if problem_type == "multi_label_classification":
+        toxicity_idx = labels.get("toxicity", 0)
+        probs = torch.sigmoid(outputs.logits)
+        return probs[:, toxicity_idx].detach().float().cpu().tolist()
+
     probs = torch.softmax(outputs.logits, dim=-1)
     return probs[:, 1].detach().float().cpu().tolist()
+
+
+@torch.inference_mode()
+def predict_scores(
+    texts: List[str],
+    tokenizer,
+    model,
+    device: torch.device,
+    max_length: int,
+) -> List[Dict[str, float]]:
+    """Returns toxicity, plus constructiveness when the model was trained multi-label."""
+    inputs = tokenizer(
+        texts,
+        return_tensors="pt",
+        truncation=True,
+        padding=True,
+        max_length=max_length,
+    )
+    inputs = {k: v.to(device) for k, v in inputs.items()}
+    outputs = model(**inputs)
+    config = getattr(model, "config", None)
+    problem_type = getattr(config, "problem_type", None)
+    id2label = getattr(config, "id2label", {}) or {}
+    labels = {str(v).lower(): int(k) for k, v in id2label.items()}
+
+    if problem_type == "multi_label_classification":
+        probs = torch.sigmoid(outputs.logits).detach().float().cpu()
+        toxicity_idx = labels.get("toxicity", 0)
+        constructiveness_idx = labels.get("constructiveness")
+        rows: List[Dict[str, float]] = []
+        for row in probs:
+            item = {"toxic_prob": float(row[toxicity_idx].item())}
+            if constructiveness_idx is not None:
+                item["constructiveness_prob"] = float(row[constructiveness_idx].item())
+            rows.append(item)
+        return rows
+
+    probs = torch.softmax(outputs.logits, dim=-1).detach().float().cpu()
+    return [{"toxic_prob": float(row[1].item())} for row in probs]
 
 
 # ---------------------------------------------------------------------------
@@ -547,18 +595,19 @@ def infer_crawled(
             batch_texts = segments[i: i + batch_size]
             if debug_force_prob is None:
                 if model_type == "phobert":
-                    probs = predict_probs(batch_texts, tokenizer, model, device=device, max_length=max_length)
+                    score_rows = predict_scores(batch_texts, tokenizer, model, device=device, max_length=max_length)
                 else:
                     X = vectorizer.transform(batch_texts)
-                    probs = model.predict_proba(X)[:, 1].tolist()
+                    score_rows = [{"toxic_prob": float(prob)} for prob in model.predict_proba(X)[:, 1].tolist()]
             else:
-                probs = [float(debug_force_prob)] * len(batch_texts)
-            for local_idx, (text, prob) in enumerate(zip(batch_texts, probs)):
+                score_rows = [{"toxic_prob": float(debug_force_prob)} for _ in batch_texts]
+            for local_idx, (text, score_row) in enumerate(zip(batch_texts, score_rows)):
                 global_idx = i + local_idx
                 prev_text = segments[global_idx - 1] if global_idx > 0 else ""
                 next_text = segments[global_idx + 1] if global_idx + 1 < len(segments) else ""
 
-                model_score = float(prob)
+                model_score = float(score_row["toxic_prob"])
+                constructiveness_score = score_row.get("constructiveness_prob")
                 segment_row = segment_rows[global_idx]
 
                 artifact_html_tag_raw = segment_row.get("html_tag_effective")
@@ -584,7 +633,7 @@ def infer_crawled(
                 )
                 label = 1 if adjusted_score > effective_threshold else 0
 
-                page_preds.append({
+                prediction_row = {
                     "text": text,
                     "toxic_prob": round(model_score, 4),
                     "toxic_prob_adjusted": round(adjusted_score, 4),
@@ -597,7 +646,11 @@ def infer_crawled(
                     "html_tag_effective": html_tag_key,
                     "learned_support": int((learned_stats or {}).get("support", 0)),
                     "learned_agreement": round(float((learned_stats or {}).get("agreement", 0.0)), 4),
-                })
+                }
+                if constructiveness_score is not None:
+                    prediction_row["constructiveness_prob"] = round(float(constructiveness_score), 4)
+                    prediction_row["constructiveness_label"] = 1 if float(constructiveness_score) >= 0.5 else 0
+                page_preds.append(prediction_row)
 
         # ── Aggregate page-level ──────────────────────────────────────
         total_segs  = len(page_preds)
@@ -605,10 +658,17 @@ def infer_crawled(
         toxic_ratio = toxic_count / total_segs if total_segs else 0.0
         page_toxic  = 1 if toxic_ratio > page_threshold else 0
         avg_prob    = sum(p["toxic_prob"] for p in page_preds) / total_segs if total_segs else 0.0
+        constructiveness_values = [
+            p["constructiveness_prob"] for p in page_preds if "constructiveness_prob" in p
+        ]
+        avg_constructiveness_prob = (
+            sum(constructiveness_values) / len(constructiveness_values)
+            if constructiveness_values else None
+        )
 
         top5 = sorted(page_preds, key=lambda x: x["toxic_prob"], reverse=True)[:5]
 
-        page_results.append({
+        page_result = {
             "url_hash":             url_hash,
             "url":                  url,
             "seg_threshold_used":   effective_threshold,
@@ -629,7 +689,10 @@ def infer_crawled(
             "page_toxic":           page_toxic,
             "avg_toxic_prob":       round(float(avg_prob), 4),
             "top5_toxic_segments":  [s["text"][:150] + "..." for s in top5],
-        })
+        }
+        if avg_constructiveness_prob is not None:
+            page_result["avg_constructiveness_prob"] = round(float(avg_constructiveness_prob), 4)
+        page_results.append(page_result)
 
         for p in page_preds:
             predictions_all.append({

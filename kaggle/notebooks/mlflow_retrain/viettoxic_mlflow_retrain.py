@@ -1,5 +1,5 @@
-# %% [markdown]
-# # VietToxic MLflow Retrain (Mirror)
+﻿# %% [markdown]
+# # VietComment Analyzer MLflow Retrain (Mirror)
 #
 # File nay duoc version trong repo de maintain de hon.
 # Khi can cap nhat notebook Kaggle:
@@ -173,6 +173,14 @@ def resolve_dataset_paths() -> tuple[dict[str, pathlib.Path], str]:
     )
 
 
+def parse_binary_label(value: object) -> int | None:
+    try:
+        parsed = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed in (0, 1) else None
+
+
 def load_jsonl_dataset(path: pathlib.Path) -> list[dict[str, int | str]]:
     rows: list[dict[str, int | str]] = []
     skipped = 0
@@ -193,14 +201,18 @@ def load_jsonl_dataset(path: pathlib.Path) -> list[dict[str, int | str]]:
                 skipped += 1
                 continue
             text = item.get("text")
-            label_raw = item.get("toxicity", item.get("label"))
+            toxicity = parse_binary_label(item.get("toxicity", item.get("label")))
+            constructiveness = parse_binary_label(item.get("constructiveness"))
             if not isinstance(text, str) or not text.strip():
                 skipped += 1
                 continue
-            if label_raw not in (0, 1):
+            if toxicity is None:
                 skipped += 1
                 continue
-            rows.append({"text": text.strip(), "toxicity": int(label_raw)})
+            row: dict[str, int | str] = {"text": text.strip(), "toxicity": toxicity}
+            if constructiveness is not None:
+                row["constructiveness"] = constructiveness
+            rows.append(row)
     if skipped:
         print(f"[WARN] Skipped {skipped} malformed rows in {path}")
     return rows
@@ -217,15 +229,18 @@ def downsample_rows(rows: list[dict[str, int | str]], max_rows: int) -> list[dic
     return copied[:max_rows]
 
 
-def evaluate_split(name: str, y_true: list[int], y_pred: list[int]) -> dict[str, float]:
+def evaluate_split(name: str, y_true: list[int], y_pred: list[int], positive_name: str = "toxic") -> dict[str, float]:
     from sklearn.metrics import accuracy_score, f1_score
 
     metrics = {
         "accuracy": float(accuracy_score(y_true, y_pred)),
         "macro_f1": float(f1_score(y_true, y_pred, average="macro", zero_division=0)),
-        "f1_toxic": float(f1_score(y_true, y_pred, pos_label=1, zero_division=0)),
-        "f1_clean": float(f1_score(y_true, y_pred, pos_label=0, zero_division=0)),
+        "f1_positive": float(f1_score(y_true, y_pred, pos_label=1, zero_division=0)),
+        f"f1_{positive_name}": float(f1_score(y_true, y_pred, pos_label=1, zero_division=0)),
+        "f1_negative": float(f1_score(y_true, y_pred, pos_label=0, zero_division=0)),
     }
+    if positive_name == "toxic":
+        metrics["f1_clean"] = metrics["f1_negative"]
     print(f"[{name}] {json.dumps(metrics, ensure_ascii=False)}")
     return metrics
 
@@ -305,6 +320,11 @@ def run_smoke_retrain() -> dict:
     x_test = [str(item["text"]) for item in test_rows]
     y_val = [int(item["toxicity"]) for item in val_rows]
     y_test = [int(item["toxicity"]) for item in test_rows]
+    has_constructiveness = all(
+        "constructiveness" in item
+        for split_rows in (train_rows, val_rows, test_rows)
+        for item in split_rows
+    )
 
     vectorizer = TfidfVectorizer(
         ngram_range=(1, 2),
@@ -328,29 +348,106 @@ def run_smoke_retrain() -> dict:
     val_pred = model.predict(x_val_vec)
     test_pred = model.predict(x_test_vec)
 
-    val_metrics = evaluate_split("validation", y_val, val_pred.tolist())
-    test_metrics = evaluate_split("test", y_test, test_pred.tolist())
+    val_metrics = evaluate_split("validation_toxicity", y_val, val_pred.tolist(), positive_name="toxic")
+    test_metrics = evaluate_split("test_toxicity", y_test, test_pred.tolist(), positive_name="toxic")
+
+    constructiveness_payload = None
+    constructiveness_model = None
+    if has_constructiveness:
+        y_train_constructiveness = [int(item["constructiveness"]) for item in train_rows]
+        y_val_constructiveness = [int(item["constructiveness"]) for item in val_rows]
+        y_test_constructiveness = [int(item["constructiveness"]) for item in test_rows]
+
+        if len(set(y_train_constructiveness)) >= 2:
+            constructiveness_model = LogisticRegression(
+                class_weight="balanced",
+                max_iter=600,
+                random_state=SEED,
+                n_jobs=-1,
+            )
+            print("Training constructiveness smoke model...")
+            constructiveness_model.fit(x_train_vec, y_train_constructiveness)
+            val_constructiveness_pred = constructiveness_model.predict(x_val_vec)
+            test_constructiveness_pred = constructiveness_model.predict(x_test_vec)
+            constructiveness_payload = {
+                "validation": evaluate_split(
+                    "validation_constructiveness",
+                    y_val_constructiveness,
+                    val_constructiveness_pred.tolist(),
+                    positive_name="constructive",
+                ),
+                "test": evaluate_split(
+                    "test_constructiveness",
+                    y_test_constructiveness,
+                    test_constructiveness_pred.tolist(),
+                    positive_name="constructive",
+                ),
+                "label_counts": {
+                    "train": {
+                        "non_constructive": int(y_train_constructiveness.count(0)),
+                        "constructive": int(y_train_constructiveness.count(1)),
+                    },
+                    "validation": {
+                        "non_constructive": int(y_val_constructiveness.count(0)),
+                        "constructive": int(y_val_constructiveness.count(1)),
+                    },
+                    "test": {
+                        "non_constructive": int(y_test_constructiveness.count(0)),
+                        "constructive": int(y_test_constructiveness.count(1)),
+                    },
+                },
+            }
+        else:
+            constructiveness_payload = {
+                "skipped": True,
+                "reason": "train split has <2 constructiveness classes",
+                "label_counts": {
+                    "train": {
+                        "non_constructive": int(y_train_constructiveness.count(0)),
+                        "constructive": int(y_train_constructiveness.count(1)),
+                    },
+                },
+            }
+    else:
+        constructiveness_payload = {
+            "skipped": True,
+            "reason": "constructiveness field missing from at least one row",
+        }
 
     artifact_dir = WORKDIR / "artifacts" / RUN_NAME
     artifact_dir.mkdir(parents=True, exist_ok=True)
 
     model_path = artifact_dir / "model_lr.joblib"
+    constructiveness_model_path = artifact_dir / "model_constructiveness_lr.joblib"
     vectorizer_path = artifact_dir / "vectorizer.joblib"
     metrics_path = artifact_dir / "metrics.json"
     summary_path = artifact_dir / "run_summary.json"
     artifact_zip_path = WORKDIR / f"{RUN_NAME}.zip"
 
     joblib.dump(model, model_path)
+    if constructiveness_model is not None:
+        joblib.dump(constructiveness_model, constructiveness_model_path)
     joblib.dump(vectorizer, vectorizer_path)
 
     metrics_payload = {
         "run_name": RUN_NAME,
-        "mode": "smoke_retrain_tfidf_lr",
+        "mode": "smoke_retrain_tfidf_lr_multitask",
         "bundle_profile": bundle_profile,
         "tracking_uri": MLFLOW_TRACKING_URI if MLFLOW_ENABLED else None,
         "sizes": {"train": len(train_rows), "validation": len(val_rows), "test": len(test_rows)},
+        "tasks": ["toxicity", "constructiveness"],
         "validation": val_metrics,
         "test": test_metrics,
+        "toxicity": {
+            "validation": val_metrics,
+            "test": test_metrics,
+            "label_counts": {
+                "train": {"clean": int(y_train.count(0)), "toxic": int(y_train.count(1))},
+                "validation": {"clean": int(y_val.count(0)), "toxic": int(y_val.count(1))},
+                "test": {"clean": int(y_test.count(0)), "toxic": int(y_test.count(1))},
+            },
+        },
+        "constructiveness": constructiveness_payload,
     }
     metrics_path.write_text(json.dumps(metrics_payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -364,12 +461,20 @@ def run_smoke_retrain() -> dict:
             for key, value in metrics_payload["sizes"].items():
                 mlflow.log_param(f"size_{key}", int(value))
             mlflow.log_param("bundle_profile", bundle_profile)
-            mlflow.log_param("mode", "smoke_retrain_tfidf_lr")
+            mlflow.log_param("mode", "smoke_retrain_tfidf_lr_multitask")
+            mlflow.log_param("tasks", "toxicity,constructiveness")
             for k, v in val_metrics.items():
-                mlflow.log_metric(f"val_{k}", float(v))
+                mlflow.log_metric(f"val_toxicity_{k}", float(v))
             for k, v in test_metrics.items():
-                mlflow.log_metric(f"test_{k}", float(v))
+                mlflow.log_metric(f"test_toxicity_{k}", float(v))
+            if constructiveness_payload and not constructiveness_payload.get("skipped"):
+                for k, v in constructiveness_payload["validation"].items():
+                    mlflow.log_metric(f"val_constructiveness_{k}", float(v))
+                for k, v in constructiveness_payload["test"].items():
+                    mlflow.log_metric(f"test_constructiveness_{k}", float(v))
             mlflow.log_artifact(str(model_path))
+            if constructiveness_model is not None:
+                mlflow.log_artifact(str(constructiveness_model_path))
             mlflow.log_artifact(str(vectorizer_path))
             mlflow.log_artifact(str(metrics_path))
         mlflow_logged = True
@@ -428,3 +533,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

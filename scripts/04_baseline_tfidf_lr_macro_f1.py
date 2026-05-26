@@ -3,6 +3,7 @@ import os
 import random
 import numpy as np
 from datasets import load_dataset
+import joblib
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import classification_report, confusion_matrix, f1_score
@@ -63,6 +64,17 @@ val_labels = [ex["toxicity"] for ex in dataset["validation"]]
 test_texts = [ex["text"] for ex in dataset["test"]]
 test_labels = [ex["toxicity"] for ex in dataset["test"]]
 
+def _safe_binary(value):
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        return None
+    return value if value in (0, 1) else None
+
+train_constructiveness = [_safe_binary(ex.get("constructiveness")) for ex in dataset["train"]]
+val_constructiveness = [_safe_binary(ex.get("constructiveness")) for ex in dataset["validation"]]
+test_constructiveness = [_safe_binary(ex.get("constructiveness")) for ex in dataset["test"]]
+
 print(f"Train: {len(train_texts)} | Val: {len(val_texts)} | Test: {len(test_texts)}")
 
 # ================================================================
@@ -120,21 +132,71 @@ def evaluate(split_name, y_true, X):
 val_metrics = evaluate("validation", val_labels, X_val)
 test_metrics = evaluate("test", test_labels, X_test)
 
+constructiveness_results = None
+valid_train_idx = [i for i, y in enumerate(train_constructiveness) if y is not None]
+valid_val_idx = [i for i, y in enumerate(val_constructiveness) if y is not None]
+valid_test_idx = [i for i, y in enumerate(test_constructiveness) if y is not None]
+if valid_train_idx and valid_val_idx and valid_test_idx:
+    y_train_construct = [train_constructiveness[i] for i in valid_train_idx]
+    if len(set(y_train_construct)) == 2:
+        model_constructiveness = LogisticRegression(
+            class_weight="balanced",
+            max_iter=1000,
+            random_state=SEED,
+            n_jobs=-1,
+        )
+        model_constructiveness.fit(X_train[valid_train_idx], y_train_construct)
+
+        def evaluate_constructiveness(split_name, y_true, X):
+            y_pred = model_constructiveness.predict(X)
+            y_prob = model_constructiveness.predict_proba(X)[:, 1]
+            macro_f1 = f1_score(y_true, y_pred, average="macro")
+            f1_constructive = f1_score(y_true, y_pred, pos_label=1)
+            f1_nonconstructive = f1_score(y_true, y_pred, pos_label=0)
+            return {
+                "macro_f1": macro_f1,
+                "f1_constructive": f1_constructive,
+                "f1_nonconstructive": f1_nonconstructive,
+                "confusion_matrix": confusion_matrix(y_true, y_pred).tolist(),
+                "classification_report": classification_report(y_true, y_pred, output_dict=True),
+                "prob_pos": y_prob.tolist(),
+            }
+
+        constructiveness_results = {
+            "validation": evaluate_constructiveness(
+                "validation",
+                [val_constructiveness[i] for i in valid_val_idx],
+                X_val[valid_val_idx],
+            ),
+            "test": evaluate_constructiveness(
+                "test",
+                [test_constructiveness[i] for i in valid_test_idx],
+                X_test[valid_test_idx],
+            ),
+            "n_valid": {
+                "train": len(valid_train_idx),
+                "validation": len(valid_val_idx),
+                "test": len(valid_test_idx),
+            },
+        }
+        joblib.dump(model_constructiveness, f"{RESULTS_BASE}/model_lr_constructiveness.pkl")
+
 # ================================================================
 # Save results
 # ================================================================
 results = {
     "dataset_version": DATASET_VERSION,
     "model": "TFIDF_LR",
+    "tasks": ["toxicity", "constructiveness"],
     "validation": val_metrics,
     "test": test_metrics,
+    "constructiveness": constructiveness_results,
 }
 
 with open(f"{RESULTS_BASE}/metrics.json", "w", encoding="utf-8") as f:
     json.dump(results, f, ensure_ascii=False, indent=2)
 
 # Save vectorizer & model
-import joblib
 joblib.dump(vectorizer, f"{RESULTS_BASE}/vectorizer.pkl")
 joblib.dump(model, f"{RESULTS_BASE}/model_lr.pkl")
 
@@ -168,6 +230,10 @@ metrics_out = {
     "precision": metrics_payload.get("classification_report", {}).get("1", {}).get("precision"),
     "recall": metrics_payload.get("classification_report", {}).get("1", {}).get("recall"),
     "accuracy": metrics_payload.get("classification_report", {}).get("accuracy"),
+    "constructiveness_macro_f1": (
+        constructiveness_results.get("test", {}).get("macro_f1")
+        if isinstance(constructiveness_results, dict) else None
+    ),
 }
 
 os.makedirs(f"{OUTPUT_BASE}/best", exist_ok=True)

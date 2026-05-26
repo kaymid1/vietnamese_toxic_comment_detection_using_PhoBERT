@@ -26,6 +26,8 @@ interface ApiSegment {
   ai_learned_label?: string | null;
   segment_hash?: string | null;
   toxic_label?: number | null;
+  constructiveness_score?: number | null;
+  constructiveness_label?: number | null;
   seg_threshold_used?: number | null;
 }
 
@@ -33,7 +35,12 @@ interface ApiResult {
   url: string;
   url_hash?: string | null;
   status: "ok" | "error" | "skipped";
+  crawl_status?: string | null;
   error?: string | null;
+  warnings?: string[] | null;
+  comment_cap_hit?: boolean | null;
+  max_comments_per_url?: number | null;
+  crawled_comment_count?: number | null;
   crawl_output_dir?: string | null;
   segments_path?: string | null;
   videos?: Record<string, unknown>[];
@@ -44,6 +51,21 @@ interface ApiResult {
   toxicity?: {
     overall?: number | null;
     by_segment?: ApiSegment[];
+  };
+  constructiveness?: {
+    overall?: number | null;
+    by_segment?: ApiSegment[];
+    meta?: {
+      available?: boolean;
+      threshold?: number;
+      total_segments?: number;
+      segments_with_score?: number;
+      segments_without_score?: number;
+      segments_with_label?: number;
+      constructive_segments?: number;
+      non_constructive_segments?: number;
+      missing_reason?: string | null;
+    };
   };
 }
 
@@ -66,6 +88,18 @@ interface AnalyzeResponse {
   };
   thresholds_by_domain?: DomainThresholds;
   results?: ApiResult[];
+}
+
+interface AnalyzeOptions {
+  batch_size: number;
+  max_length: number;
+  page_threshold: number;
+  seg_threshold: number;
+  crawl_timeout_sec: number;
+  max_load_more_clicks: number;
+  max_comments_per_url: number;
+  enable_video: boolean;
+  selenium_fallback_mode: "auto";
 }
 
 interface CompareModelResponse {
@@ -120,6 +154,17 @@ const LANGUAGE_KEY = "viettoxic:language";
 const MAX_SCAN_HISTORY = 120;
 
 const API_BASE = RAW_API_BASE.replace(/\/+$/, "");
+const DEFAULT_ANALYZE_OPTIONS: AnalyzeOptions = {
+  batch_size: 8,
+  max_length: 256,
+  page_threshold: 0.25,
+  seg_threshold: 0.4,
+  crawl_timeout_sec: 90,
+  max_load_more_clicks: 4,
+  max_comments_per_url: 50,
+  enable_video: false,
+  selenium_fallback_mode: "auto",
+};
 const API_FALLBACK_BASES = Array.from(
   new Set(
     ["", API_BASE, "http://127.0.0.1:8000", "http://localhost:8000", "http://127.0.0.1:8001", "http://localhost:8001"]
@@ -272,17 +317,137 @@ const parseJsonResponse = async <T,>(response: Response): Promise<T> => {
   return JSON.parse(raw) as T;
 };
 
+const normalizeInputUrl = (raw: string): string | null => {
+  const cleaned = raw.trim().replace(/^["'`]+|["'`]+$/g, "").replace(/[),.;]+$/g, "");
+  if (!cleaned) return null;
+  const withScheme = /^https?:\/\//i.test(cleaned) ? cleaned : `https://${cleaned}`;
+  try {
+    const parsed = new URL(withScheme);
+    const protocol = parsed.protocol.toLowerCase();
+    if (protocol !== "http:" && protocol !== "https:") return null;
+    const host = parsed.hostname.trim().toLowerCase();
+    if (!host || !host.includes(".")) return null;
+    const path = parsed.pathname || "";
+    const query = parsed.search || "";
+    return `${protocol}//${host}${path}${query}`;
+  } catch {
+    return null;
+  }
+};
+
+const normalizeInputUrls = (rawUrls: string[]): string[] => {
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+  for (const raw of rawUrls) {
+    const url = normalizeInputUrl(raw);
+    if (!url || seen.has(url)) continue;
+    seen.add(url);
+    normalized.push(url);
+  }
+  return normalized;
+};
+
+const mergeUniqueWarnings = (left?: string[] | null, right?: string[] | null) => {
+  const merged = [...(left || []), ...(right || [])]
+    .map((item) => String(item || "").trim())
+    .filter((item) => item.length > 0);
+  return Array.from(new Set(merged));
+};
+
+const mergeApiResult = (
+  previous: ApiResult | null,
+  latest: ApiResult,
+  pageThreshold: number,
+): ApiResult => {
+  if (!previous || latest.status !== "ok") return latest;
+  const prevSegments = previous.toxicity?.by_segment || [];
+  const nextSegments = latest.toxicity?.by_segment || [];
+  if (prevSegments.length === 0) return latest;
+
+  const combinedByKey = new Map<string, ApiSegment>();
+  const pushSegment = (segment: ApiSegment) => {
+    const textKey = (segment.text || segment.text_preview || "").trim();
+    const key = textKey || segment.segment_id || `${segment.score}:${segment.text_preview}`;
+    if (!combinedByKey.has(key)) {
+      combinedByKey.set(key, segment);
+    } else {
+      const existing = combinedByKey.get(key)!;
+      if (segment.score > existing.score) {
+        combinedByKey.set(key, segment);
+      }
+    }
+  };
+  prevSegments.forEach(pushSegment);
+  nextSegments.forEach(pushSegment);
+
+  const mergedSegments = Array.from(combinedByKey.values());
+  const toxicityOverall =
+    mergedSegments.length > 0
+      ? mergedSegments.reduce((sum, segment) => sum + (segment.score || 0), 0) / mergedSegments.length
+      : latest.toxicity?.overall ?? previous.toxicity?.overall ?? null;
+  const constructiveSegments = mergedSegments.filter((segment) => typeof segment.constructiveness_score === "number");
+  const constructivenessOverall =
+    constructiveSegments.length > 0
+      ? constructiveSegments.reduce((sum, segment) => sum + (segment.constructiveness_score || 0), 0) /
+        constructiveSegments.length
+      : latest.constructiveness?.overall ?? previous.constructiveness?.overall ?? null;
+
+  const segThresholdUsed =
+    typeof latest.seg_threshold_used === "number"
+      ? latest.seg_threshold_used
+      : typeof previous.seg_threshold_used === "number"
+        ? previous.seg_threshold_used
+        : 0.5;
+  const resolvedPageThreshold = Number.isFinite(pageThreshold) ? pageThreshold : 0.5;
+
+  return {
+    ...latest,
+    warnings: mergeUniqueWarnings(previous.warnings, latest.warnings),
+    comment_cap_hit: Boolean(latest.comment_cap_hit),
+    crawled_comment_count: mergedSegments.length,
+    toxicity: {
+      overall: toxicityOverall,
+      by_segment: mergedSegments,
+    },
+    page_toxic:
+      toxicityOverall !== null
+        ? toxicityOverall >= resolvedPageThreshold
+          ? 1
+          : 0
+        : latest.page_toxic ?? previous.page_toxic ?? null,
+    constructiveness: {
+      overall: constructivenessOverall,
+      by_segment: constructiveSegments,
+      meta: {
+        ...(latest.constructiveness?.meta || previous.constructiveness?.meta || {}),
+        total_segments: mergedSegments.length,
+        segments_with_score: constructiveSegments.length,
+        segments_without_score: Math.max(0, mergedSegments.length - constructiveSegments.length),
+      },
+    },
+  };
+};
+
 const readScanHistory = (): ScanHistoryItem[] => {
   try {
     const raw = window.localStorage.getItem(SCAN_HISTORY_KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    return parsed.filter((item): item is ScanHistoryItem => {
+    const filtered = parsed.filter((item): item is ScanHistoryItem => {
       if (!item || typeof item !== "object") return false;
       const candidate = item as Partial<ScanHistoryItem>;
-      return typeof candidate.id === "string" && !!candidate.result && typeof candidate.result.url === "string";
+      return (
+        typeof candidate.id === "string" &&
+        !!candidate.result &&
+        typeof candidate.result.url === "string" &&
+        !!normalizeInputUrl(candidate.result.url)
+      );
     });
+    if (filtered.length !== parsed.length) {
+      window.localStorage.setItem(SCAN_HISTORY_KEY, JSON.stringify(filtered.slice(0, MAX_SCAN_HISTORY)));
+    }
+    return filtered;
   } catch {
     return [];
   }
@@ -301,7 +466,9 @@ const createHistoryEntries = (params: {
 }): ScanHistoryItem[] => {
   const { results, jobId, modelId, thresholds, thresholdsByDomain } = params;
   const savedAt = new Date().toISOString();
-  return results.map((result, index) => ({
+  return results
+    .filter((result) => !!normalizeInputUrl(result.url))
+    .map((result, index) => ({
     id: `${result.url_hash || result.url}-${modelId || "unknown"}-${Date.now()}-${index}`,
     savedAt,
     jobId,
@@ -309,7 +476,7 @@ const createHistoryEntries = (params: {
     thresholds,
     thresholdsByDomain,
     result,
-  }));
+    }));
 };
 
 function AdminLoginPage({
@@ -388,6 +555,7 @@ export default function App() {
   const [modelsLoading, setModelsLoading] = useState(true);
   const [modelsError, setModelsError] = useState<string | null>(null);
   const [analysisProgress, setAnalysisProgress] = useState<number | null>(null);
+  const [scanMoreLoadingByUrl, setScanMoreLoadingByUrl] = useState<Record<string, boolean>>({});
   const [theme, setTheme] = useState<"light" | "dark">(getInitialTheme);
   const [language, setLanguage] = useState<Language>("vi");
   const [mlflowMounted, setMlflowMounted] = useState(false);
@@ -580,25 +748,30 @@ export default function App() {
     });
   };
 
-  const handleAnalyze = async (urls: string[], modelNames: string[]) => {
+  const handleAnalyze = async (
+    urls: string[],
+    modelNames: string[],
+    optionOverrides?: Partial<AnalyzeOptions>,
+  ) => {
     try {
+      const normalizedUrls = normalizeInputUrls(urls);
+      if (normalizedUrls.length === 0) {
+        throw new Error("No valid URLs provided.");
+      }
+
       setErrorMessage(null);
       setCompareModels(null);
       setActiveResultModel(null);
       setAnalysisProgress(0);
 
-      const baseOptions: Record<string, unknown> = {
-        batch_size: 8,
-        max_length: 256,
-        page_threshold: 0.25,
-        seg_threshold: 0.4,
-        enable_video: false,
-        selenium_fallback_mode: "auto",
+      const baseOptions: AnalyzeOptions = {
+        ...DEFAULT_ANALYZE_OPTIONS,
+        ...(optionOverrides || {}),
       };
 
       if (modelNames.length >= 2) {
         const requestBody: Record<string, unknown> = {
-          urls,
+          urls: normalizedUrls,
           options: {
             ...baseOptions,
             model_names: modelNames,
@@ -642,7 +815,7 @@ export default function App() {
 
       const selected = modelNames[0] || null;
       const requestBody: Record<string, unknown> = {
-        urls,
+        urls: normalizedUrls,
         options: selected ? { ...baseOptions, model_name: selected } : baseOptions,
       };
 
@@ -679,11 +852,120 @@ export default function App() {
     }
   };
 
+  const handleScanMoreForUrl = async (result: ApiResult) => {
+    const modelForRescan = analysisModelId || selectedModels[0] || null;
+    if (!modelForRescan) {
+      setErrorMessage(t("app.cannotLoadModels"));
+      return;
+    }
+    const normalizedTargetUrl = normalizeInputUrl(result.url);
+    if (!normalizedTargetUrl) {
+      setErrorMessage("Cannot scan more: current result does not contain a valid URL.");
+      return;
+    }
+
+    const currentCapRaw = Number(result.max_comments_per_url ?? DEFAULT_ANALYZE_OPTIONS.max_comments_per_url);
+    const currentCap = Number.isFinite(currentCapRaw) ? Math.max(0, Math.floor(currentCapRaw)) : DEFAULT_ANALYZE_OPTIONS.max_comments_per_url;
+    const nextCap = Math.min(5000, Math.max(50, currentCap + 50));
+
+    try {
+      setErrorMessage(null);
+      setScanMoreLoadingByUrl((prev) => ({ ...prev, [normalizedTargetUrl]: true }));
+      const requestBody: Record<string, unknown> = {
+        urls: [normalizedTargetUrl],
+        options: {
+          ...DEFAULT_ANALYZE_OPTIONS,
+          model_name: modelForRescan,
+          max_comments_per_url: nextCap,
+          max_load_more_clicks: 8,
+          crawl_timeout_sec: 120,
+        },
+      };
+
+      const data = await parseJsonResponse<AnalyzeResponse>(
+        await fetchApiWithFallback("/api/analyze", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(requestBody),
+        }),
+      );
+
+      const nextResult = (data.results || [])[0];
+      if (!nextResult) {
+        throw new Error(t("results.cannotAnalyzeUrl"));
+      }
+      const existingResult =
+        analysisResults.find((item) => item.url === normalizedTargetUrl || item.url === result.url) || null;
+      const mergedResult = mergeApiResult(
+        existingResult,
+        nextResult,
+        Number(data.thresholds?.page_threshold ?? thresholds?.page_threshold ?? 0.5),
+      );
+
+      const resolvedModel = data.model_name || modelForRescan;
+      setJobId(data.job_id);
+      setAnalysisModelId(resolvedModel);
+      setThresholds(data.thresholds || null);
+      setThresholdsByDomain(data.thresholds_by_domain || null);
+      setAnalysisResults((prev) => {
+        const found = prev.some((item) => item.url === normalizedTargetUrl || item.url === result.url);
+        if (!found) return [mergedResult, ...prev];
+        return prev.map((item) =>
+          item.url === normalizedTargetUrl || item.url === result.url ? mergedResult : item,
+        );
+      });
+
+      if (compareModels && activeResultModel && compareModels[activeResultModel]) {
+        setCompareModels((prev) => {
+          if (!prev || !activeResultModel || !prev[activeResultModel]) return prev;
+          const payload = prev[activeResultModel];
+          const currentResults = payload.results || [];
+          const hasUrl = currentResults.some((item) => item.url === normalizedTargetUrl || item.url === result.url);
+          const nextResults = hasUrl
+            ? currentResults.map((item) =>
+                item.url === normalizedTargetUrl || item.url === result.url ? mergedResult : item,
+              )
+            : [mergedResult, ...currentResults];
+          return {
+            ...prev,
+            [activeResultModel]: {
+              ...payload,
+              model_name: resolvedModel,
+              thresholds: data.thresholds || payload.thresholds,
+              thresholds_by_domain: data.thresholds_by_domain || payload.thresholds_by_domain,
+              results: nextResults,
+            },
+          };
+        });
+      }
+
+      appendHistory(
+        createHistoryEntries({
+          results: [mergedResult],
+          jobId: data.job_id,
+          modelId: resolvedModel,
+          thresholds: data.thresholds || null,
+          thresholdsByDomain: data.thresholds_by_domain || null,
+        }),
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : t("app.unknownError");
+      setErrorMessage(message);
+    } finally {
+      setScanMoreLoadingByUrl((prev) => {
+        const next = { ...prev };
+        delete next[normalizedTargetUrl];
+        return next;
+      });
+    }
+  };
+
   const handleScanAgain = () => {
     setCurrentPage("home");
     setAnalysisResults([]);
     setJobId(null);
     setAnalysisModelId(null);
+    setScanMoreLoadingByUrl({});
     setThresholds(null);
     setThresholdsByDomain(null);
     setCompareModels(null);
@@ -758,6 +1040,7 @@ export default function App() {
             {currentPage === "results" && (
               <ResultsPage
                 results={analysisResults}
+                errorMessage={errorMessage}
                 jobId={jobId}
                 thresholds={thresholds}
                 thresholdsByDomain={thresholdsByDomain}
@@ -767,6 +1050,8 @@ export default function App() {
                 onSelectResultModel={handleSelectResultModel}
                 scanHistory={scanHistory}
                 onLoadHistoryItem={handleLoadFromHistory}
+                onScanMore={handleScanMoreForUrl}
+                scanMoreLoadingByUrl={scanMoreLoadingByUrl}
                 onScanAgain={handleScanAgain}
               />
             )}

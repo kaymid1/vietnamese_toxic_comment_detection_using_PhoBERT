@@ -128,6 +128,7 @@ function Start-ServiceProcess {
     -WindowStyle Hidden `
     -PassThru
 
+  $proc | Add-Member -NotePropertyName ServiceName -NotePropertyValue $Name -Force
   Write-Host ("[INFO] Started {0} (PID={1})" -f $Name, $proc.Id)
   return $proc
 }
@@ -234,7 +235,7 @@ try {
   $processes += Start-ServiceProcess `
     -Name "ngrok-webhook" `
     -FilePath $NgrokExe `
-    -Arguments @("http", "--url=$WebhookNgrokUrl", "$WebhookPort") `
+    -Arguments @("http", "--url=$WebhookNgrokUrl", "--pooling-enabled=true", "$WebhookPort") `
     -WorkingDirectory $RepoRoot `
     -OutLogFile (Join-Path $RuntimeDir "ngrok-webhook.out.log") `
     -ErrLogFile (Join-Path $RuntimeDir "ngrok-webhook.err.log")
@@ -269,12 +270,22 @@ try {
   while ($true) {
     Flush-LogJobs -Jobs $logJobs
     Start-Sleep -Seconds 2
+    $alive = @()
     foreach ($p in $processes) {
       $p.Refresh()
       if ($p.HasExited) {
-        throw ("Process exited unexpectedly: PID={0}, ExitCode={1}" -f $p.Id, $p.ExitCode)
+        $serviceName = if ($p.PSObject.Properties["ServiceName"]) { $p.ServiceName } else { "unknown" }
+        $exitCode = $null
+        try { $exitCode = $p.ExitCode } catch { }
+        if ($serviceName -like "ngrok*") {
+          Write-Warning ("Optional process '{0}' exited: PID={1}, ExitCode={2}. Backend/frontend will keep running." -f $serviceName, $p.Id, $(if ($null -ne $exitCode) { $exitCode } else { "unknown" }))
+          continue
+        }
+        throw ("Process exited unexpectedly: service={0}, PID={1}, ExitCode={2}" -f $serviceName, $p.Id, $(if ($null -ne $exitCode) { $exitCode } else { "unknown" }))
       }
+      $alive += $p
     }
+    $processes = $alive
   }
 }
 finally {

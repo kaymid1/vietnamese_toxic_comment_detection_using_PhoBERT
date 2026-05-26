@@ -65,13 +65,59 @@ interface DatasetExportResponse {
 
 const RAW_API_BASE = import.meta.env.VITE_API_BASE_URL?.trim() ?? "";
 const API_BASE = RAW_API_BASE.replace(/\/+$/, "");
+const API_FALLBACK_BASES = Array.from(
+  new Set(
+    ["", API_BASE, "http://127.0.0.1:8000", "http://localhost:8000", "http://127.0.0.1:8001", "http://localhost:8001"]
+      .map((value) => value.trim().replace(/\/+$/, ""))
+      .filter(Boolean),
+  ),
+);
+const API_FALLBACK_FAILURE_COOLDOWN_MS = 30000;
+let lastSuccessfulApiBase: string | null = null;
+const apiBaseFailureUntil = new Map<string, number>();
 const DATASET_VERSION_PARAM = "latest";
 
-const buildApiUrl = (path: string) => {
-  if (!path.startsWith("/")) {
-    return API_BASE ? `${API_BASE}/${path}` : `/${path}`;
+const buildApiUrlFromBase = (base: string, path: string) => {
+  if (/^https?:\/\//i.test(path)) return path;
+  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+  if (!base) return normalizedPath;
+  return `${base}${normalizedPath}`;
+};
+
+const isNetworkFetchError = (error: unknown) =>
+  error instanceof TypeError && /failed to fetch|networkerror|load failed/i.test(error.message.toLowerCase());
+
+const fetchApiWithFallback = async (path: string, init?: RequestInit): Promise<Response> => {
+  const now = Date.now();
+  const candidates = [lastSuccessfulApiBase || "", ...API_FALLBACK_BASES, API_BASE]
+    .map((item) => item.trim())
+    .filter((value, index, values) => values.indexOf(value) === index);
+
+  let lastError: unknown = null;
+  for (const candidate of candidates) {
+    const blockedUntil = apiBaseFailureUntil.get(candidate) || 0;
+    if (candidate !== (lastSuccessfulApiBase || "") && blockedUntil > now) {
+      continue;
+    }
+    const url = buildApiUrlFromBase(candidate, path);
+    try {
+      const response = await fetch(url, init);
+      lastSuccessfulApiBase = candidate;
+      apiBaseFailureUntil.delete(candidate);
+      return response;
+    } catch (error) {
+      if (!isNetworkFetchError(error)) throw error;
+      lastError = error;
+      apiBaseFailureUntil.set(candidate, Date.now() + API_FALLBACK_FAILURE_COOLDOWN_MS);
+      if (lastSuccessfulApiBase === candidate) {
+        lastSuccessfulApiBase = null;
+      }
+    }
   }
-  return API_BASE ? `${API_BASE}${path}` : path;
+
+  throw new Error(
+    `Cannot reach backend API for ${path}. ${(lastError as Error | null)?.message || ""}`.trim(),
+  );
 };
 
 const labelText = (label: number, t: (key: string) => string) => (label === 1 ? t("dataset.filters.toxic") : t("dataset.filters.clean"));
@@ -233,7 +279,7 @@ export function DatasetPage() {
       if (splitFilter !== "all") params.set("split", splitFilter);
       params.set("dataset_version", DATASET_VERSION_PARAM);
 
-      const response = await fetch(buildApiUrl(`/api/dataset/preview?${params.toString()}`));
+      const response = await fetchApiWithFallback(`/api/dataset/preview?${params.toString()}`);
       const data = (await response.json()) as DatasetPreviewResponse;
       if (!response.ok) {
         throw new Error(JSON.stringify(data));
@@ -272,7 +318,7 @@ export function DatasetPage() {
       body.model_version = "phobert/baseline";
       body.policy_version = "policy-v1";
 
-      const response = await fetch(buildApiUrl("/api/dataset/export"), {
+      const response = await fetchApiWithFallback("/api/dataset/export", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
@@ -312,7 +358,7 @@ export function DatasetPage() {
     setDeleteLoading(true);
     setDeleteStatus(null);
     try {
-      const response = await fetch(buildApiUrl("/api/feedback/segment/delete"), {
+      const response = await fetchApiWithFallback("/api/feedback/segment/delete", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ids: selectedFeedback }),

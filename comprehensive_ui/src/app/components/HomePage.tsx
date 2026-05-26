@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ChangeEvent } from "react";
+﻿import { useEffect, useMemo, useState, type ChangeEvent } from "react";
 import { Button } from "@/app/components/ui/button";
 import { Textarea } from "@/app/components/ui/textarea";
 import { useI18n } from "@/app/i18n/context";
@@ -127,7 +127,7 @@ export function HomePage({
     <div className="dashboard-page">
       <div className="mx-auto w-full max-w-5xl">
         <div className="mb-8 text-center">
-          <h1 className="text-4xl tracking-tight text-primary">VietToxic Detector</h1>
+          <h1 className="text-4xl tracking-tight text-primary">VietComment Analyzer</h1>
           <p className="mt-3 text-muted-foreground">{t("home.subtitle")}</p>
         </div>
 
@@ -227,3 +227,4 @@ export function HomePage({
     </div>
   );
 }
+

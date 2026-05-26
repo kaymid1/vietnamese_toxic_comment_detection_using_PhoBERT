@@ -1,5 +1,5 @@
-"""
-PhoBERT Full Fine-tuning — Vietnamese Toxic Comment Detection
+﻿"""
+PhoBERT Full Fine-tuning â€” Vietnamese Toxic Comment Detection
 Refactored to match the LoRA script data source + export layout.
 """
 
@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 import numpy as np
 import torch
 import torch.nn.functional as F
-from datasets import DatasetDict, concatenate_datasets, load_dataset
+from datasets import Dataset, DatasetDict, concatenate_datasets, load_dataset
 from transformers import (
     AutoTokenizer,
     AutoModelForSequenceClassification,
@@ -62,7 +62,7 @@ def show_gpu():
 os.environ["WANDB_DISABLED"] = "true"
 
 # ================================================================
-# Config — tune here
+# Config â€” tune here
 # ================================================================
 parser = argparse.ArgumentParser(description="Train PhoBERT LoRA/full fine-tune with optional pseudo-label mixing")
 parser.add_argument("--dry-run", action="store_true", help="Validate inputs and print resolved config without training")
@@ -80,7 +80,8 @@ GOLD_DATA_DIR = os.environ.get("GOLD_DATA_DIR", "data/processed/victsd_gold")
 GOLD_DATASET_PREFIX = os.environ.get("GOLD_DATASET_PREFIX", "").strip()
 MAX_PSEUDO_RATIO = float(os.environ.get("MAX_PSEUDO_RATIO", "0.4"))
 RUN_MANIFEST_DIR = os.environ.get("RUN_MANIFEST_DIR", "experiments/retrain_runs/")
-MIXED_MODE = bool(PSEUDO_LABELS_DIR)
+REQUESTED_MIXED_MODE = bool(PSEUDO_LABELS_DIR)
+ACTIVE_MIXED_MODE = REQUESTED_MIXED_MODE
 
 BATCH_SIZE = 16
 GRAD_ACCUM = 2
@@ -91,13 +92,18 @@ WARMUP_RATIO  = 0.08
 MAX_GRAD_NORM = 1.0
 
 LABEL_SMOOTHING     = 0.0
-EARLY_STOP_PATIENCE = 4
+EARLY_STOP_PATIENCE = int(os.environ.get("EARLY_STOP_PATIENCE", "4"))
 HEAD_DROPOUT        = 0.1
 
 USE_FOCAL   = True
 FOCAL_GAMMA = 2.0
 
 TOXIC_WEIGHT_SCALE = 0.5
+CONSTRUCTIVENESS_LOSS_WEIGHT = float(os.environ.get("CONSTRUCTIVENESS_LOSS_WEIGHT", "0.5"))
+CONSTRUCTIVENESS_WEIGHT_SCALE = float(os.environ.get("CONSTRUCTIVENESS_WEIGHT_SCALE", "1.0"))
+TASK_LABELS = ["toxicity", "constructiveness"]
+TOXICITY_TASK_INDEX = 0
+CONSTRUCTIVENESS_TASK_INDEX = 1
 
 SEED = int(os.environ.get("SEED", "42"))
 
@@ -119,13 +125,13 @@ if MLFLOW_ENABLED and not args.dry_run:
     except Exception as exc:
         print(f"MLflow logging disabled: {exc}", flush=True)
 
-PRIMARY_METRIC = "eval_f1_toxic"
+PRIMARY_METRIC = os.environ.get("PRIMARY_METRIC", "eval_f1_toxic")
 
 THRESH_MIN  = 0.05
 THRESH_MAX  = 0.95
 THRESH_STEP = 0.01
 THRESH_OBJECTIVES           = ["f1_toxic", "macro_f1"]
-PRIMARY_THRESHOLD_OBJECTIVE = "f1_toxic"
+PRIMARY_THRESHOLD_OBJECTIVE = os.environ.get("PRIMARY_THRESHOLD_OBJECTIVE", "f1_toxic")
 
 N_ERROR_SAMPLES = 30
 
@@ -158,7 +164,7 @@ log("Checking dataset files...")
 
 pseudo_manifest = None
 pseudo_manifest_path = None
-if MIXED_MODE:
+if ACTIVE_MIXED_MODE:
     gold_files = {
         split: (f"{GOLD_DATA_DIR}/{GOLD_DATASET_PREFIX}_{split}.jsonl" if GOLD_DATASET_PREFIX else f"{GOLD_DATA_DIR}/{split}.jsonl")
         for split in ["train", "validation", "test"]
@@ -171,6 +177,12 @@ if MIXED_MODE:
     assert os.path.exists(pseudo_accepted_path), f"Missing pseudo labels file: {pseudo_accepted_path}"
     assert os.path.exists(pseudo_manifest_path), f"Missing pseudo manifest file: {pseudo_manifest_path}"
 
+    log(
+        "Dataset source (gold): "
+        f"train={gold_files['train']} | validation={gold_files['validation']} | test={gold_files['test']}"
+    )
+    log(f"Dataset source (pseudo): accepted={pseudo_accepted_path} | manifest={pseudo_manifest_path}")
+
     with open(pseudo_manifest_path, "r", encoding="utf-8") as f:
         pseudo_manifest = json.load(f)
 
@@ -179,28 +191,90 @@ if MIXED_MODE:
 
     log("Loading gold + pseudo datasets ...")
     gold_dataset = load_dataset("json", data_files=gold_files)
-    pseudo_dataset = load_dataset("json", data_files={"train": pseudo_accepted_path})["train"]
-    if len(pseudo_dataset) == 0:
-        raise ValueError("Pseudo labels accepted.jsonl is empty")
 
-    pseudo_cols = pseudo_dataset.column_names
-    for col in ["text", "toxicity"]:
-        if col not in pseudo_cols:
-            raise ValueError(f"Pseudo labels missing required column: {col}")
+    pseudo_rows = []
+    pseudo_parse_errors = 0
+    with open(pseudo_accepted_path, "r", encoding="utf-8") as f:
+        for line_no, raw_line in enumerate(f, start=1):
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except Exception:
+                pseudo_parse_errors += 1
+                if pseudo_parse_errors <= 3:
+                    log(f"[WARN] Skipping invalid pseudo JSON at line {line_no}")
+                continue
+            if not isinstance(row, dict):
+                pseudo_parse_errors += 1
+                if pseudo_parse_errors <= 3:
+                    log(f"[WARN] Skipping non-object pseudo row at line {line_no}")
+                continue
+            pseudo_rows.append(row)
 
-    keep_cols = ["text", "toxicity"]
+    pseudo_total_rows = len(pseudo_rows)
+    if pseudo_parse_errors:
+        log(f"[WARN] Pseudo parse errors: {pseudo_parse_errors}")
+
+    normalized_pseudo_rows = []
+    invalid_pseudo_rows = 0
+    for row in pseudo_rows:
+        text = row.get("text")
+        toxicity_raw = row.get("toxicity")
+        if not isinstance(text, str) or not text.strip():
+            invalid_pseudo_rows += 1
+            continue
+        try:
+            toxicity = int(toxicity_raw)
+        except (TypeError, ValueError):
+            invalid_pseudo_rows += 1
+            continue
+        if toxicity not in (0, 1):
+            invalid_pseudo_rows += 1
+            continue
+        constructiveness = row.get("constructiveness")
+        try:
+            constructiveness = int(constructiveness)
+        except (TypeError, ValueError):
+            constructiveness = None
+        if constructiveness not in (0, 1):
+            constructiveness = None
+        normalized_pseudo_rows.append({
+            "text": text,
+            "toxicity": toxicity,
+            "constructiveness": constructiveness,
+        })
+
+    if invalid_pseudo_rows:
+        log(f"[WARN] Dropped invalid pseudo rows: {invalid_pseudo_rows}")
+
+    if len(normalized_pseudo_rows) == 0:
+        log(
+            "[WARN] Pseudo labels accepted.jsonl has no valid rows after normalization; "
+            "fallback to gold-only training"
+        )
+        ACTIVE_MIXED_MODE = False
+        pseudo_manifest = None
+
+    keep_cols = ["text", "toxicity", "constructiveness"]
     gold_train_base = gold_dataset["train"].remove_columns([c for c in gold_dataset["train"].column_names if c not in keep_cols])
     val_dataset = gold_dataset["validation"].remove_columns([c for c in gold_dataset["validation"].column_names if c not in keep_cols])
     test_dataset = gold_dataset["test"].remove_columns([c for c in gold_dataset["test"].column_names if c not in keep_cols])
-    pseudo_base = pseudo_dataset.remove_columns([c for c in pseudo_dataset.column_names if c not in keep_cols])
 
     gold_train = gold_train_base.add_column("is_pseudo", [0] * len(gold_train_base))
     gold_train = gold_train.add_column("sample_weight", [1.0] * len(gold_train))
 
-    pseudo_train = pseudo_base.add_column("is_pseudo", [1] * len(pseudo_base))
-    pseudo_train = pseudo_train.add_column("sample_weight", [float(PSEUDO_LOSS_WEIGHT)] * len(pseudo_train))
-
-    train_dataset = concatenate_datasets([gold_train, pseudo_train])
+    if ACTIVE_MIXED_MODE:
+        pseudo_dataset = Dataset.from_list(normalized_pseudo_rows)
+        pseudo_base = pseudo_dataset.remove_columns([c for c in pseudo_dataset.column_names if c not in keep_cols])
+        pseudo_train = pseudo_base.add_column("is_pseudo", [1] * len(pseudo_base))
+        pseudo_train = pseudo_train.add_column("sample_weight", [float(PSEUDO_LOSS_WEIGHT)] * len(pseudo_train))
+        train_dataset = concatenate_datasets([gold_train, pseudo_train])
+        n_train_pseudo = len(pseudo_train)
+    else:
+        train_dataset = gold_train
+        n_train_pseudo = 0
 
     dataset = DatasetDict({
         "train": train_dataset,
@@ -211,7 +285,13 @@ if MIXED_MODE:
     gold_data_dir_used = GOLD_DATA_DIR
     gold_prefix_used = GOLD_DATASET_PREFIX
     n_train_gold = len(gold_train)
-    n_train_pseudo = len(pseudo_train)
+
+    log(
+        "Train composition: "
+        f"mode={'mixed' if ACTIVE_MIXED_MODE else 'gold_only'} | "
+        f"gold_train={n_train_gold} | pseudo_raw={pseudo_total_rows} | "
+        f"pseudo_valid={len(normalized_pseudo_rows)} | pseudo_used={n_train_pseudo}"
+    )
 else:
     split_names = ["train", "validation", "test"]
 
@@ -251,7 +331,7 @@ else:
     log("Loading dataset ...")
     dataset = load_dataset("json", data_files=dataset_files)
 
-    keep_cols = ["text", "toxicity"]
+    keep_cols = ["text", "toxicity", "constructiveness"]
     for split in split_names:
         dataset[split] = dataset[split].remove_columns([c for c in dataset[split].column_names if c not in keep_cols])
 
@@ -281,12 +361,12 @@ if args.dry_run:
     log("Dry run mode enabled. Validating config and inputs only.")
     log(
         "Dry run config: "
-        f"mode={'mixed' if MIXED_MODE else 'gold_only'} | "
+        f"mode={'mixed' if ACTIVE_MIXED_MODE else 'gold_only'} | "
         f"gold_data_dir={gold_data_dir_used} | gold_dataset_prefix={gold_prefix_used or '<none>'} | "
         f"pseudo_dir={PSEUDO_LABELS_DIR or '<unset>'} | pseudo_loss_weight={PSEUDO_LOSS_WEIGHT} | "
         f"max_pseudo_ratio={MAX_PSEUDO_RATIO} | run_manifest_dir={RUN_MANIFEST_DIR}"
     )
-    if MIXED_MODE:
+    if ACTIVE_MIXED_MODE:
         log(
             "Dry run pseudo lineage: "
             f"batch_id={pseudo_manifest.get('batch_id')} | seed_model={pseudo_manifest.get('seed_model')} | "
@@ -313,10 +393,30 @@ def tokenize_batch(examples):
 
 log("Tokenizing...")
 tokenized_dataset = dataset.map(tokenize_batch, batched=True)
-if "toxicity" in tokenized_dataset["train"].column_names:
-    tokenized_dataset = tokenized_dataset.rename_column("toxicity", "labels")
 
-allowed_feature_cols = {"input_ids", "attention_mask", "token_type_ids", "labels", "is_pseudo", "sample_weight"}
+def build_multitask_labels(example):
+    toxicity = int(example["toxicity"])
+    constructiveness_raw = example.get("constructiveness")
+    try:
+        constructiveness = int(constructiveness_raw)
+    except (TypeError, ValueError):
+        constructiveness = 0
+        constructiveness_mask = 0.0
+    else:
+        constructiveness_mask = 1.0 if constructiveness in (0, 1) else 0.0
+        if constructiveness not in (0, 1):
+            constructiveness = 0
+    return {
+        "labels": [float(toxicity), float(constructiveness)],
+        "constructiveness_mask": float(constructiveness_mask),
+    }
+
+tokenized_dataset = tokenized_dataset.map(build_multitask_labels)
+
+allowed_feature_cols = {
+    "input_ids", "attention_mask", "token_type_ids",
+    "labels", "constructiveness_mask", "is_pseudo", "sample_weight",
+}
 remove_cols = [c for c in tokenized_dataset["train"].column_names if c not in allowed_feature_cols]
 if remove_cols:
     tokenized_dataset = tokenized_dataset.remove_columns(remove_cols)
@@ -327,16 +427,27 @@ base_data_collator = DataCollatorWithPadding(tokenizer=tokenizer, padding="longe
 def data_collator(features):
     sample_weight = torch.tensor([float(f.pop("sample_weight", 1.0)) for f in features], dtype=torch.float)
     is_pseudo = torch.tensor([int(f.pop("is_pseudo", 0)) for f in features], dtype=torch.long)
+    constructiveness_mask = torch.tensor(
+        [float(f.pop("constructiveness_mask", 1.0)) for f in features],
+        dtype=torch.float,
+    )
     batch = base_data_collator(features)
     batch["sample_weight"] = sample_weight
     batch["is_pseudo"] = is_pseudo
+    batch["constructiveness_mask"] = constructiveness_mask
     return batch
 
 # ================================================================
 # Base model + dropout tweaks
 # ================================================================
 log("Loading base model ...")
-model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME, num_labels=2)
+model = AutoModelForSequenceClassification.from_pretrained(
+    MODEL_NAME,
+    num_labels=2,
+    problem_type="multi_label_classification",
+    id2label={0: "toxicity", 1: "constructiveness"},
+    label2id={"toxicity": 0, "constructiveness": 1},
+)
 
 for attr, default in [
     ("classifier_dropout",         HEAD_DROPOUT),
@@ -350,37 +461,73 @@ for attr, default in [
 # ================================================================
 # Class weights
 # ================================================================
-train_labels = torch.tensor(tokenized_dataset["train"]["labels"])
-counts = torch.bincount(train_labels, minlength=2)
+train_labels_col = list(tokenized_dataset["train"]["labels"])
+if train_labels_col and isinstance(train_labels_col[0], torch.Tensor):
+    train_labels = torch.stack(train_labels_col).to(dtype=torch.float)
+else:
+    train_labels = torch.tensor(train_labels_col, dtype=torch.float)
+train_toxic_labels = train_labels[:, TOXICITY_TASK_INDEX].long()
+train_constructiveness_labels = train_labels[:, CONSTRUCTIVENESS_TASK_INDEX].long()
+constructiveness_mask_col = list(tokenized_dataset["train"]["constructiveness_mask"])
+if constructiveness_mask_col and isinstance(constructiveness_mask_col[0], torch.Tensor):
+    constructiveness_masks = torch.stack(constructiveness_mask_col).to(dtype=torch.bool)
+else:
+    constructiveness_masks = torch.tensor(constructiveness_mask_col, dtype=torch.bool)
+counts = torch.bincount(train_toxic_labels, minlength=2)
 num_clean, num_toxic = counts[0].item(), counts[1].item()
 log(f"Train counts -> clean={num_clean}, toxic={num_toxic}")
 raw_toxic_weight = num_clean / max(1, num_toxic)
-class_weights = torch.tensor([1.0, raw_toxic_weight * TOXIC_WEIGHT_SCALE], dtype=torch.float)
-log(f"Class weights (scaled): {class_weights.tolist()}  raw={raw_toxic_weight:.4f} scale={TOXIC_WEIGHT_SCALE}")
+construct_counts = torch.bincount(train_constructiveness_labels[constructiveness_masks], minlength=2)
+num_nonconstructive, num_constructive = construct_counts[0].item(), construct_counts[1].item()
+raw_constructiveness_weight = num_nonconstructive / max(1, num_constructive)
+class_weights = torch.tensor(
+    [
+        raw_toxic_weight * TOXIC_WEIGHT_SCALE,
+        raw_constructiveness_weight * CONSTRUCTIVENESS_WEIGHT_SCALE,
+    ],
+    dtype=torch.float,
+)
+task_loss_weights = torch.tensor([1.0, CONSTRUCTIVENESS_LOSS_WEIGHT], dtype=torch.float)
+log(
+    "Positive class weights (scaled) -> "
+    f"toxicity={class_weights[0].item():.4f} raw={raw_toxic_weight:.4f} scale={TOXIC_WEIGHT_SCALE} | "
+    f"constructiveness={class_weights[1].item():.4f} raw={raw_constructiveness_weight:.4f} "
+    f"scale={CONSTRUCTIVENESS_WEIGHT_SCALE}"
+)
+log(
+    "Constructiveness counts -> "
+    f"non_constructive={num_nonconstructive}, constructive={num_constructive}, "
+    f"loss_weight={CONSTRUCTIVENESS_LOSS_WEIGHT}"
+)
 
 # ================================================================
 # Custom trainer with weighted / focal loss
 # ================================================================
-def focal_loss(logits, labels, weight=None, gamma=2.0, reduction="mean"):
-    logp  = F.log_softmax(logits, dim=-1)
-    p     = torch.exp(logp)
-    pt    = p.gather(1, labels.unsqueeze(1)).squeeze(1)
-    logpt = logp.gather(1, labels.unsqueeze(1)).squeeze(1)
-    at    = weight.to(logits.device).gather(0, labels) if weight is not None else 1.0
-    loss  = -at * (1 - pt) ** gamma * logpt
+def focal_loss(logits, labels, pos_weight=None, gamma=2.0, reduction="mean"):
+    bce = F.binary_cross_entropy_with_logits(
+        logits,
+        labels.float(),
+        pos_weight=pos_weight,
+        reduction="none",
+    )
+    probs = torch.sigmoid(logits)
+    pt = probs * labels + (1.0 - probs) * (1.0 - labels)
+    loss = ((1.0 - pt) ** gamma) * bce
     if reduction == "none":
         return loss
     return loss.mean()
 
 class WeightedTrainer(Trainer):
     def __init__(self, *args, class_weights=None, label_smoothing=0.0,
-                 use_focal=False, focal_gamma=2.0, max_pseudo_ratio=1.0, **kwargs):
+                 use_focal=False, focal_gamma=2.0, max_pseudo_ratio=1.0,
+                 task_loss_weights=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.class_weights   = class_weights
         self.label_smoothing = float(label_smoothing or 0.0)
         self.use_focal       = bool(use_focal)
         self.focal_gamma     = float(focal_gamma)
         self.max_pseudo_ratio = float(max_pseudo_ratio)
+        self.task_loss_weights = task_loss_weights
 
         self._samples_seen = 0
         self._pseudo_seen = 0
@@ -405,13 +552,21 @@ class WeightedTrainer(Trainer):
         labels = inputs["labels"]
         sample_weight = inputs.get("sample_weight", None)
         is_pseudo = inputs.get("is_pseudo", None)
+        constructiveness_mask = inputs.get("constructiveness_mask", None)
 
-        model_inputs = {k: v for k, v in inputs.items() if k not in {"labels", "sample_weight", "is_pseudo"}}
+        model_inputs = {
+            k: v for k, v in inputs.items()
+            if k not in {"labels", "sample_weight", "is_pseudo", "constructiveness_mask"}
+        }
         outputs = model(**model_inputs)
         logits = outputs["logits"]
         w = self.class_weights.to(logits.device) if self.class_weights is not None else None
 
-        keep_mask = torch.ones_like(labels, dtype=torch.bool)
+        if labels.dim() == 1:
+            labels = F.one_hot(labels.long(), num_classes=2).float()
+        labels = labels.float()
+
+        keep_mask = torch.ones(labels.shape[0], dtype=torch.bool, device=labels.device)
         pseudo_count = 0
         dropped_count = 0
 
@@ -441,14 +596,29 @@ class WeightedTrainer(Trainer):
         labels_kept = labels[keep_mask]
 
         if self.use_focal:
-            per_loss = focal_loss(logits_kept, labels_kept, weight=w, gamma=self.focal_gamma, reduction="none")
-        elif self.label_smoothing > 0.0:
-            lp = F.log_softmax(logits_kept, dim=-1)
-            nll = F.nll_loss(lp, labels_kept, weight=w, reduction="none")
-            smooth = -lp.mean(dim=-1)
-            per_loss = (1 - self.label_smoothing) * nll + self.label_smoothing * smooth
+            per_task_loss = focal_loss(logits_kept, labels_kept, pos_weight=w, gamma=self.focal_gamma, reduction="none")
         else:
-            per_loss = torch.nn.CrossEntropyLoss(weight=w, reduction="none")(logits_kept, labels_kept)
+            smoothed_labels = labels_kept
+            if self.label_smoothing > 0.0:
+                smoothing = self.label_smoothing
+                smoothed_labels = labels_kept * (1.0 - smoothing) + 0.5 * smoothing
+            per_task_loss = F.binary_cross_entropy_with_logits(
+                logits_kept,
+                smoothed_labels,
+                pos_weight=w,
+                reduction="none",
+            )
+
+        label_mask = torch.ones_like(per_task_loss)
+        if constructiveness_mask is not None:
+            label_mask[:, CONSTRUCTIVENESS_TASK_INDEX] = constructiveness_mask.to(label_mask.device).float()[keep_mask]
+        task_weights = (
+            self.task_loss_weights.to(per_task_loss.device)
+            if self.task_loss_weights is not None
+            else torch.ones(per_task_loss.shape[1], device=per_task_loss.device)
+        )
+        weighted_loss = per_task_loss * label_mask * task_weights
+        per_loss = weighted_loss.sum(dim=1) / (label_mask * task_weights).sum(dim=1).clamp_min(1e-12)
 
         if sample_weight is not None:
             sw = sample_weight.to(per_loss.device).float()
@@ -473,13 +643,22 @@ class WeightedTrainer(Trainer):
 # ================================================================
 # Metrics helpers
 # ================================================================
-def softmax_probs(logits):
-    x = logits - np.max(logits, axis=1, keepdims=True)
-    e = np.exp(x)
-    return e / (e.sum(axis=1, keepdims=True) + EPS)
+def sigmoid_probs(logits):
+    logits = np.asarray(logits, dtype=np.float64)
+    return 1.0 / (1.0 + np.exp(-logits))
 
-def softmax_probs_temp(logits, temperature):
-    return softmax_probs(logits / max(float(temperature), 1e-6))
+def sigmoid_probs_temp(logits, temperature):
+    return sigmoid_probs(np.asarray(logits) / max(float(temperature), 1e-6))
+
+def task_labels(labels, task_index=TOXICITY_TASK_INDEX):
+    labels = np.asarray(labels)
+    if labels.ndim == 1:
+        return labels.astype(int)
+    return labels[:, task_index].astype(int)
+
+def task_probabilities(logits, task_index=TOXICITY_TASK_INDEX, temperature=None):
+    probs = sigmoid_probs_temp(logits, temperature) if temperature else sigmoid_probs(logits)
+    return probs[:, task_index]
 
 def calibration_bins(y_true, prob_pos, n_bins=10):
     y_true = y_true.astype(int)
@@ -528,15 +707,29 @@ def confusion_stats(labels, preds):
 
 def compute_metrics(eval_pred):
     logits, labels = eval_pred
-    preds = np.argmax(logits, axis=1)
-    pm    = per_class_metrics(labels, preds)
+    probs = sigmoid_probs(logits)
+    toxicity_labels = task_labels(labels, TOXICITY_TASK_INDEX)
+    toxicity_preds = (probs[:, TOXICITY_TASK_INDEX] >= 0.5).astype(int)
+    pm = per_class_metrics(toxicity_labels, toxicity_preds)
+    constructiveness_labels = task_labels(labels, CONSTRUCTIVENESS_TASK_INDEX)
+    constructiveness_preds = (probs[:, CONSTRUCTIVENESS_TASK_INDEX] >= 0.5).astype(int)
+    constructiveness_macro_f1 = float(
+        f1_score(constructiveness_labels, constructiveness_preds, average="macro", zero_division=0)
+    )
+    constructiveness_f1_positive = float(
+        f1_score(constructiveness_labels, constructiveness_preds, pos_label=1, zero_division=0)
+    )
+    toxicity_macro_f1 = float(f1_score(toxicity_labels, toxicity_preds, average="macro", zero_division=0))
     return {
-        "accuracy":        float((preds == labels).mean()),
-        "balanced_acc":    float(balanced_accuracy_score(labels, preds)),
-        "macro_f1":        float(f1_score(labels, preds, average="macro", zero_division=0)),
-        "mcc":             float(matthews_corrcoef(labels, preds)),
+        "accuracy":        float((toxicity_preds == toxicity_labels).mean()),
+        "balanced_acc":    float(balanced_accuracy_score(toxicity_labels, toxicity_preds)),
+        "macro_f1":        toxicity_macro_f1,
+        "mcc":             float(matthews_corrcoef(toxicity_labels, toxicity_preds)),
         "f1_toxic":        pm["f1_toxic"], "f1_clean":        pm["f1_clean"],
         "precision_toxic": pm["precision_toxic"], "recall_toxic": pm["recall_toxic"],
+        "constructiveness_macro_f1": constructiveness_macro_f1,
+        "constructiveness_f1_positive": constructiveness_f1_positive,
+        "multitask_macro_f1": float((toxicity_macro_f1 + constructiveness_macro_f1) / 2.0),
     }
 
 def evaluate_from_probs(prob_pos, labels, threshold=0.5):
@@ -568,12 +761,11 @@ def evaluate_from_probs(prob_pos, labels, threshold=0.5):
         "classification_report": report,
         "calibration_bins": calibration_bins(labels, prob_pos, n_bins=N_BINS_ECE),
     }
-    return metrics, pred
+    return metrics, prob_pos, pred
 
 def evaluate_from_logits(logits, labels, threshold=0.5, temperature=None):
-    probs    = softmax_probs_temp(logits, temperature) if temperature else softmax_probs(logits)
-    prob_pos = probs[:, 1]
-    metrics, preds = evaluate_from_probs(prob_pos, labels, threshold=threshold)
+    prob_pos = task_probabilities(logits, TOXICITY_TASK_INDEX, temperature=temperature)
+    metrics, _, preds = evaluate_from_probs(prob_pos, task_labels(labels, TOXICITY_TASK_INDEX), threshold=threshold)
     if temperature is not None:
         metrics["temperature"] = float(temperature)
     return metrics, prob_pos, preds
@@ -604,19 +796,19 @@ class TemperatureScaler(torch.nn.Module):
 
 def fit_temperature_scaler(logits_np, labels_np, lr=0.01, max_iters=300):
     device  = "cuda" if torch.cuda.is_available() else "cpu"
-    logits  = torch.tensor(logits_np, dtype=torch.float32, device=device)
-    labels  = torch.tensor(labels_np, dtype=torch.long,    device=device)
+    logits  = torch.tensor(np.asarray(logits_np)[:, TOXICITY_TASK_INDEX], dtype=torch.float32, device=device)
+    labels  = torch.tensor(task_labels(labels_np, TOXICITY_TASK_INDEX), dtype=torch.float32, device=device)
     scaler  = TemperatureScaler().to(device)
     opt     = torch.optim.LBFGS(scaler.parameters(), lr=lr, max_iter=max_iters)
     def closure():
         opt.zero_grad()
-        loss = F.cross_entropy(scaler(logits), labels)
+        loss = F.binary_cross_entropy_with_logits(scaler(logits), labels)
         loss.backward()
         return loss
     opt.step(closure)
     with torch.no_grad():
         temp = float(scaler.temperature.cpu().item())
-        nll  = float(F.cross_entropy(scaler(logits), labels).cpu().item())
+        nll  = float(F.binary_cross_entropy_with_logits(scaler(logits), labels).cpu().item())
     return temp, nll
 
 # ================================================================
@@ -653,6 +845,7 @@ trainer = WeightedTrainer(
     label_smoothing=LABEL_SMOOTHING,
     use_focal=USE_FOCAL, focal_gamma=FOCAL_GAMMA,
     max_pseudo_ratio=MAX_PSEUDO_RATIO,
+    task_loss_weights=task_loss_weights,
     callbacks=[EarlyStoppingCallback(early_stopping_patience=EARLY_STOP_PATIENCE)],
 )
 
@@ -673,7 +866,7 @@ log(
 best_model_path = OUTPUT_BASE
 model.save_pretrained(best_model_path)
 tokenizer.save_pretrained(best_model_path)
-log(f"Saved model → {best_model_path}")
+log(f"Saved model â†’ {best_model_path}")
 
 # ================================================================
 # Inference
@@ -681,22 +874,25 @@ log(f"Saved model → {best_model_path}")
 log("Running prediction on validation / test...")
 val_out     = trainer.predict(tokenized_dataset["validation"])
 val_logits, val_labels = val_out.predictions, val_out.label_ids
+val_toxic_labels = task_labels(val_labels, TOXICITY_TASK_INDEX)
 
 test_out    = trainer.predict(tokenized_dataset["test"])
 test_logits, test_labels = test_out.predictions, test_out.label_ids
+test_toxic_labels = task_labels(test_labels, TOXICITY_TASK_INDEX)
+test_constructiveness_labels = task_labels(test_labels, CONSTRUCTIVENESS_TASK_INDEX)
 
 # ================================================================
 # Baseline eval
 # ================================================================
-test_pred_argmax = np.argmax(test_logits, axis=1)
-pm_argmax        = per_class_metrics(test_labels, test_pred_argmax)
+test_pred_argmax = (task_probabilities(test_logits, TOXICITY_TASK_INDEX) >= 0.5).astype(int)
+pm_argmax        = per_class_metrics(test_toxic_labels, test_pred_argmax)
 test_argmax_basic = {
-    "accuracy":     float((test_pred_argmax==test_labels).mean()),
-    "balanced_acc": float(balanced_accuracy_score(test_labels, test_pred_argmax)),
-    "macro_f1":     float(f1_score(test_labels, test_pred_argmax, average="macro", zero_division=0)),
-    "mcc":          float(matthews_corrcoef(test_labels, test_pred_argmax)),
+    "accuracy":     float((test_pred_argmax==test_toxic_labels).mean()),
+    "balanced_acc": float(balanced_accuracy_score(test_toxic_labels, test_pred_argmax)),
+    "macro_f1":     float(f1_score(test_toxic_labels, test_pred_argmax, average="macro", zero_division=0)),
+    "mcc":          float(matthews_corrcoef(test_toxic_labels, test_pred_argmax)),
     **pm_argmax,
-    "confusion_matrix": confusion_matrix(test_labels, test_pred_argmax, labels=[0,1]).tolist(),
+    "confusion_matrix": confusion_matrix(test_toxic_labels, test_pred_argmax, labels=[0,1]).tolist(),
 }
 log(f"Test metrics (argmax): {test_argmax_basic}")
 
@@ -786,18 +982,18 @@ if USE_TEMP_SCALING:
     )
     log(f"Temperature: T={best_temperature:.6f}, val_nll={val_temp_nll:.6f}")
 
-    raw_p    = softmax_probs(val_logits)[:,1]
-    scaled_p = softmax_probs_temp(val_logits, best_temperature)[:,1]
+    raw_p    = task_probabilities(val_logits, TOXICITY_TASK_INDEX)
+    scaled_p = task_probabilities(val_logits, TOXICITY_TASK_INDEX, temperature=best_temperature)
     temperature_result = {
         "temperature":      float(best_temperature),
         "val_nll_after":    float(val_temp_nll),
-        "val_ece_before":   ece_score(val_labels, raw_p,    n_bins=N_BINS_ECE),
-        "val_ece_after":    ece_score(val_labels, scaled_p, n_bins=N_BINS_ECE),
-        "val_brier_before": float(np.mean((raw_p    - val_labels.astype(float))**2)),
-        "val_brier_after":  float(np.mean((scaled_p - val_labels.astype(float))**2)),
+        "val_ece_before":   ece_score(val_toxic_labels, raw_p,    n_bins=N_BINS_ECE),
+        "val_ece_after":    ece_score(val_toxic_labels, scaled_p, n_bins=N_BINS_ECE),
+        "val_brier_before": float(np.mean((raw_p    - val_toxic_labels.astype(float))**2)),
+        "val_brier_after":  float(np.mean((scaled_p - val_toxic_labels.astype(float))**2)),
     }
-    log(f"ECE: {temperature_result['val_ece_before']:.4f} → {temperature_result['val_ece_after']:.4f}  "
-        f"Brier: {temperature_result['val_brier_before']:.4f} → {temperature_result['val_brier_after']:.4f}")
+    log(f"ECE: {temperature_result['val_ece_before']:.4f} â†’ {temperature_result['val_ece_after']:.4f}  "
+        f"Brier: {temperature_result['val_brier_before']:.4f} â†’ {temperature_result['val_brier_after']:.4f}")
 
     val_scaled_rows, val_scaled_best_by_objective = threshold_sweep(
         val_logits, val_labels,
@@ -846,12 +1042,28 @@ log(f"FINAL: macro_f1={final_test_rich['macro_f1']:.4f} f1_toxic={final_test_ric
     f"fpr={final_test_rich['fpr']:.4f} fnr={final_test_rich['fnr']:.4f} "
     f"ece={final_test_rich['ece']:.4f} brier={final_test_rich['brier']:.4f}")
 
+test_constructiveness_probs = task_probabilities(test_logits, CONSTRUCTIVENESS_TASK_INDEX)
+test_constructiveness_thr05_rich, _, test_constructiveness_preds = evaluate_from_probs(
+    test_constructiveness_probs,
+    test_constructiveness_labels,
+    threshold=0.5,
+)
+log(
+    "Constructiveness @thr=0.50: "
+    f"macro_f1={test_constructiveness_thr05_rich['macro_f1']:.4f} "
+    f"f1_positive={test_constructiveness_thr05_rich['f1_toxic']:.4f}"
+)
+
 # ================================================================
 # Save calibration package
 # ================================================================
 threshold_path = f"{best_model_path}/threshold.json"
 with open(threshold_path,"w",encoding="utf-8") as f:
     json.dump({"version": "phobert_full",
+               "problem_type": "multi_label_classification",
+               "tasks": TASK_LABELS,
+               "toxicity_logit_index": TOXICITY_TASK_INDEX,
+               "constructiveness_logit_index": CONSTRUCTIVENESS_TASK_INDEX,
                "selection_metric": PRIMARY_THRESHOLD_OBJECTIVE,
                "deployment_mode": deploy_mode,
                "threshold": float(deploy_threshold),
@@ -876,15 +1088,17 @@ with open(f"{RESULTS_BASE}/calibration_summary.json","w",encoding="utf-8") as f:
 # Error analysis
 # ================================================================
 test_texts = raw_text["test"] or ["<NO_TEXT>"] * len(test_labels)
-fn_idx = np.where((test_labels==1) & (final_test_preds==0))[0]
-fp_idx = np.where((test_labels==0) & (final_test_preds==1))[0]
+fn_idx = np.where((test_toxic_labels==1) & (final_test_preds==0))[0]
+fp_idx = np.where((test_toxic_labels==0) & (final_test_preds==1))[0]
 rng    = np.random.default_rng(SEED)
 fn_pick = rng.choice(fn_idx, size=min(N_ERROR_SAMPLES,len(fn_idx)), replace=False) if len(fn_idx) else []
 fp_pick = rng.choice(fp_idx, size=min(N_ERROR_SAMPLES,len(fp_idx)), replace=False) if len(fp_idx) else []
 
 def pack_samples(idxs, kind):
     out = [{"index": int(i), "type": kind, "text": test_texts[int(i)],
-            "label_true": int(test_labels[int(i)]), "prob_toxic": float(final_test_probs[int(i)]),
+            "label_true": int(test_toxic_labels[int(i)]),
+            "constructiveness_true": int(test_constructiveness_labels[int(i)]),
+            "prob_toxic": float(final_test_probs[int(i)]),
             "pred": int(final_test_preds[int(i)])} for i in idxs]
     out.sort(key=lambda x: x["prob_toxic"], reverse=(kind=="FP"))
     return out
@@ -893,7 +1107,7 @@ with open(f"{RESULTS_BASE}/error_analysis.json","w",encoding="utf-8") as f:
     json.dump({"deployment_mode": deploy_mode, "threshold_used": float(deploy_threshold),
                "temperature_used": deploy_temperature,
                "counts": {"FN": int(len(fn_idx)), "FP": int(len(fp_idx)),
-                          "total_test": int(len(test_labels))},
+                          "total_test": int(len(test_toxic_labels))},
                "FN_samples": pack_samples(fn_pick,"FN"),
                "FP_samples": pack_samples(fp_pick,"FP")}, f, ensure_ascii=False, indent=2)
 
@@ -915,11 +1129,19 @@ results = {
         "primary_threshold_objective": PRIMARY_THRESHOLD_OBJECTIVE,
         "ece_bins": N_BINS_ECE, "use_temp_scaling": USE_TEMP_SCALING,
         "temp_lr": TEMP_LR, "temp_max_iters": TEMP_MAX_ITERS,
-        "training_type": "pseudo_label_augmented" if MIXED_MODE else "gold_only",
+        "training_type": "pseudo_label_augmented" if ACTIVE_MIXED_MODE else "gold_only",
         "pseudo_loss_weight": PSEUDO_LOSS_WEIGHT,
         "max_pseudo_ratio": MAX_PSEUDO_RATIO,
+        "tasks": TASK_LABELS,
+        "constructiveness_loss_weight": CONSTRUCTIVENESS_LOSS_WEIGHT,
+        "constructiveness_weight_scale": CONSTRUCTIVENESS_WEIGHT_SCALE,
     },
-    "train_label_counts": {"clean": int(num_clean), "toxic": int(num_toxic)},
+    "train_label_counts": {
+        "clean": int(num_clean),
+        "toxic": int(num_toxic),
+        "non_constructive": int(num_nonconstructive),
+        "constructive": int(num_constructive),
+    },
     "train_composition": {
         "n_gold": int(n_train_gold),
         "n_pseudo": int(n_train_pseudo),
@@ -928,6 +1150,7 @@ results = {
         "pseudo_ratio_stats": pseudo_ratio_stats,
     },
     "class_weights": [float(x) for x in class_weights.tolist()],
+    "task_loss_weights": [float(x) for x in task_loss_weights.tolist()],
     "best_model_checkpoint": trainer.state.best_model_checkpoint,
     "test_argmax_basic":       test_argmax_basic,
     "test_threshold_0p5_rich": test_thr05_rich,
@@ -941,6 +1164,7 @@ results = {
     },
     "test_tuned_raw_threshold_rich":    test_tuned_raw_rich,
     "test_tuned_scaled_threshold_rich": test_tuned_scaled_rich,
+    "test_constructiveness_threshold_0p5_rich": test_constructiveness_thr05_rich,
     "deployment_selection": {"mode": deploy_mode,
                              "threshold": float(deploy_threshold),
                              "temperature": deploy_temperature},
@@ -970,7 +1194,7 @@ for row in trainer.state.log_history:
 training_manifest = {
     "run_id": RUN_ID,
     "trained_at": datetime.now(timezone.utc).isoformat(),
-    "training_type": "pseudo_label_augmented" if MIXED_MODE else "gold_only",
+    "training_type": "pseudo_label_augmented" if ACTIVE_MIXED_MODE else "gold_only",
     "gold_data": {
         "dir": gold_data_dir_used,
         "prefix": gold_prefix_used,
@@ -986,7 +1210,7 @@ training_manifest = {
         "n_accepted_clean": int(pseudo_manifest.get("n_accepted_clean", 0)),
         "pseudo_loss_weight": float(PSEUDO_LOSS_WEIGHT),
         "max_pseudo_ratio": float(MAX_PSEUDO_RATIO),
-    } if MIXED_MODE else None,
+    } if ACTIVE_MIXED_MODE else None,
     "hyperparams": {
         "base_model": MODEL_NAME,
         "epochs": int(EPOCHS),
@@ -994,6 +1218,8 @@ training_manifest = {
         "batch_size": int(BATCH_SIZE),
         "max_length": int(MAX_LENGTH),
         "seed": int(SEED),
+        "tasks": TASK_LABELS,
+        "constructiveness_loss_weight": float(CONSTRUCTIVENESS_LOSS_WEIGHT),
     },
     "results": {
         "best_epoch": best_epoch,
@@ -1001,6 +1227,8 @@ training_manifest = {
         "best_eval_macro_f1": best_eval_macro_f1,
         "test_f1_toxic": float(final_test_rich.get("f1_toxic")) if final_test_rich.get("f1_toxic") is not None else None,
         "test_macro_f1": float(final_test_rich.get("macro_f1")) if final_test_rich.get("macro_f1") is not None else None,
+        "test_constructiveness_macro_f1": float(test_constructiveness_thr05_rich.get("macro_f1"))
+        if test_constructiveness_thr05_rich.get("macro_f1") is not None else None,
     },
     "promotion_status": "pending",
 }
@@ -1031,6 +1259,8 @@ for row in trainer.state.log_history:
             curve_row["f1"] = row.get("eval_macro_f1")
         if "eval_f1_toxic" in row:
             curve_row["f1_toxic"] = row.get("eval_f1_toxic")
+        if "eval_constructiveness_macro_f1" in row:
+            curve_row["constructiveness_macro_f1"] = row.get("eval_constructiveness_macro_f1")
         curve.append(curve_row)
 
 run_config = {
@@ -1056,6 +1286,8 @@ run_config = {
         "use_focal": USE_FOCAL,
         "focal_gamma": FOCAL_GAMMA,
         "primary_metric": PRIMARY_METRIC,
+        "tasks": TASK_LABELS,
+        "constructiveness_loss_weight": CONSTRUCTIVENESS_LOSS_WEIGHT,
     },
 }
 
@@ -1071,10 +1303,12 @@ metrics_out = {
     "precision": metrics_payload.get("precision_toxic"),
     "recall": metrics_payload.get("recall_toxic"),
     "accuracy": metrics_payload.get("accuracy"),
+    "constructiveness_macro_f1": test_constructiveness_thr05_rich.get("macro_f1"),
+    "constructiveness_f1_positive": test_constructiveness_thr05_rich.get("f1_toxic"),
 }
 
-training_type = "pseudo_label_augmented" if MIXED_MODE else "gold_only"
-pseudo_batch_id = pseudo_manifest.get("batch_id") if MIXED_MODE and pseudo_manifest else "none"
+training_type = "pseudo_label_augmented" if ACTIVE_MIXED_MODE else "gold_only"
+pseudo_batch_id = pseudo_manifest.get("batch_id") if ACTIVE_MIXED_MODE and pseudo_manifest else "none"
 
 def _build_epoch_mlflow_metrics(log_history):
     rows = []
@@ -1087,12 +1321,16 @@ def _build_epoch_mlflow_metrics(log_history):
             latest_train_loss = float(entry["loss"])
             rows.append((step, {"train_loss": latest_train_loss}))
 
-        if any(k in entry for k in ["eval_f1_toxic", "eval_macro_f1", "eval_loss"]):
+        if any(k in entry for k in [
+            "eval_f1_toxic", "eval_macro_f1", "eval_constructiveness_macro_f1", "eval_loss"
+        ]):
             metrics = {}
             if entry.get("eval_f1_toxic") is not None:
                 metrics["eval_f1_toxic"] = float(entry["eval_f1_toxic"])
             if entry.get("eval_macro_f1") is not None:
                 metrics["eval_macro_f1"] = float(entry["eval_macro_f1"])
+            if entry.get("eval_constructiveness_macro_f1") is not None:
+                metrics["eval_constructiveness_macro_f1"] = float(entry["eval_constructiveness_macro_f1"])
             if entry.get("eval_loss") is not None:
                 metrics["eval_loss"] = float(entry["eval_loss"])
             if latest_train_loss is not None:
@@ -1113,8 +1351,10 @@ mlflow_params = {
     "seed": int(SEED),
     "gold_n_train": int(n_train_gold),
     "gold_n_val": int(len(dataset["validation"])),
+    "tasks": ",".join(TASK_LABELS),
+    "constructiveness_loss_weight": float(CONSTRUCTIVENESS_LOSS_WEIGHT),
 }
-if MIXED_MODE and pseudo_manifest:
+if ACTIVE_MIXED_MODE and pseudo_manifest:
     mlflow_params.update({
         "pseudo_loss_weight": float(PSEUDO_LOSS_WEIGHT),
         "max_pseudo_ratio": float(MAX_PSEUDO_RATIO),
@@ -1163,6 +1403,7 @@ if mlflow_active and mlflow is not None:
         final_mlflow_metrics = {
             "test_f1_toxic": float(final_test_rich.get("f1_toxic") or 0.0),
             "test_macro_f1": float(final_test_rich.get("macro_f1") or 0.0),
+            "test_constructiveness_macro_f1": float(test_constructiveness_thr05_rich.get("macro_f1") or 0.0),
         }
         for k, v in final_mlflow_metrics.items():
             try:
@@ -1189,24 +1430,21 @@ zip_names = {
     "best": f"best_model_full_{run_dataset_tag}",
     "results": f"results_full_{run_dataset_tag}",
 }
+ZIP_OUTPUT_DIR = os.environ.get("ZIP_OUTPUT_DIR", DATA_DIR)
+os.makedirs(ZIP_OUTPUT_DIR, exist_ok=True)
+
 for name, path in [
     (zip_names["best"], best_model_path),
     (zip_names["results"], RESULTS_BASE),
 ]:
     if os.path.exists(path):
-        log(f"Zipping {path} → {name}.zip ...")
-        shutil.make_archive(name, "zip", path)
+        zip_base = os.path.join(ZIP_OUTPUT_DIR, name)
+        log(f"Zipping {path} â†’ {zip_base}.zip ...")
+        shutil.make_archive(zip_base, "zip", path)
 
-log("All zips created.")
-
-try:
-    from google.colab import files
-    files.download(f"{zip_names['best']}.zip")
-    files.download(f"{zip_names['results']}.zip")
-    log("Download triggered.")
-except Exception:
-    log("Not running in Colab, skip files.download().")
+log(f"All zips created in {ZIP_OUTPUT_DIR}")
 
 print(f"Model saved to {best_model_path}", flush=True)
 print(f"Run manifest: {run_manifest_path}", flush=True)
-print("Promotion status: pending — run Phase E promotion check", flush=True)
+print("Promotion status: pending â€” run Phase E promotion check", flush=True)
+

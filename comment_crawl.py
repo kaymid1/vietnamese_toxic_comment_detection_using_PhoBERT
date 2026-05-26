@@ -85,6 +85,8 @@ def _is_transient_crawl_error(exc: Exception) -> bool:
     transient_tokens = [
         "timeout",
         "timed out",
+        "runtime budget",
+        "exceeded crawl runtime budget",
         "net::err",
         "connection",
         "disconnected",
@@ -96,6 +98,11 @@ def _is_transient_crawl_error(exc: Exception) -> bool:
         "chrome not reachable",
     ]
     return any(token in text for token in transient_tokens)
+
+
+def _is_runtime_budget_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return "exceeded crawl runtime budget" in text or "runtime budget" in text
 
 
 # ---------------------------------------------------------------------------
@@ -708,13 +715,16 @@ class NewsSiteCommentCrawler:
         headless: bool = True,
         max_load_more_clicks: int = 15,
         max_runtime_seconds: int = 90,
+        max_comments_per_url: int = 0,
     ):
         self.headless = headless
         self.max_load_more_clicks = max_load_more_clicks
         self.max_runtime_seconds = max_runtime_seconds
+        self.max_comments_per_url = max(0, int(max_comments_per_url))
         self.last_block_reason: str | None = None
         self.last_warnings: list[str] = []
         self.last_attempts: int = 0
+        self.last_comment_cap_hit: bool = False
 
     # ---- public API ----
 
@@ -723,6 +733,7 @@ class NewsSiteCommentCrawler:
         self.last_block_reason = None
         self.last_warnings = []
         self.last_attempts = 0
+        self.last_comment_cap_hit = False
 
         attempts = max(1, CRAWL_RETRY_MAX_ATTEMPTS)
         for attempt in range(1, attempts + 1):
@@ -746,7 +757,27 @@ class NewsSiteCommentCrawler:
                     )
                     return []
 
-                if attempt >= attempts or not _is_transient_crawl_error(exc):
+                is_transient = _is_transient_crawl_error(exc)
+                is_runtime_budget = _is_runtime_budget_error(exc)
+                if attempt >= attempts and is_transient:
+                    msg = (
+                        f"Crawler exhausted transient retries ({attempts}/{attempts}) for {url}: {exc}. "
+                        "Returning no comments instead of failing hard."
+                    )
+                    self.last_warnings.append(msg)
+                    logger.warning(msg)
+                    return []
+
+                if attempt >= attempts and is_runtime_budget:
+                    msg = (
+                        f"Crawler hit runtime budget on final attempt ({attempts}/{attempts}) for {url}: {exc}. "
+                        "Returning no comments instead of failing hard."
+                    )
+                    self.last_warnings.append(msg)
+                    logger.warning(msg)
+                    return []
+
+                if attempt >= attempts or not is_transient:
                     self.last_warnings.append(str(exc))
                     raise
 
@@ -846,18 +877,41 @@ class NewsSiteCommentCrawler:
             self._wait_for_comment_readiness(driver, selectors)
             _raise_if_deadline_passed("comment readiness wait")
 
-            self._click_load_more(driver, selectors)
-            _raise_if_deadline_passed("load-more expansion")
-
-            self._wait_for_comment_readiness(driver, selectors)
-            _raise_if_deadline_passed("post-expand readiness wait")
-
             comments = self._extract_comments(driver, selectors)
             logger.info(
-                "Domain extraction finished with %d comment candidate(s)",
+                "Initial extraction finished with %d comment candidate(s)",
                 len(comments),
             )
-            _raise_if_deadline_passed("domain extraction")
+            comments = self._apply_comment_limit(comments, phase="initial extraction")
+
+            should_expand = True
+            if comments and self.max_comments_per_url > 0 and len(comments) >= self.max_comments_per_url:
+                should_expand = False
+
+            if should_expand and self.max_load_more_clicks > 0:
+                self._click_load_more(driver, selectors)
+                _raise_if_deadline_passed("load-more expansion")
+
+                self._wait_for_comment_readiness(driver, selectors)
+                _raise_if_deadline_passed("post-expand readiness wait")
+
+                expanded_comments = self._extract_comments(driver, selectors)
+                comments = self._merge_comments(comments, expanded_comments)
+                comments = self._apply_comment_limit(comments, phase="domain extraction")
+                logger.info(
+                    "Domain extraction finished with %d comment candidate(s)",
+                    len(comments),
+                )
+
+                # Soft deadline at this point: extraction already completed, keep whatever we got.
+                if time.time() > deadline:
+                    overtime = time.time() - deadline
+                    msg = (
+                        f"Crawl runtime budget exceeded by {overtime:.2f}s during domain extraction; "
+                        f"keeping {len(comments)} extracted comment(s)."
+                    )
+                    self.last_warnings.append(msg)
+                    logger.warning("NewsSiteCrawler: %s", msg)
 
             if not comments:
                 logger.info(
@@ -868,6 +922,7 @@ class NewsSiteCommentCrawler:
                 driver.implicitly_wait(0)
                 try:
                     comments = self._extract_fallback(driver, selectors)
+                    comments = self._apply_comment_limit(comments, phase="fallback extraction")
                     logger.info(
                         "Fallback extraction finished with %d comment candidate(s)",
                         len(comments),
@@ -906,6 +961,32 @@ class NewsSiteCommentCrawler:
                     driver.quit()
                 except Exception:
                     pass
+
+    def _merge_comments(self, primary: list[str], secondary: list[str]) -> list[str]:
+        if not primary:
+            return list(secondary)
+        merged = list(primary)
+        seen = set(primary)
+        for item in secondary:
+            if item in seen:
+                continue
+            merged.append(item)
+            seen.add(item)
+        return merged
+
+    def _apply_comment_limit(self, comments: list[str], phase: str) -> list[str]:
+        if self.max_comments_per_url <= 0:
+            return comments
+        if len(comments) <= self.max_comments_per_url:
+            return comments
+        self.last_comment_cap_hit = True
+        msg = (
+            f"Comment limit reached during {phase}: "
+            f"keeping first {self.max_comments_per_url}/{len(comments)} comments"
+        )
+        self.last_warnings.append(msg)
+        logger.info("NewsSiteCrawler: %s", msg)
+        return comments[: self.max_comments_per_url]
 
     # ---- internals ----
 
@@ -1751,6 +1832,7 @@ def crawl_comments_from_url(
     fb_cookie_file: str | None = None,
     max_load_more: int = 15,
     timeout: int = 90,
+    max_comments_per_url: int = 0,
 ) -> dict[str, Any]:
     """
     Detect URL type → dispatch to appropriate crawler → save artifacts.
@@ -1775,6 +1857,8 @@ def crawl_comments_from_url(
         "warnings": [],
         "from_cache": False,
         "attempts": 1,
+        "max_comments_per_url": max(0, int(max_comments_per_url)),
+        "comment_cap_hit": False,
         "crawl_schema": COMMENT_CRAWL_SCHEMA_VERSION,
     }
 
@@ -1820,9 +1904,11 @@ def crawl_comments_from_url(
             headless=headless,
             max_load_more_clicks=max_load_more,
             max_runtime_seconds=timeout,
+            max_comments_per_url=max_comments_per_url,
         )
         comments = crawler.crawl_comments(url)
         result_meta["attempts"] = max(1, int(getattr(crawler, "last_attempts", 1)))
+        result_meta["comment_cap_hit"] = bool(getattr(crawler, "last_comment_cap_hit", False))
         if crawler.last_warnings:
             result_meta["warnings"].extend(crawler.last_warnings)
         if crawler.last_block_reason:
@@ -1858,6 +1944,8 @@ def crawl_urls(
     urls: list[str],
     out_dir: str = "data/raw/crawled_urls",
     timeout: int = 90,
+    max_load_more: int = 15,
+    max_comments_per_url: int = 0,
     enable_video: bool = False,
     enable_asr: bool = False,
     keep_artifacts: bool = False,
@@ -1888,6 +1976,8 @@ def crawl_urls(
                 url=url,
                 output_base_dir=out_dir,
                 timeout=timeout,
+                max_load_more=max_load_more,
+                max_comments_per_url=max_comments_per_url,
             )
             crawl_status = str(crawl_meta.get("status") or "error")
             if crawl_status in {"ok", "no_comments", "blocked", "unsupported"}:
@@ -1914,6 +2004,8 @@ def crawl_urls(
                     "output_dir": output_dir,
                     "segments_path": segments_path,
                     "num_segments": int(crawl_meta.get("total_comments") or 0),
+                    "comment_cap_hit": bool(crawl_meta.get("comment_cap_hit") or False),
+                    "max_comments_per_url": int(crawl_meta.get("max_comments_per_url") or 0),
                     "method": "comment_crawl",
                     "duration_sec": round(time.time() - start, 3),
                     "warnings": warnings,
@@ -1934,6 +2026,8 @@ def crawl_urls(
                     "output_dir": output_dir,
                     "segments_path": None,
                     "num_segments": 0,
+                    "comment_cap_hit": False,
+                    "max_comments_per_url": int(max_comments_per_url or 0),
                     "method": "comment_crawl",
                     "duration_sec": round(time.time() - start, 3),
                     "warnings": [],
@@ -1992,6 +2086,12 @@ def main() -> None:
         default=15,
         help="Max times to click load-more / expand button (default: 15)",
     )
+    parser.add_argument(
+        "--max-comments-per-url",
+        type=int,
+        default=0,
+        help="Cap comments per URL before writing segments (0 = unlimited)",
+    )
     args = parser.parse_args()
 
     result = crawl_comments_from_url(
@@ -2000,6 +2100,7 @@ def main() -> None:
         headless=not args.no_headless,
         fb_cookie_file=args.fb_cookies,
         max_load_more=args.max_load_more,
+        max_comments_per_url=args.max_comments_per_url,
     )
 
     print("\n" + "=" * 60)

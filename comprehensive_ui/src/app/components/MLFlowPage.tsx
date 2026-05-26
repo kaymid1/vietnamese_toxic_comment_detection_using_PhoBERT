@@ -587,7 +587,7 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="space-y-1">
             <p className="text-xs uppercase tracking-wider text-muted-foreground">Admin / Kaggle Retrain</p>
-            <h1 className="text-2xl font-semibold">VietToxic Kaggle Retrain Console</h1>
+            <h1 className="text-2xl font-semibold">VietComment Analyzer Kaggle Retrain Console</h1>
             <p className="text-sm text-muted-foreground">Collect data → review & bundle → retrain on Kaggle → inspect metrics</p>
           </div>
           <div className="flex items-center gap-2">
@@ -1527,3 +1527,4 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
     </div>
   );
 }
+

@@ -1,7 +1,7 @@
-param(
+﻿param(
     [string]$Owner = "",
     [string]$Slug = "viettoxic-victsd-gold",
-    [string]$Title = "VietToxic VictSD Gold",
+    [string]$Title = "VietComment Analyzer VictSD Gold",
     [string]$SourceDir = "",
     [string]$VersionMessage = "Update victsd_gold splits",
     [switch]$Public
@@ -85,7 +85,7 @@ $metadata = @{
     title = $Title
     id = $datasetRef
     licenses = @(@{ name = "CC0-1.0" })
-    subtitle = "VictSD gold-style JSONL splits for VietToxic retraining"
+    subtitle = "VictSD gold-style JSONL splits for VietComment Analyzer retraining"
     description = "Contains train.jsonl, validation.jsonl, test.jsonl prepared from local augmented splits."
     isPrivate = $isPrivate
 }
@@ -116,3 +116,4 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host "Done. Dataset ref: $datasetRef"
+

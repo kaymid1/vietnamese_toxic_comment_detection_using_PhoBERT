@@ -1,4 +1,4 @@
-param(
+﻿param(
   [Parameter(Mandatory = $true)]
   [string]$Owner,
 
@@ -6,7 +6,7 @@ param(
   [string]$Slug,
 
   [Parameter(Mandatory = $false)]
-  [string]$Title = "VietToxic MLflow Retrain",
+  [string]$Title = "VietComment Analyzer MLflow Retrain",
 
   [Parameter(Mandatory = $false)]
   [ValidateSet("none", "NvidiaTeslaT4", "NvidiaTeslaP100", "NvidiaTeslaA100", "NvidiaL4", "NvidiaH100")]
@@ -68,4 +68,5 @@ finally {
     Remove-Item -LiteralPath $tempDir -Recurse -Force
   }
 }
+
 

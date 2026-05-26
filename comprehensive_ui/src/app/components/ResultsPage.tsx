@@ -14,13 +14,20 @@ interface SegmentData {
   text_preview: string;
   text?: string;
   toxic_label?: number | null;
+  constructiveness_score?: number | null;
+  constructiveness_label?: number | null;
 }
 
 interface ResultData {
   url: string;
   url_hash?: string | null;
   status: "ok" | "error" | "skipped";
+  crawl_status?: string | null;
   error?: string | null;
+  warnings?: string[] | null;
+  comment_cap_hit?: boolean | null;
+  max_comments_per_url?: number | null;
+  crawled_comment_count?: number | null;
   seg_threshold_used?: number | null;
   page_toxic?: number | null;
   html_tags?: string[] | null;
@@ -39,6 +46,21 @@ interface ResultData {
   toxicity?: {
     overall?: number | null;
     by_segment?: SegmentData[];
+  };
+  constructiveness?: {
+    overall?: number | null;
+    by_segment?: SegmentData[];
+    meta?: {
+      available?: boolean;
+      threshold?: number;
+      total_segments?: number;
+      segments_with_score?: number;
+      segments_without_score?: number;
+      segments_with_label?: number;
+      constructive_segments?: number;
+      non_constructive_segments?: number;
+      missing_reason?: string | null;
+    };
   };
 }
 
@@ -64,6 +86,7 @@ interface HistoryItem {
 
 interface ResultsPageProps {
   results: ResultData[];
+  errorMessage?: string | null;
   jobId?: string | null;
   thresholds?: {
     seg_threshold?: number;
@@ -76,6 +99,8 @@ interface ResultsPageProps {
   onSelectResultModel?: (modelName: string) => void;
   scanHistory?: HistoryItem[];
   onLoadHistoryItem?: (item: HistoryItem) => void;
+  onScanMore?: (result: ResultData) => Promise<void> | void;
+  scanMoreLoadingByUrl?: Record<string, boolean>;
   onScanAgain: () => void;
 }
 
@@ -93,6 +118,18 @@ const formatThreshold = (value?: number | null) => {
   return value.toFixed(2);
 };
 
+const normalizeResultUrlKey = (raw: string) => {
+  const cleaned = raw.trim();
+  if (!cleaned) return raw;
+  const withScheme = /^https?:\/\//i.test(cleaned) ? cleaned : `https://${cleaned}`;
+  try {
+    const parsed = new URL(withScheme);
+    return `${parsed.protocol.toLowerCase()}//${parsed.hostname.toLowerCase()}${parsed.pathname}${parsed.search}`;
+  } catch {
+    return raw;
+  }
+};
+
 const getSeverityClasses = (score: number | null) => {
   if (score === null) return "bg-muted text-muted-foreground border-border";
   if (score < 35) return "bg-background-success text-text-success border-border-success";
@@ -104,6 +141,7 @@ const DOMAIN_KEYS: Array<keyof DomainThresholds> = ["news", "social", "forum", "
 
 export function ResultsPage({
   results,
+  errorMessage,
   jobId,
   thresholds,
   thresholdsByDomain,
@@ -113,17 +151,36 @@ export function ResultsPage({
   onSelectResultModel,
   scanHistory,
   onLoadHistoryItem,
+  onScanMore,
+  scanMoreLoadingByUrl,
   onScanAgain,
 }: ResultsPageProps) {
   const { language, t } = useI18n();
   const dateLocale = language === "vi" ? "vi-VN" : "en-US";
   const [thresholdDetailsResult, setThresholdDetailsResult] = useState<ResultData | null>(null);
+  const [riskDetailsResult, setRiskDetailsResult] = useState<ResultData | null>(null);
+
+  const getConstructivenessMissingReason = (reason?: string | null) => {
+    if (!reason) return t("results.constructivenessMissingReasonUnknown");
+    if (reason === "no_segments") return t("results.constructivenessMissingReasonNoSegments");
+    if (reason === "constructiveness_not_emitted_by_inference") {
+      return t("results.constructivenessMissingReasonNotEmitted");
+    }
+    return t("results.constructivenessMissingReasonUnknown");
+  };
 
   const getDomainThresholdLabel = (key: keyof DomainThresholds) => {
     if (key === "news") return t("results.thresholdDomainNews");
     if (key === "social") return t("results.thresholdDomainSocial");
     if (key === "forum") return t("results.thresholdDomainForum");
     return t("results.thresholdDomainUnknown");
+  };
+
+  const isSegmentToxic = (segment: SegmentData, threshold: number) => {
+    if (segment.toxic_label !== undefined && segment.toxic_label !== null) {
+      return segment.toxic_label === 1;
+    }
+    return segment.score >= threshold;
   };
 
   return (
@@ -137,6 +194,11 @@ export function ResultsPage({
             <p className="text-sm text-muted-foreground">
               {t("results.viewingModel")} <span className="font-medium text-foreground">{modelId}</span>
             </p>
+          )}
+          {errorMessage && (
+            <div className="mt-3 rounded-lg border border-border-danger bg-background-danger p-3 text-sm text-text-danger">
+              {errorMessage}
+            </div>
           )}
           {compareModelNames && compareModelNames.length > 1 && onSelectResultModel && (
             <div className="mt-3 max-w-sm">
@@ -159,14 +221,57 @@ export function ResultsPage({
         {results.map((result, index) => {
           const domain = parseDomain(result.url);
           const segments = result.toxicity?.by_segment ?? [];
+          const constructivenessSegments =
+            result.constructiveness?.by_segment ??
+            segments.filter((s) => typeof s.constructiveness_score === "number");
+          const constructivenessMeta = result.constructiveness?.meta;
           const overallScore = result.toxicity?.overall;
           const overallPercent = typeof overallScore === "number" ? Math.round(overallScore * 100) : null;
+          const overallConstructivenessScore = result.constructiveness?.overall;
+          const overallConstructivenessPercent =
+            typeof overallConstructivenessScore === "number" ? Math.round(overallConstructivenessScore * 100) : null;
           const effectiveSegThreshold =
             typeof result.seg_threshold_used === "number"
               ? result.seg_threshold_used
               : thresholds?.seg_threshold ?? 0.5;
+          const constructivenessThreshold =
+            typeof constructivenessMeta?.threshold === "number"
+              ? constructivenessMeta.threshold
+              : 0.5;
           const toxicCount = segments.filter((s) => s.score >= effectiveSegThreshold).length;
           const safeCount = segments.length - toxicCount;
+          const constructiveCountFallback = constructivenessSegments.filter((s) => {
+            if (typeof s.constructiveness_label === "number") return s.constructiveness_label === 1;
+            const score =
+              typeof s.constructiveness_score === "number"
+                ? s.constructiveness_score
+                : s.score;
+            return score >= constructivenessThreshold;
+          }).length;
+          const constructiveCount =
+            typeof constructivenessMeta?.constructive_segments === "number"
+              ? constructivenessMeta.constructive_segments
+              : constructiveCountFallback;
+          const nonConstructiveCount =
+            typeof constructivenessMeta?.non_constructive_segments === "number"
+              ? constructivenessMeta.non_constructive_segments
+              : constructivenessSegments.length - constructiveCount;
+          const constructivenessAvailable =
+            typeof constructivenessMeta?.available === "boolean"
+              ? constructivenessMeta.available
+              : overallConstructivenessPercent !== null;
+          const constructivenessTotalSegments =
+            typeof constructivenessMeta?.total_segments === "number"
+              ? constructivenessMeta.total_segments
+              : segments.length;
+          const constructivenessSegmentsWithScore =
+            typeof constructivenessMeta?.segments_with_score === "number"
+              ? constructivenessMeta.segments_with_score
+              : constructivenessSegments.length;
+          const constructivenessSegmentsWithoutScore =
+            typeof constructivenessMeta?.segments_without_score === "number"
+              ? constructivenessMeta.segments_without_score
+              : Math.max(0, constructivenessTotalSegments - constructivenessSegmentsWithScore);
           const pageToxicFlag = typeof result.page_toxic === "number" ? result.page_toxic : null;
           const pageThreshold = thresholds?.page_threshold ?? 0.5;
           const isToxic =
@@ -177,6 +282,10 @@ export function ResultsPage({
                 : false;
           const videos = result.videos ?? [];
           const topSegments = [...segments].sort((a, b) => b.score - a.score).slice(0, 3);
+          const urlBusyKey = normalizeResultUrlKey(result.url);
+          const scanMoreBusy = Boolean(scanMoreLoadingByUrl?.[result.url] || scanMoreLoadingByUrl?.[urlBusyKey]);
+          const canRetryNoComments = Boolean(onScanMore) && result.crawl_status === "no_comments";
+          const canScanMore = Boolean(onScanMore) && Boolean(result.comment_cap_hit);
 
           return (
             <Card key={result.url_hash ?? result.url ?? index} className="bg-card p-8 mb-6 shadow-lg">
@@ -193,8 +302,6 @@ export function ResultsPage({
                     <p className="text-sm text-muted-foreground mt-1 break-all">{result.url}</p>
                     {result.status === "ok" && (
                       <div className="mt-2 text-xs text-muted-foreground space-y-1">
-                        <p>{t("results.htmlTag", { value: (result.html_tags && result.html_tags[0]) || "unknown" })}</p>
-                        <p>{t("results.og", { value: (result.og_types && result.og_types.length > 0) ? result.og_types.join(", ") : "--" })}</p>
                         <p className="flex items-center gap-1.5">
                           <span>{t("results.usedThreshold")} <span className="font-medium text-foreground">{formatThreshold(result.seg_threshold_used)}</span></span>
                           <Tooltip>
@@ -229,6 +336,17 @@ export function ResultsPage({
                             </TooltipContent>
                           </Tooltip>
                         </p>
+                        {segments.length > 0 && (
+                          <div className="pt-1">
+                            <Button
+                              type="button"
+                              variant="outline"
+                              onClick={() => setRiskDetailsResult(result)}
+                            >
+                              {t("results.viewRiskDetails", { count: segments.length })}
+                            </Button>
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
@@ -236,9 +354,25 @@ export function ResultsPage({
               </div>
 
               {result.status === "error" && (
-                <div className="mb-8 p-4 rounded-lg border border-border-danger bg-background-danger text-sm text-text-danger">
-                  {result.error || t("results.cannotAnalyzeUrl")}
-                </div>
+                <>
+                  <div className="mb-4 p-4 rounded-lg border border-border-danger bg-background-danger text-sm text-text-danger">
+                    {result.error || t("results.cannotAnalyzeUrl")}
+                  </div>
+                  {canRetryNoComments && (
+                    <div className="mb-8 rounded-lg border border-border bg-background-secondary p-3 text-xs text-muted-foreground">
+                      <div className="mt-2">
+                        <Button
+                          type="button"
+                          variant="outline"
+                          onClick={() => onScanMore?.(result)}
+                          disabled={scanMoreBusy}
+                        >
+                          {scanMoreBusy ? t("results.scanMoreLoading") : t("results.scanMoreChunkAction")}
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+                </>
               )}
 
               {result.status === "skipped" && (
@@ -265,6 +399,36 @@ export function ResultsPage({
                       <span className="text-text-success">{t("results.safe")}</span>
                       <span className="text-text-danger">{t("results.toxic")}</span>
                     </div>
+                  </div>
+
+                  <div className="mb-8">
+                    <div className="flex items-center justify-between mb-3">
+                      <h3 className="text-xl text-primary">{t("results.overallConstructivenessScore")}</h3>
+                      <span className="text-3xl text-primary">
+                        {overallConstructivenessPercent !== null ? `${overallConstructivenessPercent}%` : "--"}
+                      </span>
+                    </div>
+                    <div className="flex flex-wrap gap-4 text-xs text-muted-foreground">
+                      <span>{t("results.constructivenessThreshold", { value: formatThreshold(constructivenessThreshold) })}</span>
+                    </div>
+                    <Progress value={overallConstructivenessPercent ?? 0} className="h-4" />
+                    <div className="flex justify-between mt-2 text-sm">
+                      <span className="text-text-danger">{t("results.nonConstructive")}</span>
+                      <span className="text-primary">{t("results.constructive")}</span>
+                    </div>
+                    {!constructivenessAvailable && (
+                      <div className="mt-3 rounded-lg border border-border-warning bg-background-warning p-3 text-xs text-text-warning">
+                        <p className="font-medium">{t("results.constructivenessUnavailableTitle")}</p>
+                        <p>{getConstructivenessMissingReason(constructivenessMeta?.missing_reason)}</p>
+                        <p className="mt-1">
+                          {t("results.constructivenessDebugScanned", {
+                            total: constructivenessTotalSegments,
+                            withScore: constructivenessSegmentsWithScore,
+                            withoutScore: constructivenessSegmentsWithoutScore,
+                          })}
+                        </p>
+                      </div>
+                    )}
                   </div>
 
                   <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 mb-8">
@@ -308,19 +472,46 @@ export function ResultsPage({
                           <span className="text-muted-foreground">{t("results.safeSegments")}</span>
                           <span className="text-xl text-text-success">{safeCount}</span>
                         </div>
+                        <div className="flex justify-between items-center mt-2">
+                          <span className="text-muted-foreground">{t("results.constructiveSegments")}</span>
+                          <span className="text-xl text-primary">{constructiveCount}</span>
+                        </div>
+                        <div className="flex justify-between items-center mt-2">
+                          <span className="text-muted-foreground">{t("results.nonConstructiveSegments")}</span>
+                          <span className="text-xl text-text-danger">{nonConstructiveCount}</span>
+                        </div>
                       </div>
                     </div>
                   </div>
 
                   {topSegments.length > 0 && (
                     <div className="mb-8">
-                      <h3 className="text-xl mb-4 text-primary">{t("results.topRiskSegments")}</h3>
+                      <div className="mb-4 flex items-center justify-between gap-3">
+                        <h3 className="text-xl text-primary">{t("results.topRiskSegments")}</h3>
+                        <div className="flex items-center gap-2">
+                          {canScanMore && (
+                            <Button
+                              type="button"
+                              variant="outline"
+                              onClick={() => onScanMore?.(result)}
+                              disabled={scanMoreBusy}
+                            >
+                              {scanMoreBusy ? t("results.scanMoreLoading") : t("results.scanMoreChunkAction")}
+                            </Button>
+                          )}
+                        </div>
+                      </div>
                       <div className="space-y-3">
                         {topSegments.map((segment, idx) => {
-                          const segmentIsToxic =
-                            segment.toxic_label !== undefined && segment.toxic_label !== null
-                              ? segment.toxic_label === 1
-                              : segment.score >= effectiveSegThreshold;
+                          const segmentIsToxic = isSegmentToxic(segment, effectiveSegThreshold);
+                          const constructivenessScore =
+                            typeof segment.constructiveness_score === "number"
+                              ? segment.constructiveness_score
+                              : undefined;
+                          const constructivenessLabel =
+                            typeof segment.constructiveness_label === "number"
+                              ? segment.constructiveness_label
+                              : undefined;
                           const percent = (segment.score * 100).toFixed(1);
                           const fullText = segment.text || segment.text_preview;
 
@@ -341,6 +532,21 @@ export function ResultsPage({
                                   {segmentIsToxic ? t("results.toxicAtOrAboveThreshold") : t("results.riskBelowThreshold")}
                                 </span>
                               </div>
+                              {(constructivenessScore !== undefined || constructivenessLabel !== undefined) && (
+                                <div className="mb-2 text-xs text-muted-foreground">
+                                  {t("results.constructivenessShort", {
+                                    score: constructivenessScore !== undefined
+                                      ? (constructivenessScore * 100).toFixed(1)
+                                      : "--",
+                                    label:
+                                      constructivenessLabel === 1
+                                        ? t("results.constructive")
+                                        : constructivenessLabel === 0
+                                          ? t("results.nonConstructive")
+                                          : "--",
+                                  })}
+                                </div>
+                              )}
                               <details className="text-sm text-foreground">
                                 <summary className="cursor-pointer">{segment.text_preview}</summary>
                                 <p className="mt-2 whitespace-pre-wrap">{fullText}</p>
@@ -496,6 +702,65 @@ export function ResultsPage({
                 <li>{t("results.thresholdDetailRule3")}</li>
               </ul>
             </div>
+          </DialogContent>
+        </Dialog>
+
+        <Dialog open={!!riskDetailsResult} onOpenChange={(open: boolean) => !open && setRiskDetailsResult(null)}>
+          <DialogContent className="max-w-3xl">
+            <DialogHeader>
+              <DialogTitle>{t("results.riskDetailsTitle")}</DialogTitle>
+              <DialogDescription>
+                {t("results.riskDetailsDescription", { url: riskDetailsResult?.url || "--" })}
+              </DialogDescription>
+            </DialogHeader>
+            {riskDetailsResult && (() => {
+              const segments = riskDetailsResult.toxicity?.by_segment ?? [];
+              const segThreshold =
+                typeof riskDetailsResult.seg_threshold_used === "number"
+                  ? riskDetailsResult.seg_threshold_used
+                  : thresholds?.seg_threshold ?? 0.5;
+              const sortedSegments = [...segments].sort((a, b) => b.score - a.score);
+
+              if (sortedSegments.length === 0) {
+                return <p className="text-sm text-muted-foreground">{t("results.riskDetailsNoSegments")}</p>;
+              }
+
+              return (
+                <div className="max-h-[60vh] space-y-3 overflow-y-auto pr-1">
+                  {sortedSegments.map((segment, idx) => {
+                    const toxicPercent = (segment.score * 100).toFixed(1);
+                    const constructivePercent =
+                      typeof segment.constructiveness_score === "number"
+                        ? (segment.constructiveness_score * 100).toFixed(1)
+                        : "--";
+                    const segmentIsToxic = isSegmentToxic(segment, segThreshold);
+                    const fullText = segment.text || segment.text_preview;
+                    return (
+                      <div key={segment.segment_id || idx} className="rounded-lg border border-border bg-card p-3">
+                        <div className="mb-2 flex items-center gap-3 text-xs text-muted-foreground">
+                          <span>#{idx + 1}</span>
+                          <span>{t("results.riskDetailsToxicScore", { score: toxicPercent })}</span>
+                          <span>{t("results.riskDetailsConstructivenessScore", { score: constructivePercent })}</span>
+                          <span
+                            className={`rounded-full border px-2 py-0.5 ${
+                              segmentIsToxic
+                                ? "bg-background-danger text-text-danger border-border-danger"
+                                : "bg-background-success text-text-success border-border-success"
+                            }`}
+                          >
+                            {segmentIsToxic ? t("results.toxicAtOrAboveThreshold") : t("results.safe")}
+                          </span>
+                        </div>
+                        <details className="text-sm text-foreground">
+                          <summary className="cursor-pointer">{segment.text_preview}</summary>
+                          <p className="mt-2 whitespace-pre-wrap">{fullText}</p>
+                        </details>
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })()}
           </DialogContent>
         </Dialog>
 

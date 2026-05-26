@@ -1,10 +1,10 @@
-# VietToxic Detector
+﻿# VietComment Analyzer
 
 Research + demo system for Vietnamese toxic-content detection from URLs.
 
 ## What is active right now
 
-This repo currently runs a **web UI → FastAPI → comment-only crawl → local inference** flow.
+This repo currently runs a **web UI â†’ FastAPI â†’ comment-only crawl â†’ local inference** flow.
 
 Active runtime path:
 
@@ -198,9 +198,70 @@ Deprecated model names (contains `deprecated`) are skipped when possible.
 
 `dataset_version` alias map in backend:
 
-- `latest` / `victsd_gold` → canonical `victsd_gold` directory: `data/processed/victsd_gold`
+- `latest` / `victsd_gold` â†’ canonical `victsd_gold` directory: `data/processed/victsd_gold`
 
 Legacy `v1` / `victsd_v1` requests are rejected with `400`. The old protocol dataset directory `data/victsd` was removed. Raw source data under `data/raw/**` is intentionally kept.
+
+---
+
+## ViCTSD preprocessing (gold dataset)
+
+Current dataset build scripts:
+
+- `scripts/02_preprocess.py` (main preprocess + leakage report)
+- `scripts/02b_prepare_gold_dataset.py` (alternate builder with summary report)
+- `scripts/02c_validate_victsd_gold.py` (post-build validation)
+
+Default raw/input split source (must keep source split files unchanged):
+
+- `data/raw/victsd/train.jsonl`
+- `data/raw/victsd/validation.jsonl`
+- `data/raw/victsd/test.jsonl`
+
+Default processed output:
+
+- `data/processed/victsd_gold/train.jsonl`
+- `data/processed/victsd_gold/validation.jsonl`
+- `data/processed/victsd_gold/test.jsonl`
+
+Processed row schema (current):
+
+```json
+{
+  "text": "...",
+  "toxicity": 0,
+  "label": 0,
+  "constructiveness": 1,
+  "meta": {
+    "source": "victsd",
+    "split": "train",
+    "topic": "...",
+    "title": "...",
+    "original_comment": "..."
+  }
+}
+```
+
+Notes:
+
+- `toxicity` remains the active binary label key for existing training/inference scripts.
+- `label` is mirrored from `toxicity` for compatibility with audit/tools that expect `label`.
+- `constructiveness` is preserved from raw ViCTSD for constructiveness analysis extension.
+- Preprocess keeps Vietnamese text features: trim, NFC normalization, whitespace normalization, no forced lowercase, punctuation preserved.
+- Current preprocess defaults to `--cross-split-dedup strong` (priority order: `train` -> `validation` -> `test`) to remove cross-split overlap.
+- PhoBERT LoRA macro-F1 scripts now train as multi-label binary tasks with two logits: `toxicity` and `constructiveness`. Toxicity remains the primary detection/deployment task and constructiveness is logged as an auxiliary task metric.
+
+Run preprocessing:
+
+```bash
+python scripts/02_preprocess.py --input-dir data/raw/victsd --output-dir data/processed/victsd_gold --cross-split-dedup strong
+```
+
+Validate processed files:
+
+```bash
+python scripts/02c_validate_victsd_gold.py --data-dir data/processed/victsd_gold --sample-n 3
+```
 
 ---
 
@@ -315,7 +376,7 @@ Workflow:
 Tuy chon:
 
 ```powershell
-.\scripts\publish_kaggle_kernel.ps1 -Owner <kaggle_username> -Slug <kernel_slug> -Title "VietToxic Retrain" -Accelerator NvidiaTeslaT4 -Private
+.\scripts\publish_kaggle_kernel.ps1 -Owner <kaggle_username> -Slug <kernel_slug> -Title "VietComment Analyzer Retrain" -Accelerator NvidiaTeslaT4 -Private
 ```
 
 Luu y:
@@ -369,3 +430,4 @@ These endpoints exist but are not currently called from the main UI flow/compone
 ## Rule for future updates
 
 If documentation conflicts with code, trust the running code (`backend/app.py`, `backend/crawl_adapter.py`, `comment_crawl.py`, `infer_crawled_local.py`, and frontend `src/app/*`).
+

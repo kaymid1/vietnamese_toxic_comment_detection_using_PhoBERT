@@ -460,7 +460,7 @@ def require_admin(authorization: Optional[str] = Header(default=None)) -> str:
     return username
 
 
-app = FastAPI(title="VietToxic Local API")
+app = FastAPI(title="VietComment Analyzer Local API")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -490,7 +490,7 @@ async def log_requests(request: Request, call_next):
 def root() -> Dict[str, str]:
     return {
         "status": "ok",
-        "message": "VietToxic API is running. Use POST /api/analyze.",
+        "message": "VietComment Analyzer API is running. Use POST /api/analyze.",
     }
 
 
@@ -504,6 +504,9 @@ class AnalyzeOptions(BaseModel):
     max_length: int = Field(default=256, ge=16)
     page_threshold: float = Field(default=0.25, ge=0.0, le=1.0)
     seg_threshold: float = Field(default=0.4, ge=0.0, le=1.0)
+    crawl_timeout_sec: int = Field(default=90, ge=30, le=300)
+    max_load_more_clicks: int = Field(default=4, ge=0, le=30)
+    max_comments_per_url: int = Field(default=50, ge=0, le=5000)
     model_name: Optional[str] = None
     model_path: Optional[str] = None
     enable_video: bool = False
@@ -1029,6 +1032,47 @@ def hash_url(url: str) -> str:
     return hashlib.md5(url.encode()).hexdigest()
 
 
+def normalize_input_url(raw: Optional[str]) -> Optional[str]:
+    if not raw:
+        return None
+    cleaned = raw.strip().strip("\"'`")
+    if not cleaned:
+        return None
+    # Trim trailing punctuation often copied from text/log blocks.
+    cleaned = cleaned.rstrip("),.;")
+    if not cleaned:
+        return None
+
+    parsed = urllib.parse.urlparse(cleaned)
+    if not parsed.scheme:
+        cleaned = f"https://{cleaned}"
+        parsed = urllib.parse.urlparse(cleaned)
+
+    scheme = (parsed.scheme or "").lower()
+    if scheme not in {"http", "https"}:
+        return None
+
+    host = (parsed.hostname or "").strip().lower()
+    if not host or "." not in host:
+        return None
+
+    path = parsed.path or ""
+    query = f"?{parsed.query}" if parsed.query else ""
+    return f"{scheme}://{host}{path}{query}"
+
+
+def normalize_input_urls(raw_urls: List[str]) -> List[str]:
+    normalized: List[str] = []
+    seen: set[str] = set()
+    for raw in raw_urls:
+        url = normalize_input_url(raw)
+        if not url or url in seen:
+            continue
+        normalized.append(url)
+        seen.add(url)
+    return normalized
+
+
 def to_relative(path: Optional[str]) -> Optional[str]:
     if not path:
         return None
@@ -1076,16 +1120,30 @@ def map_results_to_response(
                 error = "No inference result for this URL"
 
         overall = None
+        overall_constructiveness = None
         if page_info:
             overall = normalize_score(page_info.get("avg_toxic_prob"))
             if overall is None:
                 overall = normalize_score(page_info.get("toxic_ratio"))
+            overall_constructiveness = normalize_score(page_info.get("avg_constructiveness_prob"))
 
         segment_entries = seg_by_hash.get(url_hash) or seg_by_url.get(url) or []
         by_segment = []
+        by_segment_constructiveness = []
+        constructiveness_present_count = 0
+        constructiveness_label_present_count = 0
+        constructiveness_positive_count = 0
         for idx, seg in enumerate(segment_entries):
             score = normalize_score(seg.get("toxic_prob"))
+            constructiveness_score = normalize_score(seg.get("constructiveness_prob"))
+            constructiveness_label = normalize_int(seg.get("constructiveness_label"))
             text = seg.get("text") or seg.get("text_preview") or ""
+            if constructiveness_score is not None:
+                constructiveness_present_count += 1
+            if constructiveness_label is not None:
+                constructiveness_label_present_count += 1
+                if constructiveness_label == 1:
+                    constructiveness_positive_count += 1
             by_segment.append(
                 {
                     "segment_id": f"{url_hash}:{idx}",
@@ -1099,6 +1157,8 @@ def map_results_to_response(
                     "segment_hash": seg.get("segment_hash"),
                     "context_segment_hash": seg.get("context_segment_hash"),
                     "toxic_label": seg.get("toxic_label"),
+                    "constructiveness_score": constructiveness_score,
+                    "constructiveness_label": constructiveness_label,
                     "toxic_prob_adjusted": normalize_score(seg.get("toxic_prob_adjusted")),
                     "ai_learned_mode": seg.get("ai_learned_mode"),
                     "learned_support": seg.get("learned_support"),
@@ -1106,6 +1166,30 @@ def map_results_to_response(
                     "seg_threshold_used": normalize_score(seg.get("seg_threshold_used")),
                 }
             )
+            if constructiveness_score is not None:
+                by_segment_constructiveness.append(
+                    {
+                        "segment_id": f"{url_hash}:{idx}",
+                        "score": constructiveness_score,
+                        "text_preview": text[:160],
+                        "text": text,
+                        "constructiveness_label": constructiveness_label,
+                        "html_tags": seg.get("html_tags"),
+                        "og_types": seg.get("og_types"),
+                        "segment_hash": seg.get("segment_hash"),
+                        "context_segment_hash": seg.get("context_segment_hash"),
+                    }
+                )
+
+        constructiveness_available = (
+            overall_constructiveness is not None or constructiveness_present_count > 0
+        )
+        if not segment_entries:
+            constructiveness_missing_reason = "no_segments"
+        elif constructiveness_available:
+            constructiveness_missing_reason = None
+        else:
+            constructiveness_missing_reason = "constructiveness_not_emitted_by_inference"
 
         response_results.append(
             {
@@ -1113,8 +1197,12 @@ def map_results_to_response(
                 "url_hash": url_hash,
                 "domain_category": page_info.get("domain_category") if page_info else None,
                 "status": status,
+                "crawl_status": crawl.get("crawl_status"),
                 "error": error,
                 "warnings": crawl.get("warnings") or [],
+                "comment_cap_hit": bool(crawl.get("comment_cap_hit") or False),
+                "max_comments_per_url": normalize_int(crawl.get("max_comments_per_url")),
+                "crawled_comment_count": normalize_int(crawl.get("num_segments")),
                 "crawl_output_dir": to_relative(crawl.get("output_dir")),
                 "segments_path": to_relative(segments_path),
                 "videos": [],
@@ -1125,6 +1213,21 @@ def map_results_to_response(
                 "toxicity": {
                     "overall": overall,
                     "by_segment": by_segment,
+                },
+                "constructiveness": {
+                    "overall": overall_constructiveness,
+                    "by_segment": by_segment_constructiveness,
+                    "meta": {
+                        "available": constructiveness_available,
+                        "threshold": 0.5,
+                        "total_segments": len(segment_entries),
+                        "segments_with_score": constructiveness_present_count,
+                        "segments_without_score": max(0, len(segment_entries) - constructiveness_present_count),
+                        "segments_with_label": constructiveness_label_present_count,
+                        "constructive_segments": constructiveness_positive_count,
+                        "non_constructive_segments": max(0, constructiveness_label_present_count - constructiveness_positive_count),
+                        "missing_reason": constructiveness_missing_reason,
+                    },
                 },
             }
         )
@@ -4065,7 +4168,7 @@ def mlflow_ingest(request: MlflowIngestRequest) -> Dict[str, Any]:
         cleanup_old_jobs(float(os.getenv("JOB_RETENTION_HOURS", "24")))
         options = request.options or MlflowIngestOptions()
 
-        urls = [u.strip() for u in request.urls if u and u.strip()]
+        urls = normalize_input_urls(request.urls)
         if not urls:
             raise HTTPException(status_code=400, detail="No valid URLs provided.")
 
@@ -4118,7 +4221,13 @@ def mlflow_ingest(request: MlflowIngestRequest) -> Dict[str, Any]:
             )
             conn.commit()
 
-        crawl_results = crawl_urls(urls, out_dir=str(DATA_DIR))
+        crawl_results = crawl_urls(
+            urls,
+            out_dir=str(DATA_DIR),
+            timeout=options.crawl_timeout_sec,
+            max_load_more=options.max_load_more_clicks,
+            max_comments_per_url=options.max_comments_per_url,
+        )
         ok_hashes = [r["url_hash"] for r in crawl_results if r.get("status") == "ok"]
 
         crawl_status_counts = {
@@ -5742,7 +5851,7 @@ def analyze(request: AnalyzeRequest) -> Dict[str, Any]:
 
         options = request.options or AnalyzeOptions()
 
-        urls = [u.strip() for u in request.urls if u and u.strip()]
+        urls = normalize_input_urls(request.urls)
         if not urls:
             raise HTTPException(status_code=400, detail="No valid URLs provided.")
         job_id = uuid.uuid4().hex
@@ -5800,7 +5909,13 @@ def analyze(request: AnalyzeRequest) -> Dict[str, Any]:
         logger.info("Job %s: start analyze for %s urls", job_id, len(urls))
         logger.info("Job %s: using model '%s' (%s) from %s", job_id, model_id, model_type, model_path)
 
-        crawl_results = crawl_urls(urls, out_dir=str(DATA_DIR))
+        crawl_results = crawl_urls(
+            urls,
+            out_dir=str(DATA_DIR),
+            timeout=options.crawl_timeout_sec,
+            max_load_more=options.max_load_more_clicks,
+            max_comments_per_url=options.max_comments_per_url,
+        )
 
         for r in crawl_results:
             logger.info(
@@ -6142,7 +6257,7 @@ def analyze_compare(request: AnalyzeCompareRequest) -> Dict[str, Any]:
     try:
         options = request.options
 
-        urls = [u.strip() for u in request.urls if u and u.strip()]
+        urls = normalize_input_urls(request.urls)
         if not urls:
             raise HTTPException(status_code=400, detail="No valid URLs provided.")
         model_ids = [m.strip() for m in options.model_names if m and m.strip()]
@@ -6172,7 +6287,13 @@ def analyze_compare(request: AnalyzeCompareRequest) -> Dict[str, Any]:
 
         logger.info("Compare job %s: start analyze for %s urls", job_id, len(urls))
 
-        crawl_results = crawl_urls(urls, out_dir=str(DATA_DIR))
+        crawl_results = crawl_urls(
+            urls,
+            out_dir=str(DATA_DIR),
+            timeout=options.crawl_timeout_sec,
+            max_load_more=options.max_load_more_clicks,
+            max_comments_per_url=options.max_comments_per_url,
+        )
 
         ok_hashes = [r["url_hash"] for r in crawl_results if r.get("status") == "ok"]
         infer_data_dir = DATA_DIR

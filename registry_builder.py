@@ -8,6 +8,16 @@ from typing import Any, Dict, List, Optional
 DEFAULT_METRIC_KEYS = {
     "f1": ("macro_f1", "f1", "f1_score"),
     "f1_toxic": ("f1_toxic", "f1_toxic_score"),
+    "constructiveness_macro_f1": (
+        "constructiveness_macro_f1",
+        "f1_constructiveness",
+        "test_constructiveness_macro_f1",
+    ),
+    "constructiveness_f1_positive": (
+        "constructiveness_f1_positive",
+        "f1_constructiveness_positive",
+        "constructiveness_f1",
+    ),
     "precision": ("precision", "precision_toxic"),
     "recall": ("recall", "recall_toxic"),
     "accuracy": ("accuracy", "acc"),

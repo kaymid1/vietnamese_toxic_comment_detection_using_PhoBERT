@@ -1,5 +1,409 @@
 {
   "runs": [
-
+    {
+      "run_id": "tfidf_lr/baseline_run",
+      "model_name": "tfidf_lr/baseline",
+      "dataset_version": "victsd_vihsd",
+      "model_version": "tfidf_lr/baseline",
+      "policy_version": "policy-v1",
+      "artifact_versions": {
+        "dataset_version": "victsd_vihsd",
+        "model_version": "tfidf_lr/baseline",
+        "policy_version": "policy-v1"
+      },
+      "created_at": "2026-03-23T17:33:09.710538",
+      "checkpoint_path": "models\\options\\tfidf_lr\\baseline (deprecated)",
+      "hyperparameters": {
+        "ngram_range": [
+          1,
+          2
+        ],
+        "lowercase": false,
+        "min_df": 1,
+        "class_weight": "balanced",
+        "max_iter": 1000
+      },
+      "metrics": {},
+      "is_baseline": true
+    },
+    {
+      "run_id": "tfidf_lr/baseline-macro-f1_run",
+      "model_name": "tfidf_lr/baseline-macro-f1",
+      "dataset_version": "victsd_gold",
+      "model_version": "tfidf_lr/baseline-macro-f1",
+      "policy_version": "policy-v1",
+      "artifact_versions": {
+        "dataset_version": "victsd_gold",
+        "model_version": "tfidf_lr/baseline-macro-f1",
+        "policy_version": "policy-v1"
+      },
+      "created_at": "2026-04-05T04:31:10.683269",
+      "checkpoint_path": "models\\options\\tfidf_lr\\baseline",
+      "hyperparameters": {
+        "ngram_range": [
+          1,
+          2
+        ],
+        "lowercase": false,
+        "min_df": 1,
+        "class_weight": "balanced",
+        "max_iter": 1000
+      },
+      "metrics": {
+        "f1": 0.7054719300025933,
+        "f1_toxic": 0.48627450980392156,
+        "precision": 0.42758620689655175,
+        "recall": 0.5636363636363636,
+        "accuracy": 0.8686058174523571
+      },
+      "is_baseline": true
+    },
+    {
+      "run_id": "victsd_gold_20260405_043740_4dbd6604",
+      "model_name": "phobert/baseline-macro-f1",
+      "dataset_version": "victsd_gold",
+      "model_version": "phobert/baseline-macro-f1",
+      "policy_version": "policy-v1",
+      "artifact_versions": {
+        "dataset_version": "victsd_gold",
+        "model_version": "phobert/baseline-macro-f1",
+        "policy_version": "policy-v1"
+      },
+      "created_at": "2026-04-05T04:43:22.577818",
+      "checkpoint_path": "models\\options\\phobert\\baseline",
+      "hyperparameters": {
+        "MODEL_NAME": "vinai/phobert-base",
+        "MAX_LENGTH": 256,
+        "BATCH_SIZE": 16,
+        "GRAD_ACCUM": 2,
+        "EPOCHS": 10,
+        "LR": 2e-05,
+        "WEIGHT_DECAY": 0.05,
+        "WARMUP_RATIO": 0.08,
+        "LABEL_SMOOTHING": 0.0,
+        "EARLY_STOP_PATIENCE": 2,
+        "head_dropout": 0.1,
+        "use_focal": true,
+        "focal_gamma": 2.0,
+        "primary_metric": "macro_f1",
+        "training_curve": [
+          {
+            "epoch": 0.0045871559633027525,
+            "loss": 0.5627098679542542
+          },
+          {
+            "epoch": 0.22935779816513763,
+            "loss": 0.4876681736537388
+          },
+          {
+            "epoch": 0.45871559633027525,
+            "loss": 0.39269725799560545
+          },
+          {
+            "epoch": 0.6880733944954128,
+            "loss": 0.39805137634277343
+          },
+          {
+            "epoch": 0.9174311926605505,
+            "loss": 0.376450309753418
+          },
+          {
+            "epoch": 1.146788990825688,
+            "loss": 0.33117195129394533
+          },
+          {
+            "epoch": 1.3761467889908257,
+            "loss": 0.3222535705566406
+          },
+          {
+            "epoch": 1.6055045871559632,
+            "loss": 0.28710834503173827
+          },
+          {
+            "epoch": 1.834862385321101,
+            "loss": 0.31238977432250975
+          },
+          {
+            "epoch": 2.0642201834862384,
+            "loss": 0.29086502075195314
+          },
+          {
+            "epoch": 2.293577981651376,
+            "loss": 0.21981363296508788
+          },
+          {
+            "epoch": 2.522935779816514,
+            "loss": 0.22117727279663085
+          },
+          {
+            "epoch": 2.7522935779816513,
+            "loss": 0.23237333297729493
+          },
+          {
+            "epoch": 2.981651376146789,
+            "loss": 0.23644599914550782
+          },
+          {
+            "epoch": 3.2110091743119265,
+            "loss": 0.158457670211792
+          },
+          {
+            "epoch": 3.4403669724770642,
+            "loss": 0.1665039825439453
+          },
+          {
+            "epoch": 3.669724770642202,
+            "loss": 0.1503574275970459
+          }
+        ]
+      },
+      "metrics": {
+        "f1": 0.7143405205905207,
+        "f1_toxic": 0.49572649572649574,
+        "precision": 0.46774193548387094,
+        "recall": 0.5272727272727272,
+        "accuracy": 0.8816449348044132
+      },
+      "is_baseline": true
+    },
+    {
+      "run_id": "victsd_gold_20260405_145225_508c6361",
+      "model_name": "phobert/v2-macro-f1",
+      "dataset_version": "victsd_gold",
+      "model_version": "phobert/v2-macro-f1",
+      "policy_version": "policy-v1",
+      "artifact_versions": {
+        "dataset_version": "victsd_gold",
+        "model_version": "phobert/v2-macro-f1",
+        "policy_version": "policy-v1"
+      },
+      "created_at": "2026-04-05T14:57:43.596987",
+      "checkpoint_path": "models\\options\\phobert\\finetune_phobert_focalgamma_2",
+      "hyperparameters": {
+        "MODEL_NAME": "vinai/phobert-base-v2",
+        "MAX_LENGTH": 256,
+        "BATCH_SIZE": 16,
+        "GRAD_ACCUM": 2,
+        "EPOCHS": 10,
+        "LR": 2e-05,
+        "WEIGHT_DECAY": 0.05,
+        "WARMUP_RATIO": 0.08,
+        "LABEL_SMOOTHING": 0.0,
+        "EARLY_STOP_PATIENCE": 2,
+        "head_dropout": 0.1,
+        "use_focal": true,
+        "focal_gamma": 2.5,
+        "primary_metric": "eval_macro_f1",
+        "training_curve": [
+          {
+            "epoch": 0.0045871559633027525,
+            "loss": 0.45157137513160706
+          },
+          {
+            "epoch": 0.22935779816513763,
+            "loss": 0.4000342622095225
+          },
+          {
+            "epoch": 0.45871559633027525,
+            "loss": 0.32404048919677736
+          },
+          {
+            "epoch": 0.6880733944954128,
+            "loss": 0.3138106346130371
+          },
+          {
+            "epoch": 0.9174311926605505,
+            "loss": 0.2967586135864258
+          },
+          {
+            "epoch": 1.146788990825688,
+            "loss": 0.27162004470825196
+          },
+          {
+            "epoch": 1.3761467889908257,
+            "loss": 0.2616945457458496
+          },
+          {
+            "epoch": 1.6055045871559632,
+            "loss": 0.228006591796875
+          },
+          {
+            "epoch": 1.834862385321101,
+            "loss": 0.24720352172851562
+          },
+          {
+            "epoch": 2.0642201834862384,
+            "loss": 0.24467309951782226
+          },
+          {
+            "epoch": 2.293577981651376,
+            "loss": 0.14018774032592773
+          },
+          {
+            "epoch": 2.522935779816514,
+            "loss": 0.15313980102539063
+          },
+          {
+            "epoch": 2.7522935779816513,
+            "loss": 0.19835208892822265
+          },
+          {
+            "epoch": 2.981651376146789,
+            "loss": 0.18700332641601564
+          },
+          {
+            "epoch": 3.2110091743119265,
+            "loss": 0.11912433624267578
+          },
+          {
+            "epoch": 3.4403669724770642,
+            "loss": 0.09393326759338379
+          },
+          {
+            "epoch": 3.669724770642202,
+            "loss": 0.1443840217590332
+          }
+        ]
+      },
+      "metrics": {
+        "f1": 0.7477226720647774,
+        "f1_toxic": 0.5480769230769231,
+        "precision": 0.5816326530612245,
+        "recall": 0.5181818181818182,
+        "accuracy": 0.905717151454363
+      },
+      "is_baseline": true
+    },
+    {
+      "run_id": "victsd_gold_20260524_111730_bb1e86e1",
+      "model_name": "phobert/v2-macro-f1",
+      "dataset_version": "victsd_gold",
+      "model_version": "phobert/v2-macro-f1",
+      "policy_version": "policy-v1",
+      "artifact_versions": {
+        "dataset_version": "victsd_gold",
+        "model_version": "phobert/v2-macro-f1",
+        "policy_version": "policy-v1"
+      },
+      "created_at": "2026-05-24T11:28:11.381662",
+      "checkpoint_path": "models\\options\\phobert\\best_model_full_victsd_gold",
+      "hyperparameters": {
+        "MODEL_NAME": "vinai/phobert-base-v2",
+        "MAX_LENGTH": 256,
+        "BATCH_SIZE": 16,
+        "GRAD_ACCUM": 2,
+        "EPOCHS": 10,
+        "LR": 2e-05,
+        "WEIGHT_DECAY": 0.05,
+        "WARMUP_RATIO": 0.08,
+        "LABEL_SMOOTHING": 0.0,
+        "EARLY_STOP_PATIENCE": 2,
+        "head_dropout": 0.1,
+        "use_focal": true,
+        "focal_gamma": 2.0,
+        "primary_metric": "eval_macro_f1",
+        "tasks": [
+          "toxicity",
+          "constructiveness"
+        ],
+        "constructiveness_loss_weight": 0.5,
+        "training_curve": [
+          {
+            "epoch": 0.004597701149425287,
+            "loss": 0.40795668959617615
+          },
+          {
+            "epoch": 0.22988505747126436,
+            "loss": 0.44605741695481904
+          },
+          {
+            "epoch": 0.45977011494252873,
+            "loss": 0.40349658966064456
+          },
+          {
+            "epoch": 0.6896551724137931,
+            "loss": 0.36714908599853513
+          },
+          {
+            "epoch": 0.9195402298850575,
+            "loss": 0.33223548889160154
+          },
+          {
+            "epoch": 1.1471264367816092,
+            "loss": 0.28009466171264646
+          },
+          {
+            "epoch": 1.3770114942528735,
+            "loss": 0.26975847244262696
+          },
+          {
+            "epoch": 1.6068965517241378,
+            "loss": 0.2757909393310547
+          },
+          {
+            "epoch": 1.8367816091954023,
+            "loss": 0.2756374931335449
+          },
+          {
+            "epoch": 2.064367816091954,
+            "loss": 0.245161075592041
+          },
+          {
+            "epoch": 2.2942528735632184,
+            "loss": 0.21425634384155273
+          },
+          {
+            "epoch": 2.524137931034483,
+            "loss": 0.21170373916625976
+          },
+          {
+            "epoch": 2.754022988505747,
+            "loss": 0.191275691986084
+          },
+          {
+            "epoch": 2.9839080459770115,
+            "loss": 0.20892894744873047
+          },
+          {
+            "epoch": 3.211494252873563,
+            "loss": 0.15293099403381347
+          },
+          {
+            "epoch": 3.4413793103448276,
+            "loss": 0.15037936210632324
+          },
+          {
+            "epoch": 3.671264367816092,
+            "loss": 0.16411136627197265
+          },
+          {
+            "epoch": 3.901149425287356,
+            "loss": 0.19735185623168947
+          },
+          {
+            "epoch": 4.128735632183908,
+            "loss": 0.11853091239929199
+          },
+          {
+            "epoch": 4.358620689655172,
+            "loss": 0.1279344367980957
+          },
+          {
+            "epoch": 4.588505747126437,
+            "loss": 0.10288678169250488
+          }
+        ]
+      },
+      "metrics": {
+        "f1": 0.7380092046707999,
+        "f1_toxic": 0.5409836065573771,
+        "constructiveness_macro_f1": 0.808916137265237,
+        "constructiveness_f1_positive": 0.7586206896551724,
+        "precision": 0.4852941176470588,
+        "recall": 0.6111111111111112,
+        "accuracy": 0.8861788617886179
+      },
+      "is_baseline": true
+    }
   ]
 }
