@@ -12,9 +12,12 @@ QA Agent is a pragmatic pre-merge/pre-deploy gate. It does not replace manual de
 ## Affected-Area Mapping (V1)
 - `backend/app.py`, `backend/**`, `infer_crawled_local.py`, `comment_crawl.py`
   - Run backend smoke/regression pytest suite.
+- `backend/app.py` synthetic endpoints (`/api/dataset/synthetic/*`), `comprehensive_ui/src/app/components/SyntheticGenerationPage.tsx`
+  - Run synthetic dataset flow smoke checks (generate -> preview/review -> export) with schema validation for `toxicity` + `constructiveness`.
 - `comprehensive_ui/src/**`
   - Run frontend production build.
   - Run backend API contract checks for MLflow store payloads.
+  - Run frontend UTF-8/i18n mojibake regression checks.
 - `kaggle/**`, `scripts/publish_kaggle_*`, MLflow-related backend paths
   - Run Kaggle/MLflow smoke tests (dry-run, status, artifact checks).
 - `docker-compose.yml`, `backend/Dockerfile`, `comprehensive_ui/Dockerfile`, `requirements*.txt`
@@ -29,9 +32,14 @@ Optional mode:
 
 ## Baseline Check Sequence
 1. `python -m py_compile backend/app.py`
-2. Backend pytest smoke/regression (`tests/test_backend_smoke.py`, `tests/test_mlflow_kaggle.py`, `tests/test_api_contract_mlflow_store.py`)
-3. Frontend production build (`npm run build` in `comprehensive_ui`)
-4. Targeted checks by affected-area mapping (when only-affected mode is enabled)
+2. Backend pytest smoke/regression (`tests/test_backend_smoke.py`, `tests/test_mlflow_kaggle.py`, `tests/test_api_contract_mlflow_store.py`, `tests/test_frontend_i18n_encoding.py`)
+3. Synthetic flow contract/smoke:
+   - Generate synthetic rows by domain/style/toxicity with optional `constructiveness`.
+   - Verify preview includes `label`, `toxicity`, `constructiveness`, `meta`.
+   - Verify review can persist both `label` and `constructiveness`.
+   - Verify export JSONL rows include `text`, `label`, `toxicity`, `constructiveness`, `meta`.
+4. Frontend production build (`npm run build` in `comprehensive_ui`)
+5. Targeted checks by affected-area mapping (when only-affected mode is enabled)
 
 ## Pass / Fail Criteria
 - **Pass**: all required checks for the selected scope complete with exit code `0`.
@@ -63,6 +71,7 @@ Changed Areas:
 Tests Run:
 - python -m py_compile backend/app.py
 - pytest tests/test_backend_smoke.py tests/test_mlflow_kaggle.py tests/test_api_contract_mlflow_store.py -q
+- pytest tests/test_frontend_i18n_encoding.py -q
 - npm run build (comprehensive_ui)
 
 Pass/Fail:

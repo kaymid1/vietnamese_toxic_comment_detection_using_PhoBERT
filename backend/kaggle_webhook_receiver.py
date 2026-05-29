@@ -1,4 +1,4 @@
-﻿import hashlib
+import hashlib
 import json
 import os
 import re
@@ -92,6 +92,7 @@ def _webhook_mode() -> str:
 class TriggerRequest(BaseModel):
     run_id: str
     batch_id: Optional[str] = None
+    model_kind: Optional[str] = None
     training_mode: Optional[str] = None
     base_model: Optional[str] = None
     requested_at: Optional[str] = None
@@ -230,9 +231,14 @@ def _build_real_script_content(payload: TriggerRequest) -> str:
     if not notebook_source.exists():
         raise RuntimeError(f"Notebook source not found: {notebook_source}")
 
-    source_text = notebook_source.read_text(encoding="utf-8")
+    requested_model_kind = (payload.model_kind or "phobert").strip().lower()
+    configured_test_mode = _setting("KAGGLE_REAL_TEST_MODE", REAL_TEST_MODE).strip() or "smoke"
+    resolved_test_mode = "smoke" if requested_model_kind == "lr_smoke" else "phobert"
+    if configured_test_mode in {"validate", "smoke"} and requested_model_kind == "lr_smoke":
+        resolved_test_mode = configured_test_mode
+    source_text = notebook_source.read_text(encoding="utf-8-sig").replace("\ufeff", "").replace("ï»¿", "")
     env_overrides = {
-        "VIETTOXIC_TEST_MODE": _setting("KAGGLE_REAL_TEST_MODE", REAL_TEST_MODE).strip() or "smoke",
+        "VIETTOXIC_TEST_MODE": resolved_test_mode,
         "VIETTOXIC_BUNDLE_URL": _resolve_bundle_url(payload.batch_id, payload.run_id),
         "VIETTOXIC_RUN_NAME": payload.run_id,
         "VIETTOXIC_IMPORT_API_URL": REAL_IMPORT_API_URL,
@@ -240,6 +246,7 @@ def _build_real_script_content(payload: TriggerRequest) -> str:
         "VIETTOXIC_IMPORT_ARTIFACT_PATH": REAL_IMPORT_ARTIFACT_PATH,
         "VIETTOXIC_IMPORT_NOTES": REAL_IMPORT_NOTES,
         "VIETTOXIC_IMPORT_REQUIRED": "true" if REAL_IMPORT_REQUIRED else "false",
+        "VIETTOXIC_MODEL_KIND": requested_model_kind,
         "VIETTOXIC_TRAINING_MODE": payload.training_mode or "",
         "VIETTOXIC_BASE_MODEL": payload.base_model or "",
     }
@@ -281,6 +288,16 @@ def _script_to_ipynb(script_text: str) -> str:
         "nbformat_minor": 5,
     }
     return json.dumps(notebook, ensure_ascii=False, indent=2)
+
+
+def _attach_phobert_train_script(job_dir: Path) -> Optional[Path]:
+    source = BASE_DIR / "scripts" / "06_train_phobert_lora_macro_f1_finetune.py"
+    if not source.exists():
+        return None
+    target = job_dir / "scripts" / "train_phobert.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, target)
+    return target
 
 
 def _build_kernel_metadata(
@@ -484,6 +501,7 @@ def _trigger_mock(payload: TriggerRequest) -> Dict[str, Any]:
         "run_id": payload.run_id,
         "batch_id": payload.batch_id,
         "training_mode": payload.training_mode,
+        "model_kind": payload.model_kind,
         "base_model": payload.base_model,
         "notebook_url": payload.notebook_url,
         "requested_at": payload.requested_at,
@@ -533,6 +551,8 @@ def _trigger_real(payload: TriggerRequest) -> Dict[str, Any]:
         metadata_title = slug
 
     script_content = _build_real_script_content(payload)
+    if (payload.model_kind or "phobert").strip().lower() == "phobert":
+        _attach_phobert_train_script(job_dir)
     prefer_notebook = existing_kernel_type == "notebook" or existing_code_file.lower().endswith(".ipynb")
 
     def _write_kernel_payload(as_notebook: bool) -> tuple[str, str]:
@@ -609,6 +629,7 @@ def _trigger_real(payload: TriggerRequest) -> Dict[str, Any]:
         "run_id": payload.run_id,
         "batch_id": payload.batch_id,
         "training_mode": payload.training_mode,
+        "model_kind": payload.model_kind,
         "base_model": payload.base_model,
         "notebook_url": payload.notebook_url,
         "requested_at": payload.requested_at,
@@ -760,4 +781,3 @@ def kaggle_status(job_id: str = Query(..., min_length=1)) -> Dict[str, Any]:
         state["jobs"] = jobs
         _save_state(state)
         return payload
-

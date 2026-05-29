@@ -650,6 +650,7 @@ class SyntheticGenerateRequest(BaseModel):
     domain: SyntheticDomain
     style: SyntheticStyle
     label: int = Field(ge=0, le=1)
+    constructiveness: Optional[int] = Field(default=None, ge=0, le=1)
     count: int = Field(default=10, ge=1, le=200)
     model: Optional[str] = None
 
@@ -659,6 +660,7 @@ class SyntheticReviewItem(BaseModel):
     is_accepted: bool
     text: Optional[str] = None
     label: Optional[int] = Field(default=None, ge=0, le=1)
+    constructiveness: Optional[int] = Field(default=None, ge=0, le=1)
 
 
 class SyntheticReviewRequest(BaseModel):
@@ -769,6 +771,9 @@ class MlflowIngestOptions(BaseModel):
     max_length: int = Field(default=256, ge=16)
     page_threshold: float = Field(default=0.25, ge=0.0, le=1.0)
     seg_threshold: float = Field(default=0.4, ge=0.0, le=1.0)
+    crawl_timeout_sec: int = Field(default=90, ge=30, le=300)
+    max_load_more_clicks: int = Field(default=4, ge=0, le=30)
+    max_comments_per_url: int = Field(default=50, ge=0, le=5000)
     gate_accept_threshold: float = Field(default=MLFLOW_ACCEPT_THRESHOLD, ge=0.0, le=1.0)
     gate_discard_threshold: float = Field(default=MLFLOW_DISCARD_THRESHOLD, ge=0.0, le=1.0)
     persist_unused: bool = True
@@ -784,6 +789,8 @@ class MlflowCandidateReviewItem(BaseModel):
     action: Optional[Literal["include_toxic", "include_clean", "drop"]] = None
     decision: Optional[Literal["accept", "reject"]] = None
     pseudo_label: Optional[int] = Field(default=None, ge=0, le=1)
+    constructiveness_label: Optional[int] = Field(default=None, ge=0, le=1)
+    lock_state: Optional[bool] = None
 
 
 class MlflowCandidateReviewRequest(BaseModel):
@@ -794,11 +801,29 @@ class MlflowManualExportBundleRequest(BaseModel):
     batch_id: Optional[str] = None
     scope: Literal["all_batches", "batch"] = "all_batches"
     bundle_profile: Literal["clean_victsd_gold", "full_bundle"] = "clean_victsd_gold"
+    model_kind: Literal["phobert", "lr_smoke"] = "phobert"
+    training_mode: Literal["retrain", "finetune"] = "finetune"
+    balance_strategy: Literal["balanced_50_50", "all"] = "balanced_50_50"
+    include_base_model: bool = False
+    base_model: Optional[str] = None
     dataset_version: Optional[str] = None
     model_version: Optional[str] = None
     policy_version: Optional[str] = None
     include_unused: bool = False
     unused_scope: Literal["all", "auto_discarded", "manual_rejected"] = "all"
+
+
+class MlflowTrainingPreviewReviewItem(BaseModel):
+    id: int
+    selected_for_training: Optional[bool] = None
+    pseudo_label: Optional[int] = Field(default=None, ge=0, le=1)
+    constructiveness_label: Optional[int] = Field(default=None, ge=0, le=1)
+    clear_constructiveness: bool = False
+    lock_state: Optional[bool] = None
+
+
+class MlflowTrainingPreviewReviewRequest(BaseModel):
+    updates: List[MlflowTrainingPreviewReviewItem] = Field(min_length=1)
 
 
 class MlflowManualImportArtifactRequest(BaseModel):
@@ -811,6 +836,7 @@ class MlflowDOTriggerRequest(BaseModel):
     batch_id: Optional[str] = None
     provider: Literal["kaggle"] = "kaggle"
     compute_mode: Literal["kaggle"] = "kaggle"
+    model_kind: Literal["phobert", "lr_smoke"] = "phobert"
     training_mode: Literal["retrain", "finetune"] = "retrain"
     training_scope: Literal["light_only"] = "light_only"
     base_model: Optional[str] = None
@@ -1635,6 +1661,24 @@ def parse_json_array_from_llm(raw: str) -> List[Dict[str, Any]]:
                     return [item for item in value if isinstance(item, dict)]
         return []
 
+    def extract_objects_from_text(text: str) -> List[Dict[str, Any]]:
+        decoder = json.JSONDecoder()
+        items: List[Dict[str, Any]] = []
+        idx = 0
+        while idx < len(text):
+            start_obj = text.find("{", idx)
+            if start_obj == -1:
+                break
+            try:
+                parsed_obj, end_obj = decoder.raw_decode(text[start_obj:])
+            except json.JSONDecodeError:
+                idx = start_obj + 1
+                continue
+            if isinstance(parsed_obj, dict):
+                items.append(parsed_obj)
+            idx = start_obj + max(end_obj, 1)
+        return items
+
     try:
         parsed_direct = json.loads(cleaned)
         direct_items = extract_items(parsed_direct)
@@ -1646,13 +1690,13 @@ def parse_json_array_from_llm(raw: str) -> List[Dict[str, Any]]:
     start = cleaned.find("[")
     end = cleaned.rfind("]")
     if start == -1 or end == -1 or end <= start:
-        return []
+        return extract_objects_from_text(cleaned)
 
     payload = cleaned[start : end + 1]
     try:
         parsed = json.loads(payload)
     except json.JSONDecodeError:
-        return []
+        return extract_objects_from_text(payload)
 
     return extract_items(parsed)
 
@@ -1662,15 +1706,20 @@ def build_synthetic_prompt(
     style: str,
     label: int,
     count: int,
+    constructiveness: Optional[int] = None,
     length_guidance: Optional[str] = None,
 ) -> str:
     toxicity = "toxic" if label == 1 else "clean"
+    constructiveness_text = (
+        "masked/unknown" if constructiveness is None else ("constructive" if constructiveness == 1 else "non-constructive")
+    )
     guidance = f"\n7) {length_guidance}" if length_guidance else ""
     return (
         "Bạn là hệ thống tạo dữ liệu tiếng Việt cho phân loại toxic. "
         "Hãy tạo đúng số lượng mẫu theo yêu cầu và trả về JSON array hợp lệ, không có text ngoài JSON.\n"
-        f"Yêu cầu: domain={domain}, style={style}, label={label} ({toxicity}), số mẫu={count}.\n"
-        "Mỗi phần tử bắt buộc có schema: {\"text\": string, \"label\": 0|1, \"meta\": object}.\n"
+        f"Yêu cầu: domain={domain}, style={style}, toxicity={label} ({toxicity}), số mẫu={count}.\n"
+        "Mỗi phần tử bắt buộc có schema: {\"text\": string, \"label\": 0|1, \"toxicity\": 0|1, \"constructiveness\": 0|1|null, \"meta\": object}.\n"
+        "Trả về JSON compact, không markdown, không giải thích.\n"
         "Ràng buộc bắt buộc:\n"
         "1) Không lặp cấu trúc câu giữa các mẫu.\n"
         "2) Không dùng placeholder dạng [tên], [trường], <name>, {city}.\n"
@@ -1678,6 +1727,9 @@ def build_synthetic_prompt(
         "4) Dữ liệu phải tự nhiên, đúng tiếng Việt.\n"
         "5) meta phải chứa source=\"synthetic_llm\", domain, style.\n"
         "6) label trong từng sample phải đúng bằng label yêu cầu."
+        f"\nConstructiveness target: {constructiveness_text}. "
+        "Each sample must include constructiveness as 0, 1, or null. "
+        f"{'Use null when the target is masked/unknown.' if constructiveness is None else f'Every constructiveness value must equal {constructiveness}.'}"
         f"{guidance}"
     )
 
@@ -1688,7 +1740,7 @@ def call_gemini_with_model(prompt: str, model_name: Optional[str] = None) -> str
         raise HTTPException(status_code=400, detail="Missing GEMINI_API_KEY")
 
     api_version = get_setting("GEMINI_API_VERSION", "v1beta") or "v1beta"
-    max_tokens = get_int_setting("GEMINI_MAX_TOKENS", 1024, min_value=1)
+    max_tokens = max(get_int_setting("GEMINI_MAX_TOKENS", 1024, min_value=1), 4096)
 
     requested = normalize_gemini_model_name(model_name)
     candidates: List[str] = []
@@ -1702,7 +1754,11 @@ def call_gemini_with_model(prompt: str, model_name: Optional[str] = None) -> str
 
     payload = {
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.2, "maxOutputTokens": max_tokens},
+        "generationConfig": {
+            "temperature": 0.2,
+            "maxOutputTokens": max_tokens,
+            "responseMimeType": "application/json",
+        },
     }
     data = json.dumps(payload).encode("utf-8")
 
@@ -1890,6 +1946,7 @@ def init_feedback_db() -> None:
                 batch_id TEXT NOT NULL,
                 text TEXT NOT NULL,
                 label INTEGER NOT NULL,
+                constructiveness INTEGER,
                 domain TEXT NOT NULL,
                 style TEXT NOT NULL,
                 is_accepted INTEGER NOT NULL DEFAULT 1,
@@ -1932,6 +1989,12 @@ def init_feedback_db() -> None:
                 text TEXT NOT NULL,
                 score REAL,
                 pseudo_label INTEGER,
+                constructiveness_score REAL,
+                constructiveness_label INTEGER,
+                constructiveness_confidence TEXT,
+                selected_for_training INTEGER NOT NULL DEFAULT 1,
+                training_review_status TEXT NOT NULL DEFAULT 'auto',
+                is_locked INTEGER NOT NULL DEFAULT 0,
                 gate_bucket TEXT NOT NULL,
                 verification_status TEXT NOT NULL,
                 segment_hash TEXT,
@@ -2091,9 +2154,16 @@ def init_feedback_db() -> None:
         ensure_table_column(conn, "synthetic_dataset_row", "validation_flags", "TEXT")
         ensure_table_column(conn, "synthetic_dataset_row", "meta_json", "TEXT")
         ensure_table_column(conn, "synthetic_dataset_row", "reviewed_at", "TEXT")
+        ensure_table_column(conn, "synthetic_dataset_row", "constructiveness", "INTEGER")
         ensure_table_column(conn, "mlflow_comment_item", "label_source", "TEXT")
         ensure_table_column(conn, "mlflow_comment_item", "label_confidence", "TEXT")
         ensure_table_column(conn, "mlflow_comment_item", "domain_category", "TEXT")
+        ensure_table_column(conn, "mlflow_comment_item", "constructiveness_score", "REAL")
+        ensure_table_column(conn, "mlflow_comment_item", "constructiveness_label", "INTEGER")
+        ensure_table_column(conn, "mlflow_comment_item", "constructiveness_confidence", "TEXT")
+        ensure_table_column(conn, "mlflow_comment_item", "selected_for_training", "INTEGER NOT NULL DEFAULT 1")
+        ensure_table_column(conn, "mlflow_comment_item", "training_review_status", "TEXT NOT NULL DEFAULT 'auto'")
+        ensure_table_column(conn, "mlflow_comment_item", "is_locked", "INTEGER NOT NULL DEFAULT 0")
         ensure_table_column(conn, "mlflow_do_run", "droplet_id", "TEXT")
         ensure_table_column(conn, "mlflow_do_run", "artifact_uri", "TEXT")
         ensure_table_column(conn, "mlflow_do_run", "artifact_checksum", "TEXT")
@@ -2815,10 +2885,13 @@ def iter_dataset_rows(dataset_version: str) -> List[Dict[str, Any]]:
                         continue
                     text = obj.get("text")
                     label = normalize_int(obj.get("label"))
+                    constructiveness = normalize_int(obj.get("constructiveness"))
                     if label is None:
                         label = normalize_int(obj.get("toxicity"))
                     if text is None or label is None:
                         continue
+                    if constructiveness not in {0, 1}:
+                        constructiveness = None
                     meta = obj.get("meta") if isinstance(obj.get("meta"), dict) else {}
                     source = normalize_source(meta.get("source"))
                     if is_augmented:
@@ -2829,7 +2902,7 @@ def iter_dataset_rows(dataset_version: str) -> List[Dict[str, Any]]:
                         "split": split,
                         "is_augmented": is_augmented,
                     }
-                    rows.append({"text": text, "label": label, "meta": meta_out})
+                    rows.append({"text": text, "label": label, "constructiveness": constructiveness, "meta": meta_out})
         except Exception:
             continue
     return rows
@@ -2863,7 +2936,7 @@ def iter_feedback_rows() -> List[Dict[str, Any]]:
             "seg_threshold_used": normalize_score(seg_threshold_used),
             "created_at": created_at,
         }
-        rows.append({"text": text, "label": label_int, "meta": meta})
+        rows.append({"text": text, "label": label_int, "constructiveness": None, "meta": meta})
     return rows
 
 
@@ -3041,6 +3114,7 @@ def insert_synthetic_batch(
                     batch_id,
                     row["text"],
                     row["label"],
+                    row.get("constructiveness") if row.get("constructiveness") in {0, 1} else None,
                     domain,
                     style,
                     0,
@@ -3056,10 +3130,10 @@ def insert_synthetic_batch(
         conn.executemany(
             """
             INSERT INTO synthetic_dataset_row (
-                batch_id, text, label, domain, style, is_accepted,
+                batch_id, text, label, constructiveness, domain, style, is_accepted,
                 structure_fingerprint, text_hash, validation_flags, meta_json,
                 created_at, reviewed_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             payload_rows,
         )
@@ -3103,7 +3177,7 @@ def load_synthetic_rows(
 
     where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     query = f"""
-        SELECT id, batch_id, text, label, domain, style, is_accepted,
+        SELECT id, batch_id, text, label, constructiveness, domain, style, is_accepted,
                validation_flags, meta_json, created_at, reviewed_at
         FROM synthetic_dataset_row
         {where_sql}
@@ -3119,6 +3193,7 @@ def load_synthetic_rows(
         row_batch_id,
         text,
         row_label,
+        row_constructiveness,
         row_domain,
         row_style,
         is_accepted,
@@ -3155,12 +3230,15 @@ def load_synthetic_rows(
             except Exception:
                 flags = {}
 
+        normalized_constructiveness = normalize_int(row_constructiveness)
         rows.append(
             {
                 "id": sample_id,
                 "batch_id": row_batch_id,
                 "text": text,
                 "label": row_label,
+                "toxicity": row_label,
+                "constructiveness": normalized_constructiveness if normalized_constructiveness in {0, 1} else None,
                 "domain": row_domain,
                 "style": row_style,
                 "is_accepted": bool(is_accepted),
@@ -3197,7 +3275,7 @@ def update_synthetic_review(items: List[Dict[str, Any]]) -> int:
     init_feedback_db()
     now = datetime.utcnow().isoformat()
 
-    normalized: List[Tuple[int, Optional[str], Optional[int], Optional[str], int]] = []
+    normalized: List[Tuple[int, Optional[str], Optional[int], bool, Optional[int], Optional[str], int]] = []
     for item in items:
         sample_id = normalize_int(item.get("id"))
         if sample_id is None:
@@ -3211,6 +3289,10 @@ def update_synthetic_review(items: List[Dict[str, Any]]) -> int:
         reviewed_label = normalize_int(item.get("label"))
         if reviewed_label not in {0, 1}:
             reviewed_label = None
+        has_constructiveness = "constructiveness" in item
+        reviewed_constructiveness = normalize_int(item.get("constructiveness"))
+        if reviewed_constructiveness not in {0, 1}:
+            reviewed_constructiveness = None
 
         text_hash = build_text_hash(cleaned_text) if cleaned_text is not None else None
         normalized.append(
@@ -3218,6 +3300,8 @@ def update_synthetic_review(items: List[Dict[str, Any]]) -> int:
                 1 if bool(item.get("is_accepted")) else 0,
                 cleaned_text,
                 reviewed_label,
+                has_constructiveness,
+                reviewed_constructiveness,
                 text_hash,
                 sample_id,
             )
@@ -3228,17 +3312,18 @@ def update_synthetic_review(items: List[Dict[str, Any]]) -> int:
 
     changed = 0
     with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
-        for is_accepted, cleaned_text, reviewed_label, text_hash, sample_id in normalized:
+        for is_accepted, cleaned_text, reviewed_label, has_constructiveness, reviewed_constructiveness, text_hash, sample_id in normalized:
             existing = conn.execute(
-                "SELECT text, label, domain, style, meta_json FROM synthetic_dataset_row WHERE id = ?",
+                "SELECT text, label, constructiveness, domain, style, meta_json FROM synthetic_dataset_row WHERE id = ?",
                 (sample_id,),
             ).fetchone()
             if not existing:
                 continue
 
-            old_text, old_label, domain, style, old_meta_json = existing
+            old_text, old_label, old_constructiveness, domain, style, old_meta_json = existing
             final_text = cleaned_text if cleaned_text is not None else old_text
             final_label = reviewed_label if reviewed_label is not None else old_label
+            final_constructiveness = reviewed_constructiveness if has_constructiveness else old_constructiveness
 
             meta: Dict[str, Any] = {}
             if isinstance(old_meta_json, str) and old_meta_json.strip():
@@ -3255,6 +3340,8 @@ def update_synthetic_review(items: List[Dict[str, Any]]) -> int:
 
             meta["domain"] = domain
             meta["style"] = style
+            meta["toxicity"] = final_label
+            meta["constructiveness"] = final_constructiveness if normalize_int(final_constructiveness) in {0, 1} else None
 
             conn.execute(
                 """
@@ -3262,6 +3349,7 @@ def update_synthetic_review(items: List[Dict[str, Any]]) -> int:
                 SET is_accepted = ?,
                     text = ?,
                     label = ?,
+                    constructiveness = ?,
                     text_hash = ?,
                     meta_json = ?,
                     reviewed_at = ?
@@ -3271,6 +3359,7 @@ def update_synthetic_review(items: List[Dict[str, Any]]) -> int:
                     is_accepted,
                     final_text,
                     final_label,
+                    final_constructiveness,
                     text_hash if text_hash is not None else build_text_hash(final_text),
                     json.dumps(meta, ensure_ascii=False),
                     now,
@@ -3291,20 +3380,22 @@ def build_synthetic_stats(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     by_domain: Dict[str, Dict[str, int]] = {}
     by_style: Dict[str, Dict[str, int]] = {}
     by_label: Dict[str, Dict[str, int]] = {}
+    by_constructiveness: Dict[str, Dict[str, int]] = {}
     by_combo: Dict[str, Dict[str, int]] = {}
 
     for row in rows:
         domain = str(row.get("domain") or "unknown")
         style = str(row.get("style") or "unknown")
         label = str(row.get("label") if row.get("label") in {0, 1} else "unknown")
+        constructiveness = str(row.get("constructiveness") if row.get("constructiveness") in {0, 1} else "masked")
         bucket_status = "accepted" if row.get("is_accepted") else "rejected"
 
-        for group, key in [(by_domain, domain), (by_style, style), (by_label, label)]:
+        for group, key in [(by_domain, domain), (by_style, style), (by_label, label), (by_constructiveness, constructiveness)]:
             stats = group.setdefault(key, {"total": 0, "accepted": 0, "rejected": 0})
             stats["total"] += 1
             stats[bucket_status] += 1
 
-        combo_key = f"{domain}|{style}|{label}"
+        combo_key = f"{domain}|{style}|{label}|{constructiveness}"
         combo_stats = by_combo.setdefault(combo_key, {"total": 0, "accepted": 0, "rejected": 0})
         combo_stats["total"] += 1
         combo_stats[bucket_status] += 1
@@ -3317,6 +3408,7 @@ def build_synthetic_stats(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         "by_domain": by_domain,
         "by_style": by_style,
         "by_label": by_label,
+        "by_constructiveness": by_constructiveness,
         "by_combo": by_combo,
     }
 
@@ -3325,6 +3417,7 @@ def validate_synthetic_candidate(
     *,
     candidate: Dict[str, Any],
     expected_label: int,
+    expected_constructiveness: Optional[int] = None,
     domain: str,
     style: str,
     seen_hashes: set,
@@ -3333,7 +3426,7 @@ def validate_synthetic_candidate(
 ) -> Optional[Dict[str, Any]]:
     text = normalize_synthetic_text(str(candidate.get("text") or ""))
 
-    raw_label = candidate.get("label")
+    raw_label = candidate.get("label", candidate.get("toxicity"))
     label = normalize_int(raw_label)
     if label is None and isinstance(raw_label, str):
         lowered = raw_label.strip().lower()
@@ -3345,6 +3438,12 @@ def validate_synthetic_candidate(
     if not text or label is None:
         return None
     if label != expected_label:
+        return None
+    raw_constructiveness = candidate.get("constructiveness")
+    constructiveness = normalize_int(raw_constructiveness)
+    if constructiveness not in {0, 1}:
+        constructiveness = None
+    if expected_constructiveness is not None and constructiveness != expected_constructiveness:
         return None
     if PLACEHOLDER_PATTERN.search(text):
         return None
@@ -3368,6 +3467,8 @@ def validate_synthetic_candidate(
         "is_augmented": True,
         "domain": domain,
         "style": style,
+        "toxicity": expected_label,
+        "constructiveness": constructiveness,
         "word_length": word_length,
         "length_bucket": bucket,
     }
@@ -3375,6 +3476,8 @@ def validate_synthetic_candidate(
     return {
         "text": text,
         "label": expected_label,
+        "toxicity": expected_label,
+        "constructiveness": constructiveness,
         "meta": meta_out,
         "structure_fingerprint": structure_fingerprint,
         "text_hash": text_hash,
@@ -3476,6 +3579,9 @@ def build_mlflow_required_bundle_contents(bundle_profile: str = "clean_victsd_go
             "dataset/victsd_gold/train.jsonl",
             "dataset/victsd_gold/validation.jsonl",
             "dataset/victsd_gold/test.jsonl",
+            "pseudo/accepted.jsonl",
+            "pseudo/manifest.json",
+            "scripts/train_phobert.py",
             "manifest.json",
             "config/training_config.yaml",
             "config/gate_policy.json",
@@ -3487,6 +3593,68 @@ def build_mlflow_required_bundle_contents(bundle_profile: str = "clean_victsd_go
         "test.jsonl",
         "build_report.json",
     ]
+
+
+def infer_constructiveness_label(score: Optional[float], explicit_label: Optional[int] = None) -> Tuple[Optional[int], str]:
+    if explicit_label in {0, 1}:
+        return int(explicit_label), "model_label"
+    if score is None:
+        return None, "missing"
+    if score >= 0.70:
+        return 1, "high"
+    if score <= 0.30:
+        return 0, "high"
+    return None, "masked"
+
+
+def balance_training_rows(rows: List[sqlite3.Row], strategy: str) -> Tuple[List[sqlite3.Row], Dict[str, Any]]:
+    toxic_rows = [row for row in rows if normalize_int(row["pseudo_label"]) == 1]
+    clean_rows = [row for row in rows if normalize_int(row["pseudo_label"]) == 0]
+    if strategy != "balanced_50_50" or not toxic_rows or not clean_rows:
+        return rows, {
+            "strategy": strategy,
+            "selected_toxic": len(toxic_rows),
+            "selected_clean": len(clean_rows),
+            "dropped_toxic": 0,
+            "dropped_clean": 0,
+            "fallback": "single_class_or_all_strategy" if strategy == "balanced_50_50" else None,
+        }
+
+    limit = min(len(toxic_rows), len(clean_rows))
+    balanced = toxic_rows[:limit] + clean_rows[:limit]
+    balanced.sort(key=lambda row: int(row["id"]))
+    return balanced, {
+        "strategy": strategy,
+        "selected_toxic": limit,
+        "selected_clean": limit,
+        "dropped_toxic": len(toxic_rows) - limit,
+        "dropped_clean": len(clean_rows) - limit,
+        "fallback": None,
+    }
+
+
+def build_pseudo_training_row(row: sqlite3.Row, source: str = "mlflow_pseudo") -> Dict[str, Any]:
+    constructiveness_label = normalize_int(row["constructiveness_label"])
+    payload: Dict[str, Any] = {
+        "text": row["text"],
+        "label": int(row["pseudo_label"]),
+        "toxicity": int(row["pseudo_label"]),
+        "constructiveness": constructiveness_label if constructiveness_label in {0, 1} else None,
+        "meta": {
+            "source": source,
+            "batch_id": row["batch_id"],
+            "score": row["score"],
+            "url": row["url"],
+            "url_hash": row["url_hash"],
+            "segment_hash": row["segment_hash"],
+            "context_segment_hash": row["context_segment_hash"],
+            "html_tag": row["html_tag"],
+            "constructiveness_score": row["constructiveness_score"],
+            "constructiveness_confidence": row["constructiveness_confidence"],
+            "training_review_status": row["training_review_status"],
+        },
+    }
+    return payload
 
 
 def normalize_training_text(text: str) -> str:
@@ -3844,6 +4012,7 @@ def _do_extract_runtime_metadata(logs: List[str]) -> Dict[str, Any]:
         if meta:
             output["compute_mode"] = meta.get("compute_mode") or output.get("compute_mode")
             output["droplet_profile"] = meta.get("droplet_size") or output.get("droplet_profile")
+            output["model_kind"] = meta.get("model_kind") or output.get("model_kind")
             output["training_mode"] = meta.get("training_mode") or output.get("training_mode")
             output["base_model"] = meta.get("base_model") or output.get("base_model")
 
@@ -4318,27 +4487,37 @@ def mlflow_ingest(request: MlflowIngestRequest) -> Dict[str, Any]:
                 if score is None:
                     continue
                 seg_threshold_used = normalize_score(seg.get("seg_threshold_used"))
+                constructiveness_score = normalize_score(seg.get("constructiveness_score"))
+                constructiveness_label_raw = normalize_int(seg.get("constructiveness_label"))
+                constructiveness_label, constructiveness_confidence = infer_constructiveness_label(
+                    constructiveness_score,
+                    constructiveness_label_raw,
+                )
 
-                if score < discard_threshold:
-                    if not options.persist_unused:
-                        continue
-                    gate_bucket = "discarded"
-                    verification_status = "auto_discarded"
-                    pseudo_label = None
-                    label_source = "auto_gate"
-                    label_confidence = "high"
-                elif score >= accept_threshold:
+                if score >= accept_threshold:
                     gate_bucket = "accepted"
                     verification_status = "auto_accepted"
                     pseudo_label = 1
                     label_source = "auto_gate"
                     label_confidence = "high"
-                else:
+                    selected_for_training = 1
+                    training_review_status = "auto"
+                elif score <= discard_threshold:
                     gate_bucket = "accepted"
                     verification_status = "auto_accepted"
                     pseudo_label = 0
                     label_source = "auto_gate"
                     label_confidence = "high"
+                    selected_for_training = 1
+                    training_review_status = "auto"
+                else:
+                    gate_bucket = "candidate"
+                    verification_status = "unverified"
+                    pseudo_label = 1 if score >= 0.5 else 0
+                    label_source = "auto_gate"
+                    label_confidence = "medium"
+                    selected_for_training = 0
+                    training_review_status = "pending"
 
                 rows_to_insert.append(
                     (
@@ -4351,6 +4530,11 @@ def mlflow_ingest(request: MlflowIngestRequest) -> Dict[str, Any]:
                         seg.get("text") or seg.get("text_preview") or "",
                         score,
                         pseudo_label,
+                        constructiveness_score,
+                        constructiveness_label,
+                        constructiveness_confidence,
+                        selected_for_training,
+                        training_review_status,
                         gate_bucket,
                         verification_status,
                         seg.get("segment_hash"),
@@ -4369,9 +4553,11 @@ def mlflow_ingest(request: MlflowIngestRequest) -> Dict[str, Any]:
                     """
                     INSERT INTO mlflow_comment_item (
                         batch_id, job_id, url, url_hash, segment_id, domain_category, text, score, pseudo_label,
+                        constructiveness_score, constructiveness_label, constructiveness_confidence,
+                        selected_for_training, training_review_status,
                         gate_bucket, verification_status, segment_hash, context_segment_hash,
                         html_tag, seg_threshold_used, label_source, label_confidence, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     rows_to_insert,
                 )
@@ -4663,7 +4849,8 @@ def mlflow_review_history(
         rows = conn.execute(
             f"""
             SELECT id, batch_id, url, url_hash, segment_id, domain_category, text, score,
-                   pseudo_label, gate_bucket, verification_status,
+                   pseudo_label, constructiveness_score, constructiveness_label, constructiveness_confidence,
+                   selected_for_training, training_review_status, is_locked, gate_bucket, verification_status,
                    segment_hash, context_segment_hash, html_tag,
                    seg_threshold_used, label_source, label_confidence, created_at, reviewed_at
             FROM mlflow_comment_item
@@ -4724,7 +4911,8 @@ def mlflow_candidates(
         rows = conn.execute(
             f"""
             SELECT id, batch_id, url, url_hash, segment_id, domain_category, text, score,
-                   pseudo_label, gate_bucket, verification_status,
+                   pseudo_label, constructiveness_score, constructiveness_label, constructiveness_confidence,
+                   selected_for_training, training_review_status, is_locked, gate_bucket, verification_status,
                    segment_hash, context_segment_hash, html_tag,
                    seg_threshold_used, label_source, label_confidence, created_at, reviewed_at
             FROM mlflow_comment_item
@@ -4752,15 +4940,20 @@ def mlflow_candidates_review(request: MlflowCandidateReviewRequest) -> Dict[str,
     ids = [item.id for item in request.updates]
     action_by_id = {item.id: item.action for item in request.updates}
     decision_by_id = {item.id: item.decision for item in request.updates}
+    lock_state_by_id = {item.id: item.lock_state for item in request.updates}
     pseudo_label_by_id = {
         item.id: (item.pseudo_label if item.pseudo_label in {0, 1} else None)
+        for item in request.updates
+    }
+    constructiveness_label_by_id = {
+        item.id: (item.constructiveness_label if item.constructiveness_label in {0, 1} else None)
         for item in request.updates
     }
 
     with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
-            f"SELECT id, batch_id, pseudo_label FROM mlflow_comment_item WHERE id IN ({', '.join(['?'] * len(ids))})",
+            f"SELECT id, batch_id, pseudo_label, is_locked FROM mlflow_comment_item WHERE id IN ({', '.join(['?'] * len(ids))})",
             tuple(ids),
         ).fetchall()
         if not rows:
@@ -4769,11 +4962,27 @@ def mlflow_candidates_review(request: MlflowCandidateReviewRequest) -> Dict[str,
         now = datetime.utcnow().isoformat() + "Z"
         affected_batch_ids = {str(row["batch_id"]) for row in rows}
         updated = 0
+        locked_updated = 0
+        skipped_locked_ids: List[int] = []
         for row in rows:
             item_id = int(row["id"])
             manual_label = pseudo_label_by_id.get(item_id)
             current_label = normalize_int(row["pseudo_label"])
             final_label = manual_label if manual_label in {0, 1} else current_label
+            effective_locked = bool(int(row["is_locked"] or 0))
+
+            requested_lock_state = lock_state_by_id.get(item_id)
+            if requested_lock_state is not None:
+                next_lock_state = 1 if requested_lock_state else 0
+                if next_lock_state != int(row["is_locked"] or 0):
+                    cursor_lock = conn.execute(
+                        "UPDATE mlflow_comment_item SET is_locked = ?, reviewed_at = ? WHERE id = ?",
+                        (next_lock_state, now, item_id),
+                    )
+                    changed = int(cursor_lock.rowcount or 0)
+                    updated += changed
+                    locked_updated += changed
+                effective_locked = bool(next_lock_state)
 
             action = action_by_id.get(item_id)
             decision = decision_by_id.get(item_id)
@@ -4785,44 +4994,55 @@ def mlflow_candidates_review(request: MlflowCandidateReviewRequest) -> Dict[str,
                 elif decision == "reject":
                     action = "drop"
 
+            if action is None:
+                continue
+
             if action not in {"include_toxic", "include_clean", "drop"}:
                 raise HTTPException(status_code=400, detail=f"Unsupported review action for item {item_id}")
+
+            if effective_locked and action == "drop":
+                skipped_locked_ids.append(item_id)
+                continue
 
             if action == "include_toxic":
                 cursor = conn.execute(
                     """
                     UPDATE mlflow_comment_item
-                    SET verification_status = ?, gate_bucket = ?, pseudo_label = ?, label_source = ?, label_confidence = ?, reviewed_at = ?
+                    SET verification_status = ?, gate_bucket = ?, pseudo_label = ?, constructiveness_label = COALESCE(?, constructiveness_label),
+                        selected_for_training = ?, training_review_status = ?, label_source = ?, label_confidence = ?, reviewed_at = ?
                     WHERE id = ?
                     """,
-                    ("manual_accepted", "accepted", 1, "manual_override", "high", now, item_id),
+                    ("manual_accepted", "accepted", 1, constructiveness_label_by_id.get(item_id), 1, "manual_approved", "manual_override", "high", now, item_id),
                 )
             elif action == "include_clean":
                 cursor = conn.execute(
                     """
                     UPDATE mlflow_comment_item
-                    SET verification_status = ?, gate_bucket = ?, pseudo_label = ?, label_source = ?, label_confidence = ?, reviewed_at = ?
+                    SET verification_status = ?, gate_bucket = ?, pseudo_label = ?, constructiveness_label = COALESCE(?, constructiveness_label),
+                        selected_for_training = ?, training_review_status = ?, label_source = ?, label_confidence = ?, reviewed_at = ?
                     WHERE id = ?
                     """,
-                    ("manual_accepted", "accepted", 0, "manual_override", "high", now, item_id),
+                    ("manual_accepted", "accepted", 0, constructiveness_label_by_id.get(item_id), 1, "manual_approved", "manual_override", "high", now, item_id),
                 )
             elif final_label in {0, 1}:
                 cursor = conn.execute(
                     """
                     UPDATE mlflow_comment_item
-                    SET verification_status = ?, gate_bucket = ?, pseudo_label = ?, label_source = ?, label_confidence = ?, reviewed_at = ?
+                    SET verification_status = ?, gate_bucket = ?, pseudo_label = ?, selected_for_training = ?, training_review_status = ?,
+                        label_source = ?, label_confidence = ?, reviewed_at = ?
                     WHERE id = ?
                     """,
-                    ("manual_rejected", "discarded", final_label, "manual_override", "high", now, item_id),
+                    ("manual_rejected", "discarded", final_label, 0, "manual_removed", "manual_override", "high", now, item_id),
                 )
             else:
                 cursor = conn.execute(
                     """
                     UPDATE mlflow_comment_item
-                    SET verification_status = ?, gate_bucket = ?, label_source = ?, label_confidence = ?, reviewed_at = ?
+                    SET verification_status = ?, gate_bucket = ?, selected_for_training = ?, training_review_status = ?,
+                        label_source = ?, label_confidence = ?, reviewed_at = ?
                     WHERE id = ?
                     """,
-                    ("manual_rejected", "discarded", "manual_rejected_unlabeled", "low", now, item_id),
+                    ("manual_rejected", "discarded", 0, "manual_removed", "manual_rejected_unlabeled", "low", now, item_id),
                 )
             updated += int(cursor.rowcount or 0)
 
@@ -4835,6 +5055,9 @@ def mlflow_candidates_review(request: MlflowCandidateReviewRequest) -> Dict[str,
     primary_batch = sorted(affected_batch_ids)[0]
     return {
         "updated": updated,
+        "locked_updated": locked_updated,
+        "skipped_locked": len(skipped_locked_ids),
+        "skipped_locked_ids": skipped_locked_ids,
         "batch_id": primary_batch,
         "counts": counts_by_batch.get(primary_batch, {"accepted": 0, "candidate": 0, "discarded": 0, "total": 0}),
         "counts_by_batch": counts_by_batch,
@@ -4892,6 +5115,151 @@ def mlflow_threshold_status(
     }
 
 
+@app.get("/api/mlflow/training-preview", dependencies=[Depends(require_admin)])
+def mlflow_training_preview(
+    batch_id: Optional[str] = None,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=300),
+    strict_batch: bool = Query(default=False),
+    scope: Literal["batch", "all_batches"] = Query(default="all_batches"),
+    label_filter: Literal["all", "toxic", "clean"] = Query(default="all"),
+    constructiveness_filter: Literal["all", "included", "masked"] = Query(default="all"),
+) -> Dict[str, Any]:
+    init_feedback_db()
+    resolved_batch_id: Optional[str] = None
+    params: List[Any] = []
+    where_parts = ["gate_bucket IN ('accepted', 'candidate')"]
+    if scope == "batch":
+        resolved_batch_id = resolve_mlflow_batch_id(batch_id, strict=strict_batch)
+        where_parts.insert(0, "batch_id = ?")
+        params.append(resolved_batch_id)
+    if label_filter == "toxic":
+        where_parts.append("pseudo_label = 1")
+    elif label_filter == "clean":
+        where_parts.append("pseudo_label = 0")
+    if constructiveness_filter == "included":
+        where_parts.append("constructiveness_label IN (0, 1)")
+    elif constructiveness_filter == "masked":
+        where_parts.append("constructiveness_label IS NULL")
+
+    where_sql = " AND ".join(where_parts)
+    offset = (page - 1) * page_size
+
+    with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        total = int(conn.execute(f"SELECT COUNT(1) FROM mlflow_comment_item WHERE {where_sql}", tuple(params)).fetchone()[0])
+        rows = conn.execute(
+            f"""
+            SELECT id, batch_id, url, url_hash, segment_id, domain_category, text, score,
+                   pseudo_label, constructiveness_score, constructiveness_label, constructiveness_confidence,
+                   selected_for_training, training_review_status, is_locked, gate_bucket, verification_status,
+                   segment_hash, context_segment_hash, html_tag, seg_threshold_used,
+                   label_source, label_confidence, created_at, reviewed_at
+            FROM mlflow_comment_item
+            WHERE {where_sql}
+            ORDER BY gate_bucket ASC, selected_for_training DESC, id DESC
+            LIMIT ? OFFSET ?
+            """,
+            tuple([*params, page_size, offset]),
+        ).fetchall()
+        all_rows = conn.execute(
+            f"""
+            SELECT id, pseudo_label, constructiveness_label, selected_for_training, gate_bucket, training_review_status, is_locked
+            FROM mlflow_comment_item
+            WHERE {where_sql}
+            """,
+            tuple(params),
+        ).fetchall()
+
+    selected_rows = [
+        row for row in all_rows
+        if int(row["selected_for_training"] or 0) == 1
+        and str(row["gate_bucket"] or "") == "accepted"
+        and normalize_int(row["pseudo_label"]) in {0, 1}
+    ]
+    toxic_selected = sum(1 for row in selected_rows if normalize_int(row["pseudo_label"]) == 1)
+    clean_selected = sum(1 for row in selected_rows if normalize_int(row["pseudo_label"]) == 0)
+    constructiveness_included = sum(1 for row in selected_rows if normalize_int(row["constructiveness_label"]) in {0, 1})
+    return {
+        "scope": scope,
+        "batch_id": resolved_batch_id,
+        "items": [dict(row) for row in rows],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "counts": {
+            "selected": len(selected_rows),
+            "selected_toxic": toxic_selected,
+            "selected_clean": clean_selected,
+            "candidate": sum(1 for row in all_rows if str(row["gate_bucket"] or "") == "candidate"),
+            "removed": sum(1 for row in all_rows if str(row["training_review_status"] or "") == "manual_removed"),
+        },
+        "balance": {
+            "strategy": "balanced_50_50",
+            "balanced_count": 2 * min(toxic_selected, clean_selected) if toxic_selected and clean_selected else len(selected_rows),
+            "toxic_available": toxic_selected,
+            "clean_available": clean_selected,
+        },
+        "constructiveness": {
+            "included": constructiveness_included,
+            "masked": max(0, len(selected_rows) - constructiveness_included),
+        },
+    }
+
+
+@app.post("/api/mlflow/training-preview/review", dependencies=[Depends(require_admin)])
+def mlflow_training_preview_review(request: MlflowTrainingPreviewReviewRequest) -> Dict[str, Any]:
+    init_feedback_db()
+    ids = [item.id for item in request.updates]
+    now = datetime.utcnow().isoformat() + "Z"
+    with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        existing = conn.execute(
+            f"SELECT id, is_locked FROM mlflow_comment_item WHERE id IN ({', '.join(['?'] * len(ids))})",
+            tuple(ids),
+        ).fetchall()
+        if not existing:
+            raise HTTPException(status_code=404, detail="No training preview rows found for provided ids")
+        existing_by_id = {int(row["id"]): bool(int(row["is_locked"] or 0)) for row in existing}
+
+        updated = 0
+        skipped_locked_ids: List[int] = []
+        for item in request.updates:
+            current_locked = existing_by_id.get(item.id, False)
+            target_locked = item.lock_state if item.lock_state is not None else current_locked
+            if item.selected_for_training is False and target_locked:
+                skipped_locked_ids.append(item.id)
+                continue
+
+            fields = ["reviewed_at = ?"]
+            values: List[Any] = [now]
+            if item.lock_state is not None:
+                fields.append("is_locked = ?")
+                values.append(1 if item.lock_state else 0)
+            if item.selected_for_training is not None:
+                fields.append("selected_for_training = ?")
+                values.append(1 if item.selected_for_training else 0)
+                fields.append("training_review_status = ?")
+                values.append("manual_approved" if item.selected_for_training else "manual_removed")
+            if item.pseudo_label in {0, 1}:
+                fields.extend(["pseudo_label = ?", "gate_bucket = ?", "verification_status = ?", "label_source = ?", "label_confidence = ?"])
+                values.extend([int(item.pseudo_label), "accepted", "manual_accepted", "manual_override", "high"])
+            if item.clear_constructiveness:
+                fields.extend(["constructiveness_label = ?", "constructiveness_confidence = ?"])
+                values.extend([None, "masked"])
+            elif item.constructiveness_label in {0, 1}:
+                fields.extend(["constructiveness_label = ?", "constructiveness_confidence = ?"])
+                values.extend([int(item.constructiveness_label), "manual"])
+            values.append(item.id)
+            cursor = conn.execute(
+                f"UPDATE mlflow_comment_item SET {', '.join(fields)} WHERE id = ?",
+                tuple(values),
+            )
+            updated += int(cursor.rowcount or 0)
+        conn.commit()
+    return {"status": "ok", "updated": updated, "skipped_locked": len(skipped_locked_ids), "skipped_locked_ids": skipped_locked_ids}
+
+
 @app.post("/api/mlflow/manual/export-bundle", dependencies=[Depends(require_admin)])
 def mlflow_manual_export_bundle(request: MlflowManualExportBundleRequest) -> Dict[str, Any]:
     init_feedback_db()
@@ -4919,21 +5287,24 @@ def mlflow_manual_export_bundle(request: MlflowManualExportBundleRequest) -> Dic
                 "SELECT batch_id, model_id, created_at FROM mlflow_crawl_batch ORDER BY created_at DESC LIMIT 1"
             ).fetchone()
 
-        accepted_where = "gate_bucket = 'accepted' AND pseudo_label IN (0, 1)"
+        accepted_where = "gate_bucket = 'accepted' AND pseudo_label IN (0, 1) AND COALESCE(selected_for_training, 1) = 1"
         accepted_params: List[Any] = []
         if resolved_batch_id:
             accepted_where += " AND batch_id = ?"
             accepted_params.append(resolved_batch_id)
 
-        accepted_rows = conn.execute(
+        accepted_rows_all = conn.execute(
             f"""
-            SELECT batch_id, text, pseudo_label, score, url, url_hash, segment_hash, context_segment_hash, html_tag
+            SELECT id, batch_id, text, pseudo_label, constructiveness_score, constructiveness_label,
+                   constructiveness_confidence, training_review_status, score, url, url_hash,
+                   segment_hash, context_segment_hash, html_tag
             FROM mlflow_comment_item
             WHERE {accepted_where}
             ORDER BY id ASC
             """,
             tuple(accepted_params),
         ).fetchall()
+        accepted_rows, balance_stats = balance_training_rows(accepted_rows_all, request.balance_strategy)
 
         candidate_where = "gate_bucket = 'candidate' AND verification_status = 'unverified'"
         candidate_params: List[Any] = []
@@ -4943,7 +5314,9 @@ def mlflow_manual_export_bundle(request: MlflowManualExportBundleRequest) -> Dic
 
         candidate_rows = conn.execute(
             f"""
-            SELECT batch_id, text, pseudo_label, score, url, url_hash, segment_hash, context_segment_hash, html_tag
+            SELECT id, batch_id, text, pseudo_label, constructiveness_score, constructiveness_label,
+                   constructiveness_confidence, training_review_status, score, url, url_hash,
+                   segment_hash, context_segment_hash, html_tag
             FROM mlflow_comment_item
             WHERE {candidate_where}
             ORDER BY id ASC
@@ -4965,7 +5338,9 @@ def mlflow_manual_export_bundle(request: MlflowManualExportBundleRequest) -> Dic
 
             unused_rows = conn.execute(
                 f"""
-                SELECT batch_id, text, pseudo_label, score, url, url_hash, segment_hash, context_segment_hash, html_tag, verification_status
+                SELECT id, batch_id, text, pseudo_label, constructiveness_score, constructiveness_label,
+                       constructiveness_confidence, training_review_status, score, url, url_hash,
+                       segment_hash, context_segment_hash, html_tag, verification_status
                 FROM mlflow_comment_item
                 WHERE {unused_where}
                 ORDER BY id ASC
@@ -4988,6 +5363,16 @@ def mlflow_manual_export_bundle(request: MlflowManualExportBundleRequest) -> Dic
     batch_token = slugify_token(resolved_batch_id or "global")
     bundle_profile = request.bundle_profile
     required_zip_contents = build_mlflow_required_bundle_contents(bundle_profile)
+    local_base_model_dir: Optional[Path] = None
+    if bundle_profile == "full_bundle" and request.include_base_model and request.base_model:
+        try:
+            model_type, _, model_path = resolve_model_path(resolve_model_root(), request.base_model)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Cannot include base_model in bundle: {exc}") from exc
+        if model_type != "phobert":
+            raise HTTPException(status_code=400, detail="Only PhoBERT base models can be bundled for finetune")
+        local_base_model_dir = model_path
+        required_zip_contents.append("base_model/config.json")
 
     if bundle_profile == "full_bundle":
         out_path = out_dir / f"mlflow_bundle_{scope_token}_{batch_token}_{timestamp}.zip"
@@ -4995,41 +5380,14 @@ def mlflow_manual_export_bundle(request: MlflowManualExportBundleRequest) -> Dic
         out_path = out_dir / f"victsd_gold_merged_{scope_token}_{batch_token}_{timestamp}.zip"
 
     accepted_jsonl = "\n".join(
-        json.dumps(
-            {
-                "text": row["text"],
-                "label": int(row["pseudo_label"]),
-                "meta": {
-                    "source": "mlflow_pseudo",
-                    "batch_id": row["batch_id"],
-                    "score": row["score"],
-                    "url": row["url"],
-                    "url_hash": row["url_hash"],
-                    "segment_hash": row["segment_hash"],
-                    "context_segment_hash": row["context_segment_hash"],
-                    "html_tag": row["html_tag"],
-                },
-            },
-            ensure_ascii=False,
-        )
+        json.dumps(build_pseudo_training_row(row, "mlflow_pseudo"), ensure_ascii=False)
         for row in accepted_rows
     )
     candidate_jsonl = "\n".join(
         json.dumps(
-            {
-                "text": row["text"],
-                "label": int(row["pseudo_label"] if row["pseudo_label"] is not None else 0),
-                "meta": {
-                    "source": "mlflow_candidate",
-                    "batch_id": row["batch_id"],
-                    "score": row["score"],
-                    "url": row["url"],
-                    "url_hash": row["url_hash"],
-                    "segment_hash": row["segment_hash"],
-                    "context_segment_hash": row["context_segment_hash"],
-                    "html_tag": row["html_tag"],
-                },
-            },
+            build_pseudo_training_row(row, "mlflow_candidate")
+            if normalize_int(row["pseudo_label"]) in {0, 1}
+            else {"text": row["text"], "label": 0, "toxicity": 0, "constructiveness": None, "meta": {"source": "mlflow_candidate"}},
             ensure_ascii=False,
         )
         for row in candidate_rows
@@ -5037,19 +5395,12 @@ def mlflow_manual_export_bundle(request: MlflowManualExportBundleRequest) -> Dic
     unused_jsonl = "\n".join(
         json.dumps(
             {
-                "text": row["text"],
-                "label": int(row["pseudo_label"] if row["pseudo_label"] is not None else 0),
-                "meta": {
-                    "source": "mlflow_unused",
-                    "batch_id": row["batch_id"],
-                    "score": row["score"],
-                    "url": row["url"],
-                    "url_hash": row["url_hash"],
-                    "segment_hash": row["segment_hash"],
-                    "context_segment_hash": row["context_segment_hash"],
-                    "html_tag": row["html_tag"],
-                    "verification_status": row["verification_status"],
-                },
+                **(
+                    build_pseudo_training_row(row, "mlflow_unused")
+                    if normalize_int(row["pseudo_label"]) in {0, 1}
+                    else {"text": row["text"], "label": 0, "toxicity": 0, "constructiveness": None, "meta": {"source": "mlflow_unused"}}
+                ),
+                "verification_status": row["verification_status"],
             },
             ensure_ascii=False,
         )
@@ -5082,6 +5433,9 @@ def mlflow_manual_export_bundle(request: MlflowManualExportBundleRequest) -> Dic
             {
                 "text": normalized_text,
                 "toxicity": int(row["pseudo_label"]),
+                "constructiveness": normalize_int(row["constructiveness_label"])
+                if normalize_int(row["constructiveness_label"]) in {0, 1}
+                else None,
                 "meta": {
                     "source": "MLFlowAccepted",
                     "batch_id": row["batch_id"],
@@ -5089,6 +5443,8 @@ def mlflow_manual_export_bundle(request: MlflowManualExportBundleRequest) -> Dic
                     "url": row["url"],
                     "url_hash": row["url_hash"],
                     "segment_hash": row["segment_hash"],
+                    "constructiveness_score": row["constructiveness_score"],
+                    "constructiveness_confidence": row["constructiveness_confidence"],
                 },
             }
         )
@@ -5097,6 +5453,10 @@ def mlflow_manual_export_bundle(request: MlflowManualExportBundleRequest) -> Dic
 
     training_config_yaml = (
         "model: phobert\n"
+        f"model_kind: {request.model_kind}\n"
+        f"training_mode: {request.training_mode}\n"
+        f"balance_strategy: {request.balance_strategy}\n"
+        f"base_model: {request.base_model or ''}\n"
         f"model_version: {versions['model_version']}\n"
         f"dataset_version: {versions['dataset_version']}\n"
         f"policy_version: {versions['policy_version']}\n"
@@ -5118,10 +5478,17 @@ def mlflow_manual_export_bundle(request: MlflowManualExportBundleRequest) -> Dic
         "scope": scope_token,
         "batch_id": resolved_batch_id,
         "record_count": len(accepted_rows),
+        "record_count_before_balance": len(accepted_rows_all),
         "candidate_count": len(candidate_rows),
         "unused_count": len(unused_rows),
         "include_unused": request.include_unused,
         "unused_scope": request.unused_scope,
+        "model_kind": request.model_kind,
+        "training_mode": request.training_mode,
+        "balance_strategy": request.balance_strategy,
+        "balance_stats": balance_stats,
+        "base_model": request.base_model,
+        "base_model_bundled": local_base_model_dir is not None,
         "merge_stats": {
             "base_train_count": dedup_existing_count,
             "added_to_train": added_to_train,
@@ -5131,6 +5498,17 @@ def mlflow_manual_export_bundle(request: MlflowManualExportBundleRequest) -> Dic
         },
         **versions,
         "required_zip_contents": required_zip_contents,
+    }
+    pseudo_manifest_json = {
+        "artifact_type": "mlflow_pseudo_labels",
+        "batch_id": resolved_batch_id or "all_batches",
+        "seed_model": request.base_model or model_version,
+        "created_at": manifest_json["created_at"],
+        "n_accepted": len(accepted_rows),
+        "n_accepted_toxic": sum(1 for row in accepted_rows if normalize_int(row["pseudo_label"]) == 1),
+        "n_accepted_clean": sum(1 for row in accepted_rows if normalize_int(row["pseudo_label"]) == 0),
+        "constructiveness_included": sum(1 for row in accepted_rows if normalize_int(row["constructiveness_label"]) in {0, 1}),
+        "balance_stats": balance_stats,
     }
 
     train_jsonl = "\n".join(json.dumps(item, ensure_ascii=False) for item in train_rows)
@@ -5146,6 +5524,15 @@ def mlflow_manual_export_bundle(request: MlflowManualExportBundleRequest) -> Dic
             zf.writestr("dataset/victsd_gold/train.jsonl", train_jsonl + ("\n" if train_jsonl else ""))
             zf.writestr("dataset/victsd_gold/validation.jsonl", validation_jsonl + ("\n" if validation_jsonl else ""))
             zf.writestr("dataset/victsd_gold/test.jsonl", test_jsonl + ("\n" if test_jsonl else ""))
+            zf.writestr("pseudo/accepted.jsonl", accepted_jsonl + ("\n" if accepted_jsonl else ""))
+            zf.writestr("pseudo/manifest.json", json.dumps(pseudo_manifest_json, ensure_ascii=False, indent=2))
+            train_script_path = Path(__file__).resolve().parents[1] / "scripts" / "06_train_phobert_lora_macro_f1_finetune.py"
+            if train_script_path.exists():
+                zf.write(train_script_path, "scripts/train_phobert.py")
+            if local_base_model_dir is not None:
+                for path in local_base_model_dir.rglob("*"):
+                    if path.is_file():
+                        zf.write(path, f"base_model/{path.relative_to(local_base_model_dir).as_posix()}")
             zf.writestr("manifest.json", json.dumps(manifest_json, ensure_ascii=False, indent=2))
             zf.writestr("config/training_config.yaml", training_config_yaml)
             zf.writestr("config/gate_policy.json", json.dumps(gate_policy_json, ensure_ascii=False, indent=2))
@@ -5176,15 +5563,25 @@ def mlflow_manual_export_bundle(request: MlflowManualExportBundleRequest) -> Dic
         "bundle_path": relative_bundle_path,
         "download_url": download_path,
         "bundle_profile": bundle_profile,
+        "model_kind": request.model_kind,
+        "training_mode": request.training_mode,
+        "balance_strategy": request.balance_strategy,
         "scope": scope_token,
         "batch_id": resolved_batch_id,
         "count": len(accepted_rows),
+        "count_before_balance": len(accepted_rows_all),
         "candidate_count": len(candidate_rows),
         "unused_count": len(unused_rows),
         "include_unused": request.include_unused,
         "unused_scope": request.unused_scope,
         "required_zip_contents": required_zip_contents,
         "artifact_versions": versions,
+        "balance_stats": balance_stats,
+        "constructiveness": {
+            "included": pseudo_manifest_json["constructiveness_included"],
+            "masked": max(0, len(accepted_rows) - int(pseudo_manifest_json["constructiveness_included"])),
+        },
+        "base_model_bundled": local_base_model_dir is not None,
         "merge_stats": manifest_json["merge_stats"],
     }
 
@@ -5429,28 +5826,65 @@ def _kaggle_http_json(method: str, url: str, payload: Optional[Dict[str, Any]] =
         return {}
 
 
+def _kaggle_webhook_health_url(webhook_url: str) -> Optional[str]:
+    parsed = urllib.parse.urlparse((webhook_url or "").strip())
+    if not parsed.scheme or not parsed.netloc:
+        return None
+    if not parsed.path.rstrip("/").startswith("/kaggle"):
+        return None
+    return urllib.parse.urlunparse((parsed.scheme, parsed.netloc, "/health", "", "", ""))
+
+
+def _kaggle_webhook_reachability(webhook_url: str) -> tuple[bool, Optional[str]]:
+    health_url = _kaggle_webhook_health_url(webhook_url)
+    if not health_url:
+        return True, None
+
+    req = urllib.request.Request(url=health_url, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            if 200 <= resp.status < 500:
+                return True, None
+            return False, f"Webhook health returned HTTP {resp.status} ({health_url})"
+    except urllib.error.HTTPError as exc:
+        if 200 <= exc.code < 500:
+            return True, None
+        return False, f"Webhook health returned HTTP {exc.code} ({health_url})"
+    except (TimeoutError, socket.timeout) as exc:
+        return False, f"Webhook health timeout ({health_url}): {exc}"
+    except urllib.error.URLError as exc:
+        return False, f"Webhook receiver unreachable ({health_url}): {exc.reason}"
+
+
 @app.get("/api/mlflow/kaggle/preflight", dependencies=[Depends(require_admin)])
 def mlflow_kaggle_preflight() -> Dict[str, Any]:
     checked_at = datetime.utcnow().isoformat() + "Z"
     webhook_mode = (get_setting("KAGGLE_WEBHOOK_MODE", "mock") or "mock").strip().lower()
     if webhook_mode not in {"mock", "real"}:
         webhook_mode = "mock"
+    webhook_url = (get_setting("KAGGLE_WEBHOOK_URL", "") or "").strip()
     required = {
         "KAGGLE_NOTEBOOK_URL": bool((get_setting("KAGGLE_NOTEBOOK_URL", "") or "").strip()),
-        "KAGGLE_WEBHOOK_URL": bool((get_setting("KAGGLE_WEBHOOK_URL", "") or "").strip()),
+        "KAGGLE_WEBHOOK_URL": bool(webhook_url),
     }
     if webhook_mode == "real":
         required["KAGGLE_USERNAME"] = bool((get_setting("KAGGLE_USERNAME", "") or "").strip())
         required["KAGGLE_KEY"] = bool((get_setting("KAGGLE_KEY", "") or "").strip())
     missing = [key for key, ok in required.items() if not ok]
     warnings: List[str] = []
+    webhook_reachable = True
+    if webhook_url:
+        webhook_reachable, webhook_reachability_error = _kaggle_webhook_reachability(webhook_url)
+        required["KAGGLE_WEBHOOK_REACHABLE"] = webhook_reachable
+        if not webhook_reachable and webhook_reachability_error:
+            warnings.append(webhook_reachability_error)
     if webhook_mode == "mock":
         warnings.append("KAGGLE_WEBHOOK_MODE=mock: trigger will run in simulation mode and skip credential validation.")
     if not (get_setting("KAGGLE_STATUS_WEBHOOK_URL", "") or "").strip():
         warnings.append("KAGGLE_STATUS_WEBHOOK_URL chưa cấu hình: status chỉ hiển thị từ DB local, không poll cloud realtime.")
 
     return {
-        "ready": len(missing) == 0,
+        "ready": len(missing) == 0 and webhook_reachable,
         "missing": missing,
         "warnings": warnings,
         "checks": required,
@@ -5478,8 +5912,6 @@ def mlflow_kaggle_trigger(request: MlflowDOTriggerRequest) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail="Kaggle automation only supports light_only scope")
     if training_mode not in {"finetune", "retrain"}:
         raise HTTPException(status_code=400, detail="Kaggle automation only supports finetune/retrain")
-    if training_mode == "retrain" and not base_model:
-        raise HTTPException(status_code=400, detail="Light retrain on Kaggle requires base_model")
     if webhook_mode == "real":
         kaggle_username = (get_setting("KAGGLE_USERNAME", "") or "").strip()
         kaggle_key = (get_setting("KAGGLE_KEY", "") or "").strip()
@@ -5514,7 +5946,7 @@ def mlflow_kaggle_trigger(request: MlflowDOTriggerRequest) -> Dict[str, Any]:
                         },
                         {
                             "ts": now,
-                            "message": f"[META] training_mode={training_mode} base_model={base_model or 'default'}",
+                            "message": f"[META] model_kind={request.model_kind} training_mode={training_mode} base_model={base_model or 'default'}",
                             "stage": KAGGLE_STAGES[0],
                             "source": "backend",
                         },
@@ -5550,6 +5982,7 @@ def mlflow_kaggle_trigger(request: MlflowDOTriggerRequest) -> Dict[str, Any]:
             "stages": KAGGLE_STAGES,
             "dry_run": True,
             "provider": "kaggle",
+            "model_kind": request.model_kind,
             "training_mode": training_mode,
             "base_model": base_model,
         }
@@ -5561,6 +5994,7 @@ def mlflow_kaggle_trigger(request: MlflowDOTriggerRequest) -> Dict[str, Any]:
     payload = {
         "run_id": run_id,
         "batch_id": request.batch_id,
+        "model_kind": request.model_kind,
         "training_mode": training_mode,
         "base_model": base_model,
         "requested_at": now,
@@ -5609,6 +6043,7 @@ def mlflow_kaggle_trigger(request: MlflowDOTriggerRequest) -> Dict[str, Any]:
         "stages": KAGGLE_STAGES,
         "dry_run": False,
         "provider": "kaggle",
+        "model_kind": request.model_kind,
         "training_mode": training_mode,
         "base_model": base_model,
         "job_id": cloud_job_id,
@@ -5701,6 +6136,7 @@ def mlflow_kaggle_status(run_id: str = Query(..., min_length=1)) -> Dict[str, An
         "provider": row["provider"] or "kaggle",
         "gpu_profile": row["gpu_profile"],
         "compute_mode": "kaggle",
+        "model_kind": runtime_meta.get("model_kind") or "phobert",
         "training_mode": runtime_meta.get("training_mode") or "retrain",
         "base_model": runtime_meta.get("base_model"),
         "status": row["status"],
@@ -6725,6 +7161,7 @@ def dataset_export(request: DatasetExportRequest) -> Dict[str, Any]:
 def synthetic_generate(request: SyntheticGenerateRequest) -> Dict[str, Any]:
     target_count = int(request.count)
     expected_label = int(request.label)
+    expected_constructiveness = request.constructiveness if request.constructiveness in {0, 1} else None
     domain = request.domain
     style = request.style
     model_name = normalize_gemini_model_name(request.model) or get_setting("GEMINI_MODEL", SYNTHETIC_FALLBACK_MODEL)
@@ -6738,6 +7175,7 @@ def synthetic_generate(request: SyntheticGenerateRequest) -> Dict[str, Any]:
     total_rejected_duplicate = 0
     total_candidates_seen = 0
     total_rejected_invalid = 0
+    last_llm_preview = ""
 
     length_bounds = get_synthetic_length_bounds()
     length_bucket_target = build_length_bucket_targets(target_count)
@@ -6758,10 +7196,13 @@ def synthetic_generate(request: SyntheticGenerateRequest) -> Dict[str, Any]:
             style=style,
             label=expected_label,
             count=remaining,
+            constructiveness=expected_constructiveness,
             length_guidance=build_length_bucket_guidance(remaining_targets, length_bounds),
         )
         llm_raw = call_gemini_with_model(prompt, model_name)
         candidates = parse_json_array_from_llm(llm_raw)
+        if not candidates:
+            last_llm_preview = (llm_raw or "")[:500]
 
         for candidate in candidates:
             total_candidates_seen += 1
@@ -6779,6 +7220,7 @@ def synthetic_generate(request: SyntheticGenerateRequest) -> Dict[str, Any]:
             validated = validate_synthetic_candidate(
                 candidate=candidate,
                 expected_label=expected_label,
+                expected_constructiveness=expected_constructiveness,
                 domain=domain,
                 style=style,
                 seen_hashes=seen_hashes,
@@ -6816,6 +7258,7 @@ def synthetic_generate(request: SyntheticGenerateRequest) -> Dict[str, Any]:
                     "length_bucket_target": length_bucket_target,
                     "length_bucket_generated": length_bucket_generated,
                     "length_bucket_rejected": length_bucket_rejected,
+                    "last_llm_preview": last_llm_preview,
                 },
             },
         )
@@ -6840,6 +7283,8 @@ def synthetic_generate(request: SyntheticGenerateRequest) -> Dict[str, Any]:
             "batch_id": batch_id,
             "domain": domain,
             "style": style,
+            "toxicity": row.get("label"),
+            "constructiveness": row.get("constructiveness"),
             "generator_model": model_name,
             "prompt_version": SYNTHETIC_PROMPT_VERSION,
         }
@@ -6907,15 +7352,18 @@ def synthetic_preview(
 
 @app.post("/api/dataset/synthetic/review")
 def synthetic_review(request: SyntheticReviewRequest) -> Dict[str, Any]:
-    updates = [
-        {
+    updates: List[Dict[str, Any]] = []
+    for item in request.updates:
+        fields_set = getattr(item, "model_fields_set", getattr(item, "__fields_set__", set()))
+        payload = {
             "id": item.id,
             "is_accepted": item.is_accepted,
             "text": item.text,
             "label": item.label,
         }
-        for item in request.updates
-    ]
+        if "constructiveness" in fields_set:
+            payload["constructiveness"] = item.constructiveness
+        updates.append(payload)
     updated = update_synthetic_review(updates)
     return {"updated": updated}
 
@@ -6955,7 +7403,16 @@ def synthetic_export(request: SyntheticExportRequest) -> Dict[str, Any]:
         reviewed=True,
     )
 
-    export_rows = [{"text": row["text"], "label": row["label"], "meta": row.get("meta") or {}} for row in rows]
+    export_rows = [
+        {
+            "text": row["text"],
+            "label": row["label"],
+            "toxicity": row["label"],
+            "constructiveness": row.get("constructiveness") if row.get("constructiveness") in {0, 1} else None,
+            "meta": row.get("meta") or {},
+        }
+        for row in rows
+    ]
 
     out_dir = BASE_DIR / "data" / "processed"
     out_dir.mkdir(parents=True, exist_ok=True)

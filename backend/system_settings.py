@@ -84,7 +84,7 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         "kaggle_webhook",
         "Kaggle Webhook",
         "string",
-        default="smoke",
+        default="phobert",
     ),
     SettingDefinition(
         "KAGGLE_PUSH_RETRY_ATTEMPTS",

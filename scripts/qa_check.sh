@@ -96,7 +96,8 @@ if [[ "${run_backend_tests}" -eq 1 ]]; then
     "${PYTHON_BIN}" -m pytest -q \
       tests/test_backend_smoke.py \
       tests/test_mlflow_kaggle.py \
-      tests/test_api_contract_mlflow_store.py
+      tests/test_api_contract_mlflow_store.py \
+      tests/test_frontend_i18n_encoding.py
 else
   echo "==> Skip backend pytest (not affected)"
 fi

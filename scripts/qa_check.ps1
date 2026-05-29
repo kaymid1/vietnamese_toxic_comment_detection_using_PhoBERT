@@ -108,7 +108,8 @@ if ($runBackendTests) {
         "-q",
         "tests/test_backend_smoke.py",
         "tests/test_mlflow_kaggle.py",
-        "tests/test_api_contract_mlflow_store.py"
+        "tests/test_api_contract_mlflow_store.py",
+        "tests/test_frontend_i18n_encoding.py"
     )
 } else {
     Write-Host "==> Skip backend pytest (not affected)"

@@ -131,6 +131,7 @@ def _clean_comment_text(text: str) -> str:
     time_suffix = (
         r"(?:"
         r"\d+\s*(?:phút|giờ|ngày|tuần|tháng|năm)\s+trước"
+        r"|\d+\s*'\s*trước"
         r"|\d+h\s+trước"
         r"|\d{1,2}:\d{2}(?:\s+\d{1,2}/\d{1,2}(?:/\d{2,4})?)?"
         r")"
@@ -672,6 +673,7 @@ _UI_NOISE_PATTERNS = [
     r"^(phản hồi|comment)$",
     r"^\d+\s*(phút|giờ|ngày|tuần|tháng|năm)\s*(trước)?$",
     r"^\d+[smhdw]$",
+    r"^\d+\s*'\s*(trước)?$",
 ]
 
 _NEWS_BLOCK_TEXT_INDICATORS = [

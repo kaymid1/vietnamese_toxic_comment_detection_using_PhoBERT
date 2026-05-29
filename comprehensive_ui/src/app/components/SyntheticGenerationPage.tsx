@@ -17,6 +17,8 @@ interface SyntheticRow {
   batch_id: string;
   text: string;
   label: number;
+  toxicity?: number;
+  constructiveness?: number | null;
   domain: "education" | "news" | "politic";
   style: "formal" | "informal";
   is_accepted: boolean;
@@ -32,6 +34,7 @@ interface SyntheticStats {
   by_domain: Record<string, { total: number; accepted: number; rejected: number }>;
   by_style: Record<string, { total: number; accepted: number; rejected: number }>;
   by_label: Record<string, { total: number; accepted: number; rejected: number }>;
+  by_constructiveness?: Record<string, { total: number; accepted: number; rejected: number }>;
 }
 
 interface SyntheticPreviewResponse {
@@ -64,12 +67,56 @@ interface SyntheticGenerationPageProps {
 
 const RAW_API_BASE = import.meta.env.VITE_API_BASE_URL?.trim() ?? "";
 const API_BASE = RAW_API_BASE.replace(/\/+$/, "");
+const API_FALLBACK_BASES = Array.from(
+  new Set(
+    ["", API_BASE, "http://127.0.0.1:8000", "http://localhost:8000", "http://127.0.0.1:8001", "http://localhost:8001"]
+      .map((value) => value.trim().replace(/\/+$/, ""))
+      .filter(Boolean),
+  ),
+);
+const API_FALLBACK_FAILURE_COOLDOWN_MS = 30000;
+let lastSuccessfulApiBase: string | null = null;
+const apiBaseFailureUntil = new Map<string, number>();
 
-const buildApiUrl = (path: string) => {
-  if (!path.startsWith("/")) {
-    return API_BASE ? `${API_BASE}/${path}` : `/${path}`;
+const buildApiUrlFromBase = (base: string, path: string) => {
+  if (/^https?:\/\//i.test(path)) return path;
+  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+  if (!base) return normalizedPath;
+  return `${base}${normalizedPath}`;
+};
+
+const isNetworkFetchError = (error: unknown) =>
+  error instanceof TypeError && /failed to fetch|networkerror|load failed/i.test(error.message.toLowerCase());
+
+const fetchApiWithFallback = async (path: string, init?: RequestInit): Promise<Response> => {
+  const now = Date.now();
+  const candidates = [lastSuccessfulApiBase || "", ...API_FALLBACK_BASES, API_BASE]
+    .map((item) => item.trim())
+    .filter((value, index, values) => values.indexOf(value) === index);
+
+  let lastError: unknown = null;
+  for (const candidate of candidates) {
+    const blockedUntil = apiBaseFailureUntil.get(candidate) || 0;
+    if (candidate !== (lastSuccessfulApiBase || "") && blockedUntil > now) continue;
+
+    try {
+      const response = await fetch(buildApiUrlFromBase(candidate, path), init);
+      if (!candidate && response.status === 404) {
+        lastError = new Error(`Relative API path returned 404 for ${path}`);
+        continue;
+      }
+      lastSuccessfulApiBase = candidate;
+      apiBaseFailureUntil.delete(candidate);
+      return response;
+    } catch (error) {
+      if (!isNetworkFetchError(error)) throw error;
+      lastError = error;
+      apiBaseFailureUntil.set(candidate, Date.now() + API_FALLBACK_FAILURE_COOLDOWN_MS);
+      if (lastSuccessfulApiBase === candidate) lastSuccessfulApiBase = null;
+    }
   }
-  return API_BASE ? `${API_BASE}${path}` : path;
+
+  throw new Error(`Cannot reach backend API for ${path}. ${(lastError as Error | null)?.message || ""}`.trim());
 };
 
 export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps) {
@@ -77,12 +124,14 @@ export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps
   const [domain, setDomain] = useState<"education" | "news" | "politic">("education");
   const [style, setStyle] = useState<"formal" | "informal">("formal");
   const [label, setLabel] = useState<0 | 1>(1);
+  const [constructiveness, setConstructiveness] = useState<0 | 1 | null>(null);
   const [count, setCount] = useState(10);
 
   const [rows, setRows] = useState<SyntheticRow[]>([]);
   const [checkedMap, setCheckedMap] = useState<Record<number, boolean>>({});
   const [editedTextMap, setEditedTextMap] = useState<Record<number, string>>({});
   const [editedLabelMap, setEditedLabelMap] = useState<Record<number, 0 | 1>>({});
+  const [editedConstructivenessMap, setEditedConstructivenessMap] = useState<Record<number, 0 | 1 | null>>({});
   const [stats, setStats] = useState<SyntheticStats | null>(null);
   const [batchIdFilter, setBatchIdFilter] = useState<string>("");
   const [acceptedFilter, setAcceptedFilter] = useState<"all" | "accepted" | "rejected">("all");
@@ -103,6 +152,13 @@ export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps
     return rows.filter((row) => checkedMap[row.id] ?? row.is_accepted).length;
   }, [rows, checkedMap]);
 
+  const constructivenessStats = useMemo(() => {
+    const byConstructiveness = stats?.by_constructiveness || {};
+    const included = (byConstructiveness["0"]?.total || 0) + (byConstructiveness["1"]?.total || 0);
+    const masked = byConstructiveness.masked?.total || 0;
+    return { included, masked };
+  }, [stats]);
+
   const fetchPreview = async (targetPage: number, targetPageSize: number) => {
     setLoading(true);
     setError(null);
@@ -120,7 +176,7 @@ export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps
         if (acceptedFilter !== "all") params.set("accepted", acceptedFilter === "accepted" ? "true" : "false");
       }
 
-      const response = await fetch(buildApiUrl(`/api/dataset/synthetic/preview?${params.toString()}`));
+      const response = await fetchApiWithFallback(`/api/dataset/synthetic/preview?${params.toString()}`);
       const data = (await response.json()) as SyntheticPreviewResponse;
       if (!response.ok) {
         throw new Error(JSON.stringify(data));
@@ -133,14 +189,18 @@ export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps
       const nextChecked: Record<number, boolean> = {};
       const nextEditedText: Record<number, string> = {};
       const nextEditedLabel: Record<number, 0 | 1> = {};
+      const nextEditedConstructiveness: Record<number, 0 | 1 | null> = {};
       (data.items || []).forEach((item) => {
         nextChecked[item.id] = item.is_accepted;
         nextEditedText[item.id] = item.text;
         nextEditedLabel[item.id] = item.label === 1 ? 1 : 0;
+        nextEditedConstructiveness[item.id] =
+          item.constructiveness === 1 ? 1 : item.constructiveness === 0 ? 0 : null;
       });
       setCheckedMap(nextChecked);
       setEditedTextMap(nextEditedText);
       setEditedLabelMap(nextEditedLabel);
+      setEditedConstructivenessMap(nextEditedConstructiveness);
     } catch (err) {
       const message = err instanceof Error ? err.message : t("synthetic.loadingDataset");
       setError(message);
@@ -158,10 +218,10 @@ export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps
     setStatus(null);
     setError(null);
     try {
-      const response = await fetch(buildApiUrl("/api/dataset/synthetic/generate"), {
+      const response = await fetchApiWithFallback("/api/dataset/synthetic/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ domain, style, label, count }),
+        body: JSON.stringify({ domain, style, label, constructiveness, count }),
       });
       const data = (await response.json()) as SyntheticGenerateResponse;
       if (!response.ok) {
@@ -257,17 +317,26 @@ export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps
         const nextAccepted = checkedMap[row.id] ?? row.is_accepted;
         const nextText = (editedTextMap[row.id] ?? row.text).trim();
         const nextLabel = editedLabelMap[row.id] ?? (row.label === 1 ? 1 : 0);
-        const changed = nextAccepted !== row.is_accepted || nextText !== row.text || nextLabel !== row.label;
+        const currentConstructiveness =
+          row.constructiveness === 1 ? 1 : row.constructiveness === 0 ? 0 : null;
+        const nextConstructiveness =
+          editedConstructivenessMap[row.id] === 1 ? 1 : editedConstructivenessMap[row.id] === 0 ? 0 : null;
+        const changed =
+          nextAccepted !== row.is_accepted ||
+          nextText !== row.text ||
+          nextLabel !== row.label ||
+          nextConstructiveness !== currentConstructiveness;
         return {
           id: row.id,
           is_accepted: nextAccepted,
           text: nextText,
           label: nextLabel,
+          constructiveness: nextConstructiveness,
           changed,
         };
       })
       .filter((item) => item.changed)
-      .map(({ id, is_accepted, text, label }) => ({ id, is_accepted, text, label }));
+      .map(({ id, is_accepted, text, label, constructiveness }) => ({ id, is_accepted, text, label, constructiveness }));
 
     if (!updates.length) {
       setStatus(t("synthetic.noChanges"));
@@ -278,7 +347,7 @@ export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps
     setStatus(null);
     setError(null);
     try {
-      const response = await fetch(buildApiUrl("/api/dataset/synthetic/review"), {
+      const response = await fetchApiWithFallback("/api/dataset/synthetic/review", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ updates }),
@@ -301,7 +370,7 @@ export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps
     setStatus(null);
     setError(null);
     try {
-      const response = await fetch(buildApiUrl("/api/dataset/synthetic/export"), {
+      const response = await fetchApiWithFallback("/api/dataset/synthetic/export", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -339,7 +408,7 @@ export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps
     setStatus(null);
     setError(null);
     try {
-      const response = await fetch(buildApiUrl("/api/dataset/synthetic/delete"), {
+      const response = await fetchApiWithFallback("/api/dataset/synthetic/delete", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ids: selectedIds }),
@@ -374,7 +443,7 @@ export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps
         </div>
 
         <Card className="bg-card p-6 shadow-lg">
-          <div className="grid grid-cols-1 md:grid-cols-5 gap-4 items-end">
+          <div className="grid grid-cols-1 md:grid-cols-6 gap-4 items-end">
             <div>
               <Label className="text-sm text-muted-foreground">{t("synthetic.domain")}</Label>
               <select
@@ -407,6 +476,21 @@ export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps
               >
                 <option value={1}>{t("synthetic.labelToxic")}</option>
                 <option value={0}>{t("synthetic.labelClean")}</option>
+              </select>
+            </div>
+            <div>
+              <Label className="text-sm text-muted-foreground">{t("synthetic.constructiveness")}</Label>
+              <select
+                className="mt-2 w-full border rounded-lg px-3 py-2 text-sm"
+                value={constructiveness === null ? "mask" : String(constructiveness)}
+                onChange={(event) => {
+                  const value = event.target.value;
+                  setConstructiveness(value === "mask" ? null : (Number(value) as 0 | 1));
+                }}
+              >
+                <option value="mask">{t("synthetic.constructivenessMask")}</option>
+                <option value={1}>{t("synthetic.constructive")}</option>
+                <option value={0}>{t("synthetic.nonConstructive")}</option>
               </select>
             </div>
             <div>
@@ -524,11 +608,14 @@ export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps
         </Card>
 
         <Card className="bg-card p-6 shadow-lg">
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-3 mb-4 text-sm">
+          <div className="grid grid-cols-1 md:grid-cols-5 gap-3 mb-4 text-sm">
             <div className="border rounded-lg p-3">{t("synthetic.totalGenerated")}: <strong>{stats?.total_generated ?? 0}</strong></div>
             <div className="border rounded-lg p-3">{t("synthetic.accepted")}: <strong>{stats?.accepted ?? 0}</strong></div>
             <div className="border rounded-lg p-3">{t("synthetic.rejected")}: <strong>{stats?.rejected ?? 0}</strong></div>
             <div className="border rounded-lg p-3">{t("synthetic.acceptanceRate")}: <strong>{((stats?.acceptance_rate ?? 0) * 100).toFixed(1)}%</strong></div>
+            <div className="border rounded-lg p-3">
+              {t("synthetic.constructiveness")}: <strong>{constructivenessStats.included}</strong> / {constructivenessStats.masked} {t("synthetic.constructivenessMask")}
+            </div>
           </div>
 
           <Table>
@@ -538,6 +625,7 @@ export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps
                 <TableHead>{t("synthetic.tableTextEditable")}</TableHead>
                 <TableHead>{t("synthetic.tableActions")}</TableHead>
                 <TableHead>{t("synthetic.tableLabel")}</TableHead>
+                <TableHead>{t("synthetic.tableConstructiveness")}</TableHead>
                 <TableHead>{t("synthetic.tableDomain")}</TableHead>
                 <TableHead>{t("synthetic.tableStyle")}</TableHead>
                 <TableHead>{t("synthetic.tableBatch")}</TableHead>
@@ -546,6 +634,8 @@ export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps
             <TableBody>
               {rows.map((row) => {
                 const nextLabel = editedLabelMap[row.id] ?? (row.label === 1 ? 1 : 0);
+                const nextConstructiveness =
+                  editedConstructivenessMap[row.id] === 1 ? 1 : editedConstructivenessMap[row.id] === 0 ? 0 : null;
                 const selected = checkedMap[row.id] ?? row.is_accepted;
                 return (
                   <TableRow
@@ -597,6 +687,22 @@ export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps
                         <option value={0}>{t("synthetic.clean")}</option>
                       </select>
                     </TableCell>
+                    <TableCell>
+                      <select
+                        className="border rounded-md px-2 py-1 text-sm font-medium"
+                        value={nextConstructiveness === null ? "mask" : String(nextConstructiveness)}
+                        onChange={(event) =>
+                          setEditedConstructivenessMap((prev) => ({
+                            ...prev,
+                            [row.id]: event.target.value === "mask" ? null : (Number(event.target.value) as 0 | 1),
+                          }))
+                        }
+                      >
+                        <option value="mask">{t("synthetic.constructivenessMask")}</option>
+                        <option value={1}>{t("synthetic.constructive")}</option>
+                        <option value={0}>{t("synthetic.nonConstructive")}</option>
+                      </select>
+                    </TableCell>
                     <TableCell>{row.domain}</TableCell>
                     <TableCell>{row.style}</TableCell>
                     <TableCell className="max-w-[180px] truncate" title={row.batch_id}>
@@ -607,7 +713,7 @@ export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps
               })}
               {!rows.length && !loading && (
                 <TableRow>
-                  <TableCell colSpan={7} className="text-center text-sm text-muted-foreground">
+                  <TableCell colSpan={8} className="text-center text-sm text-muted-foreground">
                     {t("synthetic.noData")}
                   </TableCell>
                 </TableRow>

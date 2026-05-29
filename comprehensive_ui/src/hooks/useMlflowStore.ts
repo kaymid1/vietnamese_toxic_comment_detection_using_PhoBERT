@@ -155,12 +155,44 @@ export interface MlflowCandidate {
   text: string;
   score?: number | null;
   pseudo_label?: number | null;
+  constructiveness_score?: number | null;
+  constructiveness_label?: number | null;
+  constructiveness_confidence?: string | null;
+  selected_for_training?: number | null;
+  training_review_status?: string | null;
+  is_locked?: number | null;
   label_source?: string | null;
   label_confidence?: string | null;
   gate_bucket: string;
   verification_status: string;
   reviewed_at?: string | null;
   created_at?: string | null;
+}
+
+export interface MlflowTrainingPreview {
+  scope: "batch" | "all_batches";
+  batch_id?: string | null;
+  items: MlflowCandidate[];
+  total: number;
+  page: number;
+  page_size: number;
+  counts: {
+    selected: number;
+    selected_toxic: number;
+    selected_clean: number;
+    candidate: number;
+    removed: number;
+  };
+  balance: {
+    strategy: string;
+    balanced_count: number;
+    toxic_available: number;
+    clean_available: number;
+  };
+  constructiveness: {
+    included: number;
+    masked: number;
+  };
 }
 
 export interface MlflowBatchSummary {
@@ -237,6 +269,7 @@ export interface MlflowKaggleStatus {
   provider?: string;
   gpu_profile?: string | null;
   compute_mode?: string;
+  model_kind?: string;
   training_mode?: string;
   base_model?: string | null;
   status?: string;
@@ -289,6 +322,7 @@ export type MlflowIngestStage = "idle" | "crawl" | "inference" | "finalize" | "c
 
 export interface MlflowDOTriggerOptions {
   computeMode?: "gpu" | "cpu" | "local_m1";
+  modelKind?: "phobert" | "lr_smoke";
   trainingMode?: "retrain" | "finetune";
   baseModel?: string;
   cpuProfile?: string;
@@ -322,6 +356,7 @@ export function useMlflowStore(options: UseMlflowStoreOptions = {}) {
   const [thresholdStatus, setThresholdStatus] = useState<MlflowThresholdStatus | null>(null);
   const [batches, setBatches] = useState<MlflowBatchSummary[]>([]);
   const [reviewHistory, setReviewHistory] = useState<MlflowCandidate[]>([]);
+  const [trainingPreview, setTrainingPreview] = useState<MlflowTrainingPreview | null>(null);
   const [reviewHistoryTotal, setReviewHistoryTotal] = useState(0);
   const [reviewHistoryPage, setReviewHistoryPage] = useState(1);
   const [crawlHistory, setCrawlHistory] = useState<MlflowCrawlHistoryItem[]>([]);
@@ -485,6 +520,54 @@ export function useMlflowStore(options: UseMlflowStoreOptions = {}) {
     [activeBatchId, authorizedFetch, run],
   );
 
+  const refreshTrainingPreview = useCallback(
+    async (page = 1, scope: "batch" | "all_batches" = "all_batches") => {
+      return run(async () => {
+        const query = new URLSearchParams({
+          page: String(page),
+          page_size: "50",
+          scope,
+        });
+        if (scope === "batch" && activeBatchId) {
+          query.set("batch_id", activeBatchId);
+          query.set("strict_batch", "true");
+        }
+        const payload = await parseJsonResponse<MlflowTrainingPreview>(
+          await authorizedFetch(buildApiUrl(`/api/mlflow/training-preview?${query.toString()}`)),
+        );
+        setTrainingPreview(payload);
+        return payload;
+      });
+    },
+    [activeBatchId, authorizedFetch, run],
+  );
+
+  const reviewTrainingPreview = useCallback(
+    async (
+      updates: Array<{
+        id: number;
+        selected_for_training?: boolean;
+        pseudo_label?: 0 | 1;
+        constructiveness_label?: 0 | 1;
+        clear_constructiveness?: boolean;
+        lock_state?: boolean;
+      }>,
+    ) => {
+      return run(async () => {
+        const payload = await parseJsonResponse<{ status: string; updated: number; skipped_locked?: number }>(
+          await authorizedFetch(buildApiUrl("/api/mlflow/training-preview/review"), {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ updates }),
+          }),
+        );
+        await refreshTrainingPreview(trainingPreview?.page || 1, "all_batches");
+        return payload;
+      });
+    },
+    [authorizedFetch, refreshTrainingPreview, run, trainingPreview?.page],
+  );
+
   const refreshReviewHistory = useCallback(
     async (batchId?: string | null, decision = "all", page = reviewHistoryPage, scope: "batch" | "all_batches" = "all_batches") => {
       return run(async () => {
@@ -558,7 +641,16 @@ export function useMlflowStore(options: UseMlflowStoreOptions = {}) {
   const exportBundle = useCallback(
     async (
       batchId?: string | null,
-      options?: { includeUnused?: boolean; unusedScope?: MlflowUnusedScope; scope?: MlflowExportScope },
+      options?: {
+        includeUnused?: boolean;
+        unusedScope?: MlflowUnusedScope;
+        scope?: MlflowExportScope;
+        modelKind?: "phobert" | "lr_smoke";
+        trainingMode?: "retrain" | "finetune";
+        balanceStrategy?: "balanced_50_50" | "all";
+        includeBaseModel?: boolean;
+        baseModel?: string;
+      },
     ) => {
       return run(async () => {
         const useBatch = batchId || activeBatchId;
@@ -571,8 +663,15 @@ export function useMlflowStore(options: UseMlflowStoreOptions = {}) {
           batch_id: string | null;
           required_zip_contents: string[];
           count: number;
+          count_before_balance?: number;
           candidate_count: number;
           unused_count: number;
+          model_kind?: "phobert" | "lr_smoke";
+          training_mode?: "retrain" | "finetune";
+          balance_strategy?: "balanced_50_50" | "all";
+          balance_stats?: Record<string, unknown>;
+          constructiveness?: { included: number; masked: number };
+          base_model_bundled?: boolean;
           include_unused: boolean;
           unused_scope: MlflowUnusedScope;
           merge_stats?: {
@@ -589,6 +688,12 @@ export function useMlflowStore(options: UseMlflowStoreOptions = {}) {
             body: JSON.stringify({
               batch_id: useBatch,
               scope: exportScope,
+              bundle_profile: options?.modelKind === "lr_smoke" ? "clean_victsd_gold" : "full_bundle",
+              model_kind: options?.modelKind || "phobert",
+              training_mode: options?.trainingMode || "finetune",
+              balance_strategy: options?.balanceStrategy || "balanced_50_50",
+              include_base_model: Boolean(options?.includeBaseModel),
+              base_model: options?.baseModel || undefined,
               include_unused: Boolean(options?.includeUnused),
               unused_scope: options?.unusedScope || "all",
             }),
@@ -730,6 +835,7 @@ export function useMlflowStore(options: UseMlflowStoreOptions = {}) {
     async (options?: MlflowDOTriggerOptions) => {
       return run(async () => {
         const trainingMode = options?.trainingMode === "finetune" ? "finetune" : "retrain";
+        const modelKind = options?.modelKind === "lr_smoke" ? "lr_smoke" : "phobert";
         const baseModel = (options?.baseModel && options.baseModel.trim()) || undefined;
 
         const payloadBody: Record<string, unknown> = {
@@ -737,6 +843,7 @@ export function useMlflowStore(options: UseMlflowStoreOptions = {}) {
           provider: "kaggle",
           dry_run: options?.dryRun ?? false,
           compute_mode: "kaggle",
+          model_kind: modelKind,
           training_mode: trainingMode,
           training_scope: "light_only",
         };
@@ -809,10 +916,11 @@ export function useMlflowStore(options: UseMlflowStoreOptions = {}) {
         action?: "include_toxic" | "include_clean" | "drop";
         decision?: "accept" | "reject";
         pseudo_label?: 0 | 1;
+        lock_state?: boolean;
       }>,
     ) => {
       return run(async () => {
-        const payload = await parseJsonResponse<{ updated: number }>(
+        const payload = await parseJsonResponse<{ updated: number; skipped_locked?: number; locked_updated?: number }>(
           await authorizedFetch(buildApiUrl("/api/mlflow/candidates/review"), {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -981,6 +1089,7 @@ export function useMlflowStore(options: UseMlflowStoreOptions = {}) {
 
         await tryRefresh("overview", () => refreshOverview(b));
         await tryRefresh("candidates", () => refreshCandidates(undefined, 1, "all_batches"));
+        await tryRefresh("training-preview", () => refreshTrainingPreview(1, "all_batches"));
         await tryRefresh("threshold-status", () => refreshThresholdStatus(b));
         await tryRefresh("review-history", () => refreshReviewHistory(undefined, "all", 1, "all_batches"));
         await tryRefresh("crawl-history", () => refreshCrawlHistory(1, { allowUnavailableFallback: true }));
@@ -1003,7 +1112,7 @@ export function useMlflowStore(options: UseMlflowStoreOptions = {}) {
         throw err;
       }
     },
-    [authorizedFetch, refreshBatches, refreshCandidates, refreshCrawlHistory, refreshOverview, refreshReviewHistory, refreshThresholdStatus, run],
+    [authorizedFetch, refreshBatches, refreshCandidates, refreshCrawlHistory, refreshOverview, refreshReviewHistory, refreshThresholdStatus, refreshTrainingPreview, run],
   );
 
   return {
@@ -1016,6 +1125,7 @@ export function useMlflowStore(options: UseMlflowStoreOptions = {}) {
     activeBatchId,
     overview,
     candidates,
+    trainingPreview,
     candidateTotal,
     candidatePage,
     candidatePageSize,
@@ -1037,6 +1147,8 @@ export function useMlflowStore(options: UseMlflowStoreOptions = {}) {
     refreshOverview,
     refreshBatches,
     refreshCandidates,
+    refreshTrainingPreview,
+    reviewTrainingPreview,
     refreshReviewHistory,
     refreshCrawlHistory,
     reviewCandidates,

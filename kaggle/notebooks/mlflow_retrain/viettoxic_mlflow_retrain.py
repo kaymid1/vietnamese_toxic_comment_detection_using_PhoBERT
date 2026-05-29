@@ -1,4 +1,4 @@
-﻿# %% [markdown]
+# %% [markdown]
 # # VietComment Analyzer MLflow Retrain (Mirror)
 #
 # File nay duoc version trong repo de maintain de hon.
@@ -46,6 +46,13 @@ IMPORT_NOTES = os.getenv("VIETTOXIC_IMPORT_NOTES", "Kaggle retrain smoke test")
 IMPORT_REQUIRED = os.getenv("VIETTOXIC_IMPORT_REQUIRED", "false").strip().lower() in {"1", "true", "yes", "on"}
 DATASET_ROOT_OVERRIDE = os.getenv("VIETTOXIC_DATASET_ROOT", "").strip()
 BUNDLE_DOWNLOAD_REQUIRED = os.getenv("VIETTOXIC_BUNDLE_DOWNLOAD_REQUIRED", "false").strip().lower() in {"1", "true", "yes", "on"}
+MODEL_KIND = os.getenv("VIETTOXIC_MODEL_KIND", "phobert").strip().lower()
+TRAINING_MODE = os.getenv("VIETTOXIC_TRAINING_MODE", "finetune").strip().lower()
+BASE_MODEL = os.getenv("VIETTOXIC_BASE_MODEL", "").strip()
+PHOBERT_DRY_RUN = os.getenv("VIETTOXIC_PHOBERT_DRY_RUN", "false").strip().lower() in {"1", "true", "yes", "on"}
+PHOBERT_MODEL_FALLBACK = os.getenv("VIETTOXIC_PHOBERT_MODEL_FALLBACK", "vinai/phobert-base-v2").strip()
+PHOBERT_PSEUDO_LOSS_WEIGHT = os.getenv("VIETTOXIC_PSEUDO_LOSS_WEIGHT", "0.3").strip()
+PHOBERT_MAX_PSEUDO_RATIO = os.getenv("VIETTOXIC_MAX_PSEUDO_RATIO", "0.3").strip()
 SPLIT_NAME_CANDIDATES: dict[str, list[str]] = {
     "train": ["train.jsonl", "train_augmented.jsonl"],
     "validation": ["validation.jsonl", "validation_augmented.jsonl", "val.jsonl", "dev.jsonl"],
@@ -250,6 +257,130 @@ def zip_dir(source_dir: pathlib.Path, zip_path: pathlib.Path) -> None:
         for path in source_dir.rglob("*"):
             if path.is_file():
                 zf.write(path, arcname=str(path.relative_to(source_dir)))
+
+
+def _common_parent(paths: list[pathlib.Path]) -> pathlib.Path:
+    resolved = [str(path.parent) for path in paths]
+    return pathlib.Path(os.path.commonpath(resolved))
+
+
+def resolve_bundle_member(*parts: str) -> pathlib.Path:
+    return BUNDLE_DIR.joinpath(*parts)
+
+
+def resolve_phobert_train_script() -> pathlib.Path:
+    src_dir = pathlib.Path(__file__).resolve().parent
+    candidates = [
+        resolve_bundle_member("scripts", "train_phobert.py"),
+        WORKDIR / "scripts" / "train_phobert.py",
+        src_dir / "scripts" / "train_phobert.py",
+        pathlib.Path("/kaggle/src/scripts/train_phobert.py"),
+    ]
+    for candidate in candidates:
+        if candidate.exists() and candidate.is_file():
+            return candidate
+    raise FileNotFoundError(
+        "PhoBERT training script not found in bundle. Expected scripts/train_phobert.py. "
+        "Export a full_bundle from the MLflow admin page before triggering phobert mode."
+    )
+
+
+def resolve_phobert_model_name() -> str:
+    bundled_base = resolve_bundle_member("base_model")
+    if TRAINING_MODE == "finetune" and (bundled_base / "config.json").exists():
+        return str(bundled_base)
+    if BASE_MODEL and not BASE_MODEL.startswith("phobert/"):
+        return BASE_MODEL
+    return PHOBERT_MODEL_FALLBACK
+
+
+def run_phobert_retrain() -> dict:
+    ensure_python_package("transformers")
+    ensure_python_package("datasets")
+    ensure_python_package("sklearn", "scikit-learn")
+    ensure_python_package("accelerate")
+    ensure_python_package("matplotlib")
+    if MLFLOW_ENABLED:
+        ensure_python_package("mlflow")
+
+    dataset_paths, bundle_profile = resolve_dataset_paths()
+    train_script = resolve_phobert_train_script()
+    dataset_root = _common_parent([dataset_paths["train"], dataset_paths["validation"], dataset_paths["test"]])
+    pseudo_dir = resolve_bundle_member("pseudo")
+    has_pseudo = (pseudo_dir / "accepted.jsonl").exists() and (pseudo_dir / "manifest.json").exists()
+    artifact_dir = WORKDIR / "artifacts" / RUN_NAME
+    output_base = artifact_dir / "model"
+    results_base = artifact_dir / "results"
+    manifests_dir = artifact_dir / "manifests"
+    zip_output_dir = WORKDIR / "phobert_zips"
+    for path in [artifact_dir, output_base, results_base, manifests_dir, zip_output_dir]:
+        path.mkdir(parents=True, exist_ok=True)
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "DATA_DIR": str(dataset_root),
+            "DATASET_LAYOUT": "plain",
+            "GOLD_DATA_DIR": str(dataset_root),
+            "MODEL_NAME": resolve_phobert_model_name(),
+            "TRAINING_MODE": TRAINING_MODE if TRAINING_MODE in {"finetune", "retrain"} else "finetune",
+            "OUTPUT_BASE": str(output_base),
+            "RESULTS_BASE": str(results_base),
+            "RUN_MANIFEST_DIR": str(manifests_dir),
+            "ZIP_OUTPUT_DIR": str(zip_output_dir),
+            "MODEL_VERSION": f"phobert/{RUN_NAME}",
+            "MLFLOW_ENABLED": "true" if MLFLOW_ENABLED else "false",
+            "MLFLOW_TRACKING_URI": MLFLOW_TRACKING_URI,
+            "MLFLOW_EXPERIMENT_NAME": MLFLOW_EXPERIMENT_NAME.replace("smoke", "phobert"),
+            "PSEUDO_LOSS_WEIGHT": PHOBERT_PSEUDO_LOSS_WEIGHT,
+            "MAX_PSEUDO_RATIO": PHOBERT_MAX_PSEUDO_RATIO,
+        }
+    )
+    if has_pseudo:
+        env["PSEUDO_LABELS_DIR"] = str(pseudo_dir)
+
+    dry_cmd = [sys.executable, str(train_script), "--dry-run"]
+    print("PhoBERT dry-run command:", " ".join(dry_cmd))
+    subprocess.run(dry_cmd, check=True, env=env)
+    if PHOBERT_DRY_RUN:
+        return {
+            "status": "ok",
+            "mode": "phobert_dry_run",
+            "run_name": RUN_NAME,
+            "bundle_profile": bundle_profile,
+            "dataset_root": str(dataset_root),
+            "pseudo_enabled": has_pseudo,
+            "model_name": env["MODEL_NAME"],
+        }
+
+    train_cmd = [sys.executable, str(train_script)]
+    print("PhoBERT train command:", " ".join(train_cmd))
+    subprocess.run(train_cmd, check=True, env=env)
+
+    artifact_zip_path = zip_output_dir / "best_model_full_victsd_gold.zip"
+    if not artifact_zip_path.exists():
+        candidates = sorted(zip_output_dir.glob("best_model_full_*.zip"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if not candidates:
+            artifact_zip_path = WORKDIR / f"{RUN_NAME}_phobert_model.zip"
+            zip_dir(output_base, artifact_zip_path)
+        else:
+            artifact_zip_path = candidates[0]
+
+    import_response = maybe_import_artifact(RUN_NAME, str(artifact_zip_path))
+    summary = {
+        "status": "ok",
+        "mode": "phobert",
+        "run_name": RUN_NAME,
+        "training_mode": TRAINING_MODE,
+        "bundle_profile": bundle_profile,
+        "dataset_root": str(dataset_root),
+        "pseudo_enabled": has_pseudo,
+        "model_name": env["MODEL_NAME"],
+        "artifact_zip_local": str(artifact_zip_path),
+        "import_response": import_response,
+    }
+    (artifact_dir / "run_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    return summary
 
 
 def maybe_import_artifact(run_name: str, artifact_path: str) -> dict | None:
@@ -528,9 +659,13 @@ def main() -> None:
         print(json.dumps(status, ensure_ascii=False, indent=2))
         return
 
-    raise ValueError(f"Unsupported VIETTOXIC_TEST_MODE={TEST_MODE}. Use 'validate' or 'smoke'.")
+    if TEST_MODE == "phobert":
+        status = run_phobert_retrain()
+        print(json.dumps(status, ensure_ascii=False, indent=2))
+        return
+
+    raise ValueError(f"Unsupported VIETTOXIC_TEST_MODE={TEST_MODE}. Use 'validate', 'smoke', or 'phobert'.")
 
 
 if __name__ == "__main__":
     main()
-

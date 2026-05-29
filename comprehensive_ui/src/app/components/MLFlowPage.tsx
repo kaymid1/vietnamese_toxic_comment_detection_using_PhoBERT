@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent, type MouseEvent } from "react";
+import { AnimatePresence, motion } from "motion/react";
 import { RotateCcw } from "lucide-react";
 import { toast } from "sonner";
 import { Card } from "@/app/components/ui/card";
@@ -66,6 +67,7 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
     activeBatchId,
     overview,
     candidates,
+    trainingPreview,
     candidateTotal,
     candidatePage,
     candidatePageSize,
@@ -83,6 +85,8 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
     ingest,
     refreshOverview,
     refreshCandidates,
+    refreshTrainingPreview,
+    reviewTrainingPreview,
     refreshReviewHistory,
     refreshCrawlHistory,
     reviewCandidates,
@@ -119,7 +123,9 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
     total_urls?: number;
   } | null>(null);
   const [activeTab, setActiveTab] = useState("step1");
-  const [selectedTrainingMode, setSelectedTrainingMode] = useState<"retrain" | "finetune">("retrain");
+  const [selectedModelKind, setSelectedModelKind] = useState<"phobert" | "lr_smoke">("phobert");
+  const [selectedTrainingMode, setSelectedTrainingMode] = useState<"retrain" | "finetune">("finetune");
+  const [balanceStrategy, setBalanceStrategy] = useState<"balanced_50_50" | "all">("balanced_50_50");
   const [finetuneBaseModel, setFinetuneBaseModel] = useState("");
   const prevDoStatusRef = useRef<string>("idle");
 
@@ -127,6 +133,7 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
     void refreshOverview();
     void refreshCandidates(undefined, 1, "all_batches");
     void refreshThresholdStatus(activeBatchId);
+    void refreshTrainingPreview(1, "all_batches");
     void refreshReviewHistory(undefined, historyDecision, 1, "all_batches");
     void refreshCrawlHistory(1);
     void refreshCompare();
@@ -262,6 +269,7 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
       setStatusText(`Đã ingest batch ${result.batch_id}`);
       setCrawlSummary(summary);
       setSelectedCandidateIds([]);
+      void refreshTrainingPreview(1, "all_batches");
 
       if (total <= 0) {
         toast.warning("Crawl hoàn tất nhưng không tìm thấy comment.");
@@ -298,6 +306,8 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
         })),
       );
       setSelectedCandidateIds([]);
+      void refreshTrainingPreview(1, "all_batches");
+      const skippedLocked = payload.skipped_locked || 0;
 
       if (action === "include_toxic") {
         setStatusText(`Đã lưu ${payload.updated} mẫu Toxic vào DB.`);
@@ -309,9 +319,70 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
         setStatusText(`Đã Remove ${payload.updated} mẫu khỏi train set.`);
         toast.success(`Đã Remove ${payload.updated} mẫu khỏi train set.`);
       }
+      if (skippedLocked > 0) {
+        toast.error(`Bỏ qua ${skippedLocked} mẫu đang lock.`);
+      }
     } catch {
       setStatusText("Lưu review vào DB thất bại.");
       toast.error("Lưu review vào DB thất bại.");
+    }
+  };
+  const handleBulkLock = async (lockState: boolean) => {
+    if (selectedCandidateIds.length === 0) return;
+    const selectedItems = candidates.filter((item) => selectedCandidateIds.includes(item.id));
+    if (selectedItems.length === 0) return;
+    try {
+      const payload = await reviewCandidates(
+        selectedItems.map((item) => ({
+          id: item.id,
+          lock_state: lockState,
+        })),
+      );
+      const changed = payload.locked_updated ?? payload.updated;
+      const message = lockState ? `Đã lock ${changed} mẫu.` : `Đã unlock ${changed} mẫu.`;
+      setStatusText(message);
+      toast.success(message);
+      void refreshTrainingPreview(trainingPreview?.page || 1, "all_batches");
+    } catch {
+      toast.error(lockState ? "Lock mẫu thất bại." : "Unlock mẫu thất bại.");
+    }
+  };
+
+  const handlePreviewSelection = async (id: number, selected: boolean, isLocked: boolean) => {
+    if (!selected && isLocked) {
+      toast.error("Mẫu đang lock, hãy unlock trước khi bỏ khỏi training.");
+      return;
+    }
+    try {
+      const payload = await reviewTrainingPreview([{ id, selected_for_training: selected }]);
+      if ((payload.skipped_locked || 0) > 0) {
+        toast.error("Mẫu đang lock nên không thể bỏ khỏi training.");
+        return;
+      }
+      toast.success(selected ? "Đã chọn mẫu cho training." : "Đã loại mẫu khỏi training.");
+    } catch {
+      toast.error("Cập nhật preview thất bại.");
+    }
+  };
+
+  const handlePreviewConstructiveness = async (id: number, label: 0 | 1 | null) => {
+    try {
+      await reviewTrainingPreview([
+        label === null
+          ? { id, clear_constructiveness: true }
+          : { id, constructiveness_label: label },
+      ]);
+      toast.success("Đã cập nhật constructiveness.");
+    } catch {
+      toast.error("Cập nhật constructiveness thất bại.");
+    }
+  };
+  const handlePreviewLock = async (id: number, lockState: boolean) => {
+    try {
+      await reviewTrainingPreview([{ id, lock_state: lockState }]);
+      toast.success(lockState ? "Đã lock mẫu." : "Đã unlock mẫu.");
+    } catch {
+      toast.error(lockState ? "Lock mẫu thất bại." : "Unlock mẫu thất bại.");
     }
   };
 
@@ -329,6 +400,7 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
     try {
       const payload = await clearMlflowAll(token.trim());
       setSelectedCandidateIds([]);
+      void refreshTrainingPreview(1, "all_batches");
       const rows = payload.deleted_rows;
       toast.success(
         `Đã clear MLFlow: do_run=${rows.mlflow_do_run}, artifacts=${rows.mlflow_training_artifact}, items=${rows.mlflow_comment_item}, batches=${rows.mlflow_crawl_batch}.`,
@@ -367,6 +439,14 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
     try {
       const payload = await exportBundle(activeBatchId, {
         scope: "all_batches",
+        modelKind: selectedModelKind,
+        trainingMode: selectedTrainingMode,
+        balanceStrategy,
+        includeBaseModel:
+          selectedModelKind === "phobert" &&
+          selectedTrainingMode === "finetune" &&
+          (finetuneBaseModel.trim() || selectedModel).startsWith("phobert/"),
+        baseModel: selectedTrainingMode === "finetune" ? finetuneBaseModel.trim() || selectedModel : selectedModel,
         includeUnused: includeUnusedInExport,
         unusedScope,
       });
@@ -413,7 +493,7 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
 
   const handleTriggerDO = async () => {
     const resolvedBaseModel =
-      selectedTrainingMode === "retrain" ? selectedModel.trim() : finetuneBaseModel.trim();
+      selectedTrainingMode === "retrain" ? selectedModel.trim() : finetuneBaseModel.trim() || selectedModel.trim();
     if (selectedTrainingMode === "retrain" && !resolvedBaseModel) {
       setStatusText("Retrain yêu cầu base model. Hãy chọn model ở bước ingest trước khi trigger.");
       toast.error("Thiếu base model cho retrain.");
@@ -422,10 +502,11 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
 
     try {
       const payload = await triggerDO({
+        modelKind: selectedModelKind,
         trainingMode: selectedTrainingMode,
-        baseModel: resolvedBaseModel || undefined,
+        baseModel: selectedModelKind === "lr_smoke" ? undefined : resolvedBaseModel || undefined,
       });
-      const trainingLabel = selectedTrainingMode === "finetune" ? "FINETUNE" : "RETRAIN";
+      const trainingLabel = selectedModelKind === "lr_smoke" ? "LR SMOKE" : selectedTrainingMode === "finetune" ? "FINETUNE" : "RETRAIN";
       setStatusText(`Đã trigger Kaggle run ${payload.run_id} (${payload.status}) - ${trainingLabel}.`);
       toast.success(`Đã trigger Kaggle run ${payload.run_id} (${trainingLabel}).`);
     } catch (error) {
@@ -674,6 +755,7 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
                 onClick={() => {
                   void refreshOverview();
                   void refreshCandidates(undefined, 1, "all_batches");
+                  void refreshTrainingPreview(1, "all_batches");
                   void refreshThresholdStatus(activeBatchId);
                   void refreshReviewHistory(undefined, historyDecision, 1, "all_batches");
                   void refreshCrawlHistory(1);
@@ -871,6 +953,90 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
           </Card>
 
           <Card className="p-4 space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <h3 className="font-medium">Training preview</h3>
+                <p className="text-xs text-muted-foreground">
+                  Approved pseudo data, balanced toxic/clean, constructiveness masked when confidence is low.
+                </p>
+              </div>
+              <Button size="sm" variant="outline" onClick={() => refreshTrainingPreview(trainingPreview?.page || 1, "all_batches")}>
+                Refresh preview
+              </Button>
+            </div>
+            <div className="grid gap-2 md:grid-cols-4">
+              <div className="rounded-md border p-3">
+                <p className="text-xs text-muted-foreground">Selected</p>
+                <p className="text-xl font-semibold">{trainingPreview?.counts.selected ?? 0}</p>
+              </div>
+              <div className="rounded-md border p-3">
+                <p className="text-xs text-muted-foreground">Toxic / Clean</p>
+                <p className="text-xl font-semibold">
+                  {trainingPreview?.counts.selected_toxic ?? 0} / {trainingPreview?.counts.selected_clean ?? 0}
+                </p>
+              </div>
+              <div className="rounded-md border p-3">
+                <p className="text-xs text-muted-foreground">Balanced export</p>
+                <p className="text-xl font-semibold">{trainingPreview?.balance.balanced_count ?? 0}</p>
+              </div>
+              <div className="rounded-md border p-3">
+                <p className="text-xs text-muted-foreground">Constructiveness</p>
+                <p className="text-xl font-semibold">
+                  {trainingPreview?.constructiveness.included ?? 0} / {trainingPreview?.constructiveness.masked ?? 0}
+                </p>
+              </div>
+            </div>
+            <div className="space-y-1.5 max-h-80 overflow-auto pr-1">
+              <AnimatePresence initial={false}>
+                {(trainingPreview?.items || []).slice(0, 20).map((item, index) => (
+                  <motion.div
+                    key={`preview-${item.id}`}
+                    initial={{ opacity: 0, y: 8 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: -8 }}
+                    transition={{ duration: 0.18, delay: Math.min(index * 0.015, 0.12) }}
+                    className="rounded-md border border-border/70 p-2.5"
+                  >
+                    <div className="flex flex-wrap items-start justify-between gap-2">
+                      <p className="min-w-0 flex-1 text-sm leading-relaxed line-clamp-2">{item.text}</p>
+                      <div className="flex flex-wrap gap-1">
+                        <Button
+                          size="sm"
+                          variant={item.selected_for_training ? "default" : "outline"}
+                          disabled={Boolean(item.is_locked) && Boolean(item.selected_for_training)}
+                          onClick={() => handlePreviewSelection(item.id, !item.selected_for_training, Boolean(item.is_locked))}
+                        >
+                          {item.selected_for_training ? "Selected" : "Use"}
+                        </Button>
+                        <Button size="sm" variant="outline" onClick={() => handlePreviewLock(item.id, !Boolean(item.is_locked))}>
+                          {item.is_locked ? "Unlock" : "Lock"}
+                        </Button>
+                        <Button size="sm" variant="outline" onClick={() => handlePreviewConstructiveness(item.id, 1)}>C+</Button>
+                        <Button size="sm" variant="outline" onClick={() => handlePreviewConstructiveness(item.id, 0)}>C-</Button>
+                        <Button size="sm" variant="outline" onClick={() => handlePreviewConstructiveness(item.id, null)}>Mask</Button>
+                      </div>
+                    </div>
+                    <div className="mt-1 flex flex-wrap gap-1 text-xs">
+                      <Badge variant="outline">bucket={item.gate_bucket}</Badge>
+                      <Badge variant="outline">tox={item.pseudo_label ?? "-"}</Badge>
+                      <Badge variant="outline">score={item.score?.toFixed(3) ?? "-"}</Badge>
+                      <Badge variant="outline">construct={item.constructiveness_label ?? "masked"}</Badge>
+                      <Badge variant="outline">cscore={item.constructiveness_score?.toFixed(3) ?? "-"}</Badge>
+                      <Badge variant="outline">lock={item.is_locked ? "on" : "off"}</Badge>
+                      <Badge variant="outline">review={item.training_review_status ?? "-"}</Badge>
+                    </div>
+                  </motion.div>
+                ))}
+              </AnimatePresence>
+              {(!trainingPreview || trainingPreview.items.length === 0) && (
+                <p className="rounded-md border border-dashed p-4 text-sm text-muted-foreground">
+                  No training preview rows yet.
+                </p>
+              )}
+            </div>
+          </Card>
+
+          <Card className="p-4 space-y-3">
             <div className="flex items-center justify-between gap-2">
               <h3 className="font-medium">Manual verify (DB persisted pool)</h3>
               <div className="text-sm text-muted-foreground">
@@ -888,6 +1054,12 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
               <Button size="sm" variant="outline" onClick={handleUnselectAllCandidates} disabled={selectedCandidateIds.length === 0}>
                 Unselect all
               </Button>
+              <Button size="sm" variant="outline" onClick={() => void handleBulkLock(true)} disabled={selectedCandidateIds.length === 0}>
+                Lock selected
+              </Button>
+              <Button size="sm" variant="outline" onClick={() => void handleBulkLock(false)} disabled={selectedCandidateIds.length === 0}>
+                Unlock selected
+              </Button>
             </div>
 
             <div className="space-y-1.5 max-h-[34rem] overflow-auto pr-1">
@@ -904,6 +1076,8 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
                       <Badge variant="outline">domain={resolveDomainTag(item)}</Badge>
                       <Badge variant="outline">score={item.score?.toFixed(3) ?? "-"}</Badge>
                       <Badge variant="outline">pseudo={item.pseudo_label ?? "-"}</Badge>
+                      <Badge variant="outline">construct={item.constructiveness_label ?? "masked"}</Badge>
+                      <Badge variant="outline">lock={item.is_locked ? "on" : "off"}</Badge>
                       <Badge variant="outline">source={item.label_source ?? "-"}</Badge>
                       <Badge variant="outline">conf={item.label_confidence ?? "-"}</Badge>
                     </div>
@@ -1027,6 +1201,12 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
               <Button size="sm" variant="outline" onClick={handleUnselectAllCandidates} disabled={selectedCandidateIds.length === 0}>
                 Unselect all
               </Button>
+              <Button size="sm" variant="outline" onClick={() => void handleBulkLock(true)} disabled={selectedCandidateIds.length === 0}>
+                Lock selected
+              </Button>
+              <Button size="sm" variant="outline" onClick={() => void handleBulkLock(false)} disabled={selectedCandidateIds.length === 0}>
+                Unlock selected
+              </Button>
             </div>
 
             <div className="space-y-1.5 max-h-[34rem] overflow-auto pr-1">
@@ -1040,7 +1220,7 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
                   <div className="min-w-0 flex-1">
                     <p className="text-sm line-clamp-2">{item.text}</p>
                     <p className="text-xs text-muted-foreground">
-                      domain={resolveDomainTag(item)} · score={item.score?.toFixed(3) ?? "-"} · pseudo={item.pseudo_label ?? "-"} · source={item.label_source ?? "-"} · conf={item.label_confidence ?? "-"} · {item.url}
+                      domain={resolveDomainTag(item)} · score={item.score?.toFixed(3) ?? "-"} · pseudo={item.pseudo_label ?? "-"} · lock={item.is_locked ? "on" : "off"} · source={item.label_source ?? "-"} · conf={item.label_confidence ?? "-"} · {item.url}
                     </p>
                   </div>
                 </div>
@@ -1222,6 +1402,24 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
               <p className="text-sm font-medium">Compute target</p>
               <p className="text-xs text-muted-foreground">Flow tự động hiện chạy qua Google Kaggle (GPU runtime).</p>
 
+              <p className="text-sm font-medium">Model kind</p>
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  type="button"
+                  variant={selectedModelKind === "phobert" ? "default" : "outline"}
+                  onClick={() => setSelectedModelKind("phobert")}
+                >
+                  PhoBERT
+                </Button>
+                <Button
+                  type="button"
+                  variant={selectedModelKind === "lr_smoke" ? "default" : "outline"}
+                  onClick={() => setSelectedModelKind("lr_smoke")}
+                >
+                  LR smoke
+                </Button>
+              </div>
+
               <p className="text-sm font-medium">Training mode</p>
               <div className="flex flex-wrap gap-2">
                 <Button
@@ -1240,7 +1438,25 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
                 </Button>
               </div>
 
-              {selectedTrainingMode === "finetune" && (
+              <p className="text-sm font-medium">Data policy</p>
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  type="button"
+                  variant={balanceStrategy === "balanced_50_50" ? "default" : "outline"}
+                  onClick={() => setBalanceStrategy("balanced_50_50")}
+                >
+                  Balanced 50/50
+                </Button>
+                <Button
+                  type="button"
+                  variant={balanceStrategy === "all" ? "default" : "outline"}
+                  onClick={() => setBalanceStrategy("all")}
+                >
+                  Use all approved
+                </Button>
+              </div>
+
+              {selectedModelKind === "phobert" && selectedTrainingMode === "finetune" && (
                 <div>
                   <label className="text-xs text-muted-foreground">Base model (optional)</label>
                   <Input

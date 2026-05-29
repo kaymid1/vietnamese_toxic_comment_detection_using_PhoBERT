@@ -190,7 +190,7 @@ export const messages = {
         allSources: "Tất cả nguồn", all: "Tất cả", clean: "An toàn", toxic: "Độc hại", source: "Nguồn", label: "Nhãn", split: "Split", pageSize: "Kích thước trang", train: "Train", validation: "Validation", test: "Test", feedback: "Feedback",
       },
       overview: {
-        title: "Tổng quan dữ liệu", currentFilterStats: "Thống kê theo bộ lọc hiện tại", mergedDatasets: "{count} nguồn dữ liệu đã gộp", balanced: "Tương đối cân bằng", imbalanced: "Mất cân bằng", dominantClassWarning: "Lớp {label} đang chiếm ưu thế ({percent}).", distributionAfterMerge: "Phân phối sau khi merge", totalSamples: "Tổng mẫu", sourcesSummary: "Theo tất cả nguồn", cleanNonToxic: "Clean / Non-toxic", percentOfDataset: "Chiếm {percent} dataset", imbalanceRatio: "Tỷ lệ mất cân bằng", cleanToxicCurrent: "Clean:Toxic hiện tại", contributionBySource: "Đóng góp theo nguồn", resultLabel: "Kết luận:", dynamicRenderNote: "Các chỉ số được render động từ API preview.", page: "Trang", crossTab: "Bảng chéo theo nguồn",
+        title: "Tổng quan dữ liệu", currentFilterStats: "Thống kê theo bộ lọc hiện tại", mergedDatasets: "{count} nguồn dữ liệu đã gộp", balanced: "Tương đối cân bằng", imbalanced: "Mất cân bằng", dominantClassWarning: "Lớp {label} đang chiếm ưu thế ({percent}).", macroF1ImbalanceNote: "Mất cân bằng lớp vẫn là rủi ro cần theo dõi, nhưng đánh giá chính dùng Macro F1 nên mỗi lớp được tính ngang nhau khi lấy trung bình F1 theo lớp.", distributionAfterMerge: "Phân phối sau khi merge", totalSamples: "Tổng mẫu", sourcesSummary: "Theo tất cả nguồn", cleanNonToxic: "Clean / Non-toxic", percentOfDataset: "Chiếm {percent} dataset", imbalanceRatio: "Tỷ lệ mất cân bằng", cleanToxicCurrent: "Clean:Toxic hiện tại", contributionBySource: "Đóng góp theo nguồn", resultLabel: "Kết luận:", dynamicRenderNote: "Các chỉ số được render động từ API preview.", page: "Trang", crossTab: "Bảng chéo theo nguồn",
       },
       compare: {
         datasetCharacteristics: "Đặc điểm từng nguồn", similaritiesReason: "Điểm tương đồng & lý do merge", empiricalEvidence: "Bằng chứng thực nghiệm", differencesAcknowledged: "Khác biệt cần thừa nhận", victsdBadge: "ViCTSD", victsdTitle: "UIT-ViCTSD (2021)", vihsdBadge: "ViHSD", vihsdTitle: "UIT-ViHSD (2021)",
@@ -213,7 +213,7 @@ export const messages = {
       definition: {
         title: "Định nghĩa nhãn", p1Prefix: "Trong nghiên cứu này, “toxic” được định nghĩa theo nhãn ", p1Label: "Toxicity", p1Mid: " gốc của ViCTSD. Label nhị phân được giữ nguyên: ", p1Clean: "0 = non-toxic/clean", p1Toxic: "1 = toxic", p2Prefix: "Không gộp thêm các mức độ khác hay tiêu chí ", p2Constructiveness: "Constructiveness", p2Suffix: " để đảm bảo tính nhất quán với annotation guideline gốc của dataset và tránh thay đổi semantics nhãn trong quá trình tiền xử lý.",
       },
-      table: { select: "Chọn", text: "Nội dung", augmented: "Augmented", created: "Thời gian tạo" },
+      table: { select: "Chọn", text: "Nội dung", constructiveness: "Constructiveness", augmented: "Augmented", created: "Thời gian tạo" },
     },
     model: {
       common: { noMetrics: "Không có số liệu", na: "N/A", baseline: "Baseline", yes: "Có", no: "Không", all: "Tất cả", lastUpdated: "Cập nhật: {value}" },
@@ -286,6 +286,10 @@ export const messages = {
       label: "Nhãn",
       labelToxic: "1 - toxic",
       labelClean: "0 - clean",
+      constructiveness: "Constructiveness",
+      constructivenessMask: "masked",
+      constructive: "1 - constructive",
+      nonConstructive: "0 - non-constructive",
       count: "Số lượng",
       generating: "Đang sinh...",
       generate: "Generate",
@@ -316,6 +320,7 @@ export const messages = {
       tableTextEditable: "Text (editable)",
       tableActions: "Actions",
       tableLabel: "Label",
+      tableConstructiveness: "Constructiveness",
       tableDomain: "Domain",
       tableStyle: "Style",
       tableBatch: "Batch",
@@ -517,7 +522,7 @@ export const messages = {
         allSources: "All sources", all: "All", clean: "Clean", toxic: "Toxic", source: "Source", label: "Label", split: "Split", pageSize: "Page size", train: "Train", validation: "Validation", test: "Test", feedback: "Feedback",
       },
       overview: {
-        title: "Dataset overview", currentFilterStats: "Statistics for current filters", mergedDatasets: "{count} merged data sources", balanced: "Relatively balanced", imbalanced: "Imbalanced", dominantClassWarning: "Class {label} is dominant ({percent}).", distributionAfterMerge: "Distribution after merge", totalSamples: "Total samples", sourcesSummary: "Across all sources", cleanNonToxic: "Clean / Non-toxic", percentOfDataset: "{percent} of dataset", imbalanceRatio: "Imbalance ratio", cleanToxicCurrent: "Current Clean:Toxic", contributionBySource: "Contribution by source", resultLabel: "Result:", dynamicRenderNote: "Metrics are dynamically rendered from the preview API.", page: "Page", crossTab: "Cross-tab by source",
+        title: "Dataset overview", currentFilterStats: "Statistics for current filters", mergedDatasets: "{count} merged data sources", balanced: "Relatively balanced", imbalanced: "Imbalanced", dominantClassWarning: "Class {label} is dominant ({percent}).", macroF1ImbalanceNote: "Class imbalance is still a risk to monitor, but Macro F1 is the primary metric so each class contributes equally through class-wise F1 averaging.", distributionAfterMerge: "Distribution after merge", totalSamples: "Total samples", sourcesSummary: "Across all sources", cleanNonToxic: "Clean / Non-toxic", percentOfDataset: "{percent} of dataset", imbalanceRatio: "Imbalance ratio", cleanToxicCurrent: "Current Clean:Toxic", contributionBySource: "Contribution by source", resultLabel: "Result:", dynamicRenderNote: "Metrics are dynamically rendered from the preview API.", page: "Page", crossTab: "Cross-tab by source",
       },
       compare: {
         datasetCharacteristics: "Source characteristics", similaritiesReason: "Similarities and merge rationale", empiricalEvidence: "Empirical evidence", differencesAcknowledged: "Acknowledged differences", victsdBadge: "ViCTSD", victsdTitle: "UIT-ViCTSD (2021)", vihsdBadge: "ViHSD", vihsdTitle: "UIT-ViHSD (2021)",
@@ -540,7 +545,7 @@ export const messages = {
       definition: {
         title: "Label definition", p1Prefix: "In this work, “toxic” is defined according to the original ViCTSD ", p1Label: "Toxicity", p1Mid: " label. Binary labels are kept as: ", p1Clean: "0 = non-toxic/clean", p1Toxic: "1 = toxic", p2Prefix: "No additional levels or ", p2Constructiveness: "Constructiveness", p2Suffix: " criteria are merged, to preserve consistency with the dataset's original annotation guideline and avoid semantic drift during preprocessing.",
       },
-      table: { select: "Select", text: "Text", augmented: "Augmented", created: "Created at" },
+      table: { select: "Select", text: "Text", constructiveness: "Constructiveness", augmented: "Augmented", created: "Created at" },
     },
     model: {
       common: { noMetrics: "No metrics", na: "N/A", baseline: "Baseline", yes: "Yes", no: "No", all: "All", lastUpdated: "Last updated: {value}" },
@@ -613,6 +618,10 @@ export const messages = {
       label: "Label",
       labelToxic: "1 - toxic",
       labelClean: "0 - clean",
+      constructiveness: "Constructiveness",
+      constructivenessMask: "masked",
+      constructive: "1 - constructive",
+      nonConstructive: "0 - non-constructive",
       count: "Count",
       generating: "Generating...",
       generate: "Generate",
@@ -643,6 +652,7 @@ export const messages = {
       tableTextEditable: "Text (editable)",
       tableActions: "Actions",
       tableLabel: "Label",
+      tableConstructiveness: "Constructiveness",
       tableDomain: "Domain",
       tableStyle: "Style",
       tableBatch: "Batch",

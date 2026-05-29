@@ -26,12 +26,14 @@ import { useI18n } from "@/app/i18n/context";
 interface DatasetRow {
   text: string;
   label: number;
+  constructiveness?: number | string | null;
   meta?: {
     source?: string;
     split?: string;
     is_augmented?: boolean;
     created_at?: string;
     feedback_id?: number;
+    constructiveness?: number | string | null;
   };
 }
 
@@ -121,6 +123,22 @@ const fetchApiWithFallback = async (path: string, init?: RequestInit): Promise<R
 };
 
 const labelText = (label: number, t: (key: string) => string) => (label === 1 ? t("dataset.filters.toxic") : t("dataset.filters.clean"));
+const normalizeConstructiveness = (value: unknown): number | null => {
+  if (value === 1 || value === 0) return value;
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (trimmed === "1") return 1;
+    if (trimmed === "0") return 0;
+  }
+  return null;
+};
+
+const constructivenessText = (value: unknown, t: (key: string) => string) => {
+  const normalized = normalizeConstructiveness(value);
+  if (normalized === 1) return t("dataset.common.yes");
+  if (normalized === 0) return t("dataset.common.no");
+  return t("dataset.common.na");
+};
 
 const sourceLabel = (source: string, t: (key: string) => string) => {
   const normalized = source.trim().toLowerCase();
@@ -891,6 +909,7 @@ export function DatasetPage() {
                   aggregatedStats.total,
                 ),
               })}
+              <p className="mt-2 text-xs text-text-danger/90">{t("dataset.overview.macroF1ImbalanceNote")}</p>
             </div>
           )}
 
@@ -1013,6 +1032,7 @@ export function DatasetPage() {
                 <TableHead>{t("dataset.filters.label")}</TableHead>
                 <TableHead>{t("dataset.filters.source")}</TableHead>
                 <TableHead>{t("dataset.filters.split")}</TableHead>
+                <TableHead>{t("dataset.table.constructiveness")}</TableHead>
                 <TableHead>{t("dataset.table.augmented")}</TableHead>
                 <TableHead>{t("dataset.table.created")}</TableHead>
               </TableRow>
@@ -1021,6 +1041,8 @@ export function DatasetPage() {
               {rows.map((row, idx) => {
                 const feedbackId = row.meta?.feedback_id;
                 const selectable = row.meta?.split === "feedback" && typeof feedbackId === "number";
+                const constructivenessValue =
+                  normalizeConstructiveness(row.constructiveness) ?? normalizeConstructiveness(row.meta?.constructiveness);
                 return (
                   <TableRow key={`${row.text.slice(0, 20)}-${idx}`}>
                     <TableCell>
@@ -1040,6 +1062,7 @@ export function DatasetPage() {
                     <TableCell>{labelText(row.label, t)}</TableCell>
                     <TableCell>{row.meta?.source ?? t("dataset.common.na")}</TableCell>
                     <TableCell>{row.meta?.split ?? t("dataset.common.na")}</TableCell>
+                    <TableCell>{constructivenessText(constructivenessValue, t)}</TableCell>
                     <TableCell>{row.meta?.is_augmented ? t("dataset.common.yes") : t("dataset.common.no")}</TableCell>
                     <TableCell>{row.meta?.created_at ?? t("dataset.common.na")}</TableCell>
                   </TableRow>
@@ -1047,7 +1070,7 @@ export function DatasetPage() {
               })}
               {!rows.length && !loading && (
                 <TableRow>
-                  <TableCell colSpan={7} className="text-center text-sm text-muted-foreground">
+                  <TableCell colSpan={8} className="text-center text-sm text-muted-foreground">
                     {t("dataset.common.noData")}
                   </TableCell>
                 </TableRow>

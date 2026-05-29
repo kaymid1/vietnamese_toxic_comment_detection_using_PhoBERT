@@ -82,9 +82,11 @@ def test_kaggle_trigger_dry_run(client, admin_headers):
     assert payload.get("run_id")
 
 
-def test_kaggle_preflight_real_mode_requires_credentials(client, admin_headers, monkeypatch):
+def test_kaggle_preflight_real_mode_requires_credentials(client, admin_headers, qa_env, monkeypatch):
     monkeypatch.delenv("KAGGLE_USERNAME", raising=False)
     monkeypatch.delenv("KAGGLE_KEY", raising=False)
+    app_module = qa_env["app_module"]
+    monkeypatch.setattr(app_module, "_kaggle_webhook_reachability", lambda webhook_url: (True, None))
     response = client.patch(
         "/api/admin/system-settings",
         headers=admin_headers,
@@ -105,10 +107,41 @@ def test_kaggle_preflight_real_mode_requires_credentials(client, admin_headers, 
     assert payload["ready"] is False
     assert payload["checks"]["KAGGLE_NOTEBOOK_URL"] is True
     assert payload["checks"]["KAGGLE_WEBHOOK_URL"] is True
+    assert payload["checks"]["KAGGLE_WEBHOOK_REACHABLE"] is True
     assert payload["checks"]["KAGGLE_USERNAME"] is False
     assert payload["checks"]["KAGGLE_KEY"] is False
     assert set(payload["missing"]) == {"KAGGLE_USERNAME", "KAGGLE_KEY"}
     assert payload["config"]["webhook_mode"] == "real"
+
+
+def test_kaggle_preflight_reports_unreachable_webhook(client, admin_headers, qa_env, monkeypatch):
+    app_module = qa_env["app_module"]
+    monkeypatch.setattr(
+        app_module,
+        "_kaggle_webhook_reachability",
+        lambda webhook_url: (False, "Webhook receiver unreachable (http://127.0.0.1:9000/health): refused"),
+    )
+    response = client.patch(
+        "/api/admin/system-settings",
+        headers=admin_headers,
+        json={
+            "settings": {
+                "KAGGLE_WEBHOOK_MODE": "mock",
+                "KAGGLE_NOTEBOOK_URL": "https://www.kaggle.com/code/kaymid/thesis-phobert/edit",
+                "KAGGLE_WEBHOOK_URL": "http://127.0.0.1:9000/kaggle/trigger",
+            }
+        },
+    )
+    assert response.status_code == 200
+
+    preflight = client.get("/api/mlflow/kaggle/preflight", headers=admin_headers)
+    assert preflight.status_code == 200
+    payload = preflight.json()
+    assert payload["ready"] is False
+    assert payload["missing"] == []
+    assert payload["checks"]["KAGGLE_WEBHOOK_URL"] is True
+    assert payload["checks"]["KAGGLE_WEBHOOK_REACHABLE"] is False
+    assert any("Webhook receiver unreachable" in warning for warning in payload["warnings"])
 
 
 def test_kaggle_trigger_real_mode_requires_credentials(client, admin_headers, monkeypatch):
@@ -247,6 +280,33 @@ def test_kaggle_webhook_receiver_reads_db_settings_at_request_time(client, qa_en
     )
     assert response.status_code == 200
     assert receiver._webhook_mode() == "mock"
+
+
+def test_kaggle_webhook_receiver_strips_notebook_source_bom(tmp_path, monkeypatch):
+    import backend.kaggle_webhook_receiver as receiver
+
+    source = tmp_path / "source_with_bom.py"
+    source.write_text("\ufeff# %% [markdown]\n# title\n\ufeffprint('ok')\n", encoding="utf-8")
+    monkeypatch.setattr(
+        receiver,
+        "_setting",
+        lambda key, default="": str(source) if key == "KAGGLE_REAL_NOTEBOOK_SOURCE" else default,
+    )
+
+    script = receiver._build_real_script_content(receiver.TriggerRequest(run_id="run_bom"))
+
+    assert "\ufeff" not in script
+    compile(script, "<kaggle-script>", "exec")
+
+
+def test_kaggle_webhook_receiver_attaches_phobert_train_script(tmp_path):
+    import backend.kaggle_webhook_receiver as receiver
+
+    attached = receiver._attach_phobert_train_script(tmp_path)
+
+    assert attached == tmp_path / "scripts" / "train_phobert.py"
+    assert attached.exists()
+    assert "PhoBERT Fine-tune" in attached.read_text(encoding="utf-8")
 
 
 def test_kaggle_status_missing_run(client, admin_headers):

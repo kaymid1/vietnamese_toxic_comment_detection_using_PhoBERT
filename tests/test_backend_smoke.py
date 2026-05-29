@@ -1,4 +1,6 @@
+import json
 import sqlite3
+import zipfile
 from datetime import datetime
 from pathlib import Path
 
@@ -208,7 +210,9 @@ def test_system_settings_db_override_env_for_gemini(client, admin_headers, monke
     assert app_module.get_gemini_model_candidates() == ["db-model", "fallback-a", "fallback-b"]
 
 
-def test_system_settings_drive_kaggle_preflight(client, admin_headers):
+def test_system_settings_drive_kaggle_preflight(client, admin_headers, qa_env, monkeypatch):
+    app_module = qa_env["app_module"]
+    monkeypatch.setattr(app_module, "_kaggle_webhook_reachability", lambda webhook_url: (True, None))
     response = client.patch(
         "/api/admin/system-settings",
         headers=admin_headers,
@@ -228,6 +232,7 @@ def test_system_settings_drive_kaggle_preflight(client, admin_headers):
     assert payload["missing"] == []
     assert payload["checks"]["KAGGLE_NOTEBOOK_URL"] is True
     assert payload["checks"]["KAGGLE_WEBHOOK_URL"] is True
+    assert payload["checks"]["KAGGLE_WEBHOOK_REACHABLE"] is True
 
 
 def test_admin_system_settings_endpoint_contract(client, admin_headers):
@@ -325,3 +330,174 @@ def test_mlflow_manual_export_bundle_isolated_temp_db(client, qa_env, admin_head
     bundle_path = qa_env["base_dir"] / payload["bundle_path"]
     assert bundle_path.exists()
     assert bundle_path.suffix == ".zip"
+
+
+def test_mlflow_training_preview_and_full_bundle_include_phobert_assets(client, qa_env, admin_headers):
+    _seed_mlflow_batch(qa_env["feedback_db"], batch_id="batch_phobert")
+    with sqlite3.connect(qa_env["feedback_db"]) as conn:
+        conn.execute(
+            """
+            UPDATE mlflow_comment_item
+            SET constructiveness_score = 0.82,
+                constructiveness_label = 1,
+                constructiveness_confidence = 'high'
+            WHERE text = 'accepted sample'
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO mlflow_comment_item (
+                batch_id, job_id, url, url_hash, domain_category, segment_id, text, score,
+                pseudo_label, constructiveness_score, constructiveness_label, constructiveness_confidence,
+                gate_bucket, verification_status, segment_hash, context_segment_hash,
+                html_tag, seg_threshold_used, label_source, label_confidence, created_at, reviewed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "batch_phobert",
+                "job_1",
+                "https://example.com/c",
+                "hash_c",
+                "news",
+                "seg_3",
+                "clean sample",
+                0.05,
+                0,
+                0.12,
+                0,
+                "high",
+                "accepted",
+                "auto_accepted",
+                "seg_hash_3",
+                "ctx_hash_3",
+                "p",
+                0.4,
+                "auto_gate",
+                "high",
+                datetime.utcnow().isoformat() + "Z",
+                None,
+            ),
+        )
+        conn.commit()
+
+    preview = client.get(
+        "/api/mlflow/training-preview",
+        headers=admin_headers,
+        params={"scope": "batch", "batch_id": "batch_phobert", "strict_batch": "true"},
+    )
+    assert preview.status_code == 200
+    preview_payload = preview.json()
+    assert preview_payload["counts"]["selected_toxic"] == 1
+    assert preview_payload["counts"]["selected_clean"] == 1
+    assert preview_payload["constructiveness"]["included"] == 2
+
+    response = client.post(
+        "/api/mlflow/manual/export-bundle",
+        headers=admin_headers,
+        json={
+            "scope": "batch",
+            "batch_id": "batch_phobert",
+            "bundle_profile": "full_bundle",
+            "model_kind": "phobert",
+            "training_mode": "finetune",
+            "balance_strategy": "balanced_50_50",
+            "dataset_version": "victsd_gold",
+            "model_version": "model-test",
+            "policy_version": "policy-test",
+        },
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["count"] == 2
+    assert payload["balance_stats"]["selected_toxic"] == 1
+    assert payload["balance_stats"]["selected_clean"] == 1
+    assert payload["constructiveness"]["included"] == 2
+
+    bundle_path = qa_env["base_dir"] / payload["bundle_path"]
+    with zipfile.ZipFile(bundle_path, "r") as zf:
+        names = set(zf.namelist())
+        assert "pseudo/accepted.jsonl" in names
+        assert "pseudo/manifest.json" in names
+        assert "scripts/train_phobert.py" in names
+        pseudo_rows = [
+            json.loads(line)
+            for line in zf.read("pseudo/accepted.jsonl").decode("utf-8").splitlines()
+            if line.strip()
+        ]
+    assert {row["toxicity"] for row in pseudo_rows} == {0, 1}
+    assert all(row.get("constructiveness") in {0, 1} for row in pseudo_rows)
+
+
+def test_mlflow_lock_prevents_accidental_remove_in_training_preview(client, qa_env, admin_headers):
+    _seed_mlflow_batch(qa_env["feedback_db"], batch_id="batch_lock_preview")
+    preview = client.get(
+        "/api/mlflow/training-preview",
+        headers=admin_headers,
+        params={"scope": "batch", "batch_id": "batch_lock_preview", "strict_batch": "true"},
+    )
+    assert preview.status_code == 200
+    payload = preview.json()
+    target = next(item for item in payload["items"] if item["text"] == "accepted sample")
+    target_id = int(target["id"])
+
+    lock_resp = client.post(
+        "/api/mlflow/training-preview/review",
+        headers=admin_headers,
+        json={"updates": [{"id": target_id, "lock_state": True}]},
+    )
+    assert lock_resp.status_code == 200
+    assert lock_resp.json()["updated"] >= 1
+
+    remove_resp = client.post(
+        "/api/mlflow/training-preview/review",
+        headers=admin_headers,
+        json={"updates": [{"id": target_id, "selected_for_training": False}]},
+    )
+    assert remove_resp.status_code == 200
+    assert remove_resp.json()["skipped_locked"] == 1
+
+    preview_after = client.get(
+        "/api/mlflow/training-preview",
+        headers=admin_headers,
+        params={"scope": "batch", "batch_id": "batch_lock_preview", "strict_batch": "true"},
+    )
+    assert preview_after.status_code == 200
+    target_after = next(item for item in preview_after.json()["items"] if int(item["id"]) == target_id)
+    assert int(target_after["is_locked"]) == 1
+    assert int(target_after["selected_for_training"]) == 1
+
+    unlock_and_remove = client.post(
+        "/api/mlflow/training-preview/review",
+        headers=admin_headers,
+        json={"updates": [{"id": target_id, "lock_state": False, "selected_for_training": False}]},
+    )
+    assert unlock_and_remove.status_code == 200
+    assert unlock_and_remove.json()["updated"] >= 1
+
+
+def test_mlflow_lock_prevents_drop_in_candidate_review(client, qa_env, admin_headers):
+    _seed_mlflow_batch(qa_env["feedback_db"], batch_id="batch_lock_candidates")
+    candidates = client.get(
+        "/api/mlflow/candidates",
+        headers=admin_headers,
+        params={"scope": "batch", "batch_id": "batch_lock_candidates", "strict_batch": "true"},
+    )
+    assert candidates.status_code == 200
+    target = next(item for item in candidates.json()["items"] if item["text"] == "candidate sample")
+    target_id = int(target["id"])
+
+    lock_resp = client.post(
+        "/api/mlflow/candidates/review",
+        headers=admin_headers,
+        json={"updates": [{"id": target_id, "lock_state": True}]},
+    )
+    assert lock_resp.status_code == 200
+    assert lock_resp.json()["locked_updated"] >= 1
+
+    drop_resp = client.post(
+        "/api/mlflow/candidates/review",
+        headers=admin_headers,
+        json={"updates": [{"id": target_id, "action": "drop"}]},
+    )
+    assert drop_resp.status_code == 200
+    assert drop_resp.json()["skipped_locked"] == 1
