@@ -60,6 +60,14 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
     ),
     SettingDefinition("KAGGLE_WEBHOOK_URL", "Trigger webhook URL", "kaggle_webhook", "Kaggle Webhook", "string", required=True),
     SettingDefinition("KAGGLE_STATUS_WEBHOOK_URL", "Status webhook URL", "kaggle_webhook", "Kaggle Webhook", "string"),
+    SettingDefinition("KAGGLE_REAL_BUNDLE_URL", "Real run bundle URL", "kaggle_webhook", "Kaggle Webhook", "string"),
+    SettingDefinition(
+        "KAGGLE_REAL_BUNDLE_URL_TEMPLATE",
+        "Real run bundle URL template",
+        "kaggle_webhook",
+        "Kaggle Webhook",
+        "string",
+    ),
     SettingDefinition(
         "KAGGLE_WEBHOOK_TIMEOUT_SEC",
         "Webhook timeout seconds",

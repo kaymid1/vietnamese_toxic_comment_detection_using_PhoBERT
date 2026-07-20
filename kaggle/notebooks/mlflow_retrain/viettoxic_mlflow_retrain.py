@@ -23,6 +23,7 @@ from urllib.request import Request, urlopen
 
 WORKDIR = pathlib.Path("/kaggle/working/viettoxic")
 WORKDIR.mkdir(parents=True, exist_ok=True)
+os.environ.setdefault("MLFLOW_ALLOW_FILE_STORE", "true")
 
 BUNDLE_URL = os.getenv("VIETTOXIC_BUNDLE_URL", "").strip()
 BUNDLE_ZIP = WORKDIR / "mlflow_bundle.zip"
@@ -35,7 +36,7 @@ SMOKE_MAX_VAL = int(os.getenv("VIETTOXIC_SMOKE_MAX_VAL", "1200"))
 SMOKE_MAX_TEST = int(os.getenv("VIETTOXIC_SMOKE_MAX_TEST", "1200"))
 
 MLFLOW_ENABLED = os.getenv("MLFLOW_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
-MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", str(WORKDIR / "mlruns"))
+MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", f"sqlite:///{WORKDIR / 'mlflow.db'}")
 MLFLOW_EXPERIMENT_NAME = os.getenv("MLFLOW_EXPERIMENT_NAME", "viettoxic-kaggle-retrain-smoke")
 RUN_NAME = os.getenv("VIETTOXIC_RUN_NAME", f"kaggle_smoke_{time.strftime('%Y%m%d_%H%M%S')}")
 
@@ -584,31 +585,34 @@ def run_smoke_retrain() -> dict:
 
     mlflow_logged = False
     if MLFLOW_ENABLED:
-        import mlflow
+        try:
+            import mlflow
 
-        mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
-        mlflow.set_experiment(MLFLOW_EXPERIMENT_NAME)
-        with mlflow.start_run(run_name=RUN_NAME):
-            for key, value in metrics_payload["sizes"].items():
-                mlflow.log_param(f"size_{key}", int(value))
-            mlflow.log_param("bundle_profile", bundle_profile)
-            mlflow.log_param("mode", "smoke_retrain_tfidf_lr_multitask")
-            mlflow.log_param("tasks", "toxicity,constructiveness")
-            for k, v in val_metrics.items():
-                mlflow.log_metric(f"val_toxicity_{k}", float(v))
-            for k, v in test_metrics.items():
-                mlflow.log_metric(f"test_toxicity_{k}", float(v))
-            if constructiveness_payload and not constructiveness_payload.get("skipped"):
-                for k, v in constructiveness_payload["validation"].items():
-                    mlflow.log_metric(f"val_constructiveness_{k}", float(v))
-                for k, v in constructiveness_payload["test"].items():
-                    mlflow.log_metric(f"test_constructiveness_{k}", float(v))
-            mlflow.log_artifact(str(model_path))
-            if constructiveness_model is not None:
-                mlflow.log_artifact(str(constructiveness_model_path))
-            mlflow.log_artifact(str(vectorizer_path))
-            mlflow.log_artifact(str(metrics_path))
-        mlflow_logged = True
+            mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+            mlflow.set_experiment(MLFLOW_EXPERIMENT_NAME)
+            with mlflow.start_run(run_name=RUN_NAME):
+                for key, value in metrics_payload["sizes"].items():
+                    mlflow.log_param(f"size_{key}", int(value))
+                mlflow.log_param("bundle_profile", bundle_profile)
+                mlflow.log_param("mode", "smoke_retrain_tfidf_lr_multitask")
+                mlflow.log_param("tasks", "toxicity,constructiveness")
+                for k, v in val_metrics.items():
+                    mlflow.log_metric(f"val_toxicity_{k}", float(v))
+                for k, v in test_metrics.items():
+                    mlflow.log_metric(f"test_toxicity_{k}", float(v))
+                if constructiveness_payload and not constructiveness_payload.get("skipped"):
+                    for k, v in constructiveness_payload["validation"].items():
+                        mlflow.log_metric(f"val_constructiveness_{k}", float(v))
+                    for k, v in constructiveness_payload["test"].items():
+                        mlflow.log_metric(f"test_constructiveness_{k}", float(v))
+                mlflow.log_artifact(str(model_path))
+                if constructiveness_model is not None:
+                    mlflow.log_artifact(str(constructiveness_model_path))
+                mlflow.log_artifact(str(vectorizer_path))
+                mlflow.log_artifact(str(metrics_path))
+            mlflow_logged = True
+        except Exception as exc:
+            print(f"[WARN] MLflow logging skipped: {type(exc).__name__}: {exc}")
 
     summary_payload = {
         "status": "ok",

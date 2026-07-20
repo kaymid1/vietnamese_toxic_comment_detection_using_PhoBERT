@@ -5,6 +5,7 @@ param(
   [int]$WebhookPort = 9000,
   [string]$WebhookNgrokDomain = "living-rare-ram.ngrok-free.app",
   [switch]$StartFrontendNgrok,
+  [switch]$SkipWebhookSettingsSync,
   [switch]$NoLogStream
 )
 
@@ -152,6 +153,42 @@ function Start-LogTailJobs {
   return $jobs
 }
 
+function Sync-LocalWebhookSettings {
+  param(
+    [string]$PythonExe,
+    [string]$RepoRoot,
+    [int]$WebhookPort
+  )
+
+  $triggerUrl = "http://127.0.0.1:$WebhookPort/kaggle/trigger"
+  $statusUrl = "http://127.0.0.1:$WebhookPort/kaggle/status"
+  $code = @"
+import sys
+from pathlib import Path
+
+repo_root = Path(sys.argv[1])
+sys.path.insert(0, str(repo_root))
+
+from backend.system_settings import DEFAULT_SETTINGS_DB_PATH, update_system_settings
+
+DEFAULT_SETTINGS_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+update_system_settings(
+    DEFAULT_SETTINGS_DB_PATH,
+    {
+        "KAGGLE_WEBHOOK_URL": sys.argv[2],
+        "KAGGLE_STATUS_WEBHOOK_URL": sys.argv[3],
+    },
+    updated_by="start.ps1",
+)
+"@
+
+  $code | & $PythonExe - $RepoRoot $triggerUrl $statusUrl
+  if ($LASTEXITCODE -ne 0) {
+    throw "Failed to sync Kaggle webhook settings."
+  }
+  Write-Host ("[INFO] Synced Kaggle webhook settings: {0}" -f $triggerUrl)
+}
+
 function Flush-LogJobs {
   param([object[]]$Jobs)
   foreach ($job in $Jobs) {
@@ -171,6 +208,12 @@ if ($WebhookNgrokDomain -match "^https?://") {
   $WebhookNgrokUrl = $WebhookNgrokDomain
 } else {
   $WebhookNgrokUrl = "https://$WebhookNgrokDomain"
+}
+
+if (-not $SkipWebhookSettingsSync) {
+  Sync-LocalWebhookSettings -PythonExe $PythonExe -RepoRoot $RepoRoot -WebhookPort $WebhookPort
+} else {
+  Write-Host "[INFO] Skipping Kaggle webhook settings sync."
 }
 
 # Clean up stale service processes from earlier runs.

@@ -262,6 +262,7 @@ def test_kaggle_webhook_receiver_reads_db_settings_at_request_time(client, qa_en
                 "KAGGLE_KERNEL_SLUG": "db-slug",
                 "KAGGLE_USERNAME": "db-user",
                 "KAGGLE_KEY": "db-key",
+                "KAGGLE_REAL_BUNDLE_URL_TEMPLATE": "https://example.test/bundles/{batch_id}/{run_id}.zip",
             }
         },
     )
@@ -272,6 +273,7 @@ def test_kaggle_webhook_receiver_reads_db_settings_at_request_time(client, qa_en
     subprocess_env = receiver._build_subprocess_env()
     assert subprocess_env["KAGGLE_USERNAME"] == "db-user"
     assert subprocess_env["KAGGLE_KEY"] == "db-key"
+    assert receiver._resolve_bundle_url("batch-1", "run-1") == "https://example.test/bundles/batch-1/run-1.zip"
 
     response = client.patch(
         "/api/admin/system-settings",
@@ -299,6 +301,34 @@ def test_kaggle_webhook_receiver_strips_notebook_source_bom(tmp_path, monkeypatc
     compile(script, "<kaggle-script>", "exec")
 
 
+def test_kaggle_webhook_receiver_reports_inaccessible_kernel_owner(tmp_path, monkeypatch):
+    import backend.kaggle_webhook_receiver as receiver
+
+    monkeypatch.setattr(
+        receiver,
+        "_run_cmd",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("403 Client Error: Permission 'kernels.get' was denied")
+        ),
+    )
+    monkeypatch.setattr(
+        receiver,
+        "_setting",
+        lambda key, default="": "actual-user" if key == "KAGGLE_USERNAME" else default,
+    )
+
+    try:
+        receiver._fetch_existing_kernel_metadata("typo-user/train-kernel", tmp_path)
+    except RuntimeError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("Expected inaccessible Kaggle kernel to raise RuntimeError")
+
+    assert "Cannot access Kaggle kernel 'typo-user/train-kernel'" in message
+    assert "KAGGLE_KERNEL_OWNER" in message
+    assert "KAGGLE_USERNAME is 'actual-user'" in message
+
+
 def test_kaggle_webhook_receiver_attaches_phobert_train_script(tmp_path):
     import backend.kaggle_webhook_receiver as receiver
 
@@ -307,6 +337,52 @@ def test_kaggle_webhook_receiver_attaches_phobert_train_script(tmp_path):
     assert attached == tmp_path / "scripts" / "train_phobert.py"
     assert attached.exists()
     assert "PhoBERT Fine-tune" in attached.read_text(encoding="utf-8")
+
+
+def test_kaggle_webhook_receiver_embeds_phobert_train_script(monkeypatch):
+    import backend.kaggle_webhook_receiver as receiver
+
+    monkeypatch.setattr(receiver, "_setting", lambda key, default="": default)
+
+    script = receiver._build_real_script_content(
+        receiver.TriggerRequest(run_id="run_embed", model_kind="phobert", training_mode="finetune")
+    )
+
+    assert "/kaggle/working/viettoxic/scripts/train_phobert.py" in script
+    assert "PhoBERT Fine-tune" in script
+    assert "cudaErrorNoKernelImageForDevice" in script
+    assert "build_training_arguments" in script
+    assert "_train_script_path.write_text" in script
+    compile(script, "<kaggle-script>", "exec")
+
+
+def test_kaggle_webhook_receiver_prefers_model_zip_artifact(tmp_path):
+    import backend.kaggle_webhook_receiver as receiver
+
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    results_zip = output_dir / "results_full_victsd_gold.zip"
+    model_zip = output_dir / "best_model_full_victsd_gold.zip"
+    results_zip.write_bytes(b"metrics")
+    model_zip.write_bytes(b"model")
+
+    assert receiver._pick_artifact_file(output_dir) == model_zip
+
+
+def test_kaggle_webhook_receiver_lr_smoke_uses_sqlite_mlflow(monkeypatch):
+    import backend.kaggle_webhook_receiver as receiver
+
+    monkeypatch.setattr(receiver, "_setting", lambda key, default="": default)
+
+    script = receiver._build_real_script_content(
+        receiver.TriggerRequest(run_id="run_smoke", model_kind="lr_smoke", training_mode="retrain")
+    )
+
+    assert "MLFLOW_ALLOW_FILE_STORE" in script
+    assert "sqlite:///" in script
+    assert "MLflow logging skipped" in script
+    assert "smoke_retrain_tfidf_lr_multitask" in script
+    compile(script, "<kaggle-script>", "exec")
 
 
 def test_kaggle_status_missing_run(client, admin_headers):

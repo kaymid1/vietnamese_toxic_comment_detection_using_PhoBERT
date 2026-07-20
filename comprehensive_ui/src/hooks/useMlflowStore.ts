@@ -195,6 +195,24 @@ export interface MlflowTrainingPreview {
   };
 }
 
+export interface MlflowGeminiReviewSuggestion {
+  id: number;
+  toxicity_label: 0 | 1;
+  constructiveness_label?: 0 | 1 | null;
+  confidence: "low" | "medium" | "high";
+  reason: string;
+  action: "apply" | "review_more";
+}
+
+export interface MlflowGeminiReviewResponse {
+  status: string;
+  provider: "gemini";
+  model?: string | null;
+  suggestions: MlflowGeminiReviewSuggestion[];
+  requested: number;
+  reviewed: number;
+}
+
 export interface MlflowBatchSummary {
   batch_id: string;
   model_id?: string;
@@ -551,6 +569,8 @@ export function useMlflowStore(options: UseMlflowStoreOptions = {}) {
         constructiveness_label?: 0 | 1;
         clear_constructiveness?: boolean;
         lock_state?: boolean;
+        label_source?: string;
+        label_confidence?: string;
       }>,
     ) => {
       return run(async () => {
@@ -566,6 +586,21 @@ export function useMlflowStore(options: UseMlflowStoreOptions = {}) {
       });
     },
     [authorizedFetch, refreshTrainingPreview, run, trainingPreview?.page],
+  );
+
+  const geminiReviewTrainingPreview = useCallback(
+    async (ids: number[]) => {
+      return run(async () => {
+        return parseJsonResponse<MlflowGeminiReviewResponse>(
+          await authorizedFetch(buildApiUrl("/api/mlflow/training-preview/gemini-review"), {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ids }),
+          }),
+        );
+      });
+    },
+    [authorizedFetch, run],
   );
 
   const refreshReviewHistory = useCallback(
@@ -648,6 +683,7 @@ export function useMlflowStore(options: UseMlflowStoreOptions = {}) {
         modelKind?: "phobert" | "lr_smoke";
         trainingMode?: "retrain" | "finetune";
         balanceStrategy?: "balanced_50_50" | "all";
+        bundleProfile?: "clean_victsd_gold" | "full_bundle";
         includeBaseModel?: boolean;
         baseModel?: string;
       },
@@ -688,7 +724,7 @@ export function useMlflowStore(options: UseMlflowStoreOptions = {}) {
             body: JSON.stringify({
               batch_id: useBatch,
               scope: exportScope,
-              bundle_profile: options?.modelKind === "lr_smoke" ? "clean_victsd_gold" : "full_bundle",
+              bundle_profile: options?.bundleProfile || (options?.modelKind === "lr_smoke" ? "clean_victsd_gold" : "full_bundle"),
               model_kind: options?.modelKind || "phobert",
               training_mode: options?.trainingMode || "finetune",
               balance_strategy: options?.balanceStrategy || "balanced_50_50",
@@ -1149,6 +1185,7 @@ export function useMlflowStore(options: UseMlflowStoreOptions = {}) {
     refreshCandidates,
     refreshTrainingPreview,
     reviewTrainingPreview,
+    geminiReviewTrainingPreview,
     refreshReviewHistory,
     refreshCrawlHistory,
     reviewCandidates,

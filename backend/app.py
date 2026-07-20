@@ -66,6 +66,12 @@ MLFLOW_ACCEPT_THRESHOLD = float(os.getenv("MLFLOW_ACCEPT_THRESHOLD", "0.8"))
 MLFLOW_DISCARD_THRESHOLD = float(os.getenv("MLFLOW_DISCARD_THRESHOLD", "0.2"))
 MLFLOW_THRESHOLD_TARGET_MAX = max(1, int(os.getenv("MLFLOW_THRESHOLD_TARGET_MAX", "10")))
 MLFLOW_CLEAR_ALL_CONFIRM_TOKEN = os.getenv("MLFLOW_CLEAR_ALL_CONFIRM_TOKEN", "DELETE_ALL_MLFLOW_DATA")
+ANALYZE_COLLECT_FOR_MLFLOW_DEFAULT = os.getenv("ANALYZE_COLLECT_FOR_MLFLOW_DEFAULT", "true").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
+}
 KAGGLE_WEBHOOK_TIMEOUT_SEC = max(10, int(os.getenv("KAGGLE_WEBHOOK_TIMEOUT_SEC", "180")))
 
 DO_API_BASE = "https://api.digitalocean.com/v2"
@@ -511,6 +517,9 @@ class AnalyzeOptions(BaseModel):
     model_path: Optional[str] = None
     enable_video: bool = False
     selenium_fallback_mode: Literal["auto", "ask"] = "auto"
+    collect_for_mlflow: bool = ANALYZE_COLLECT_FOR_MLFLOW_DEFAULT
+    mlflow_gate_accept_threshold: float = Field(default=MLFLOW_ACCEPT_THRESHOLD, ge=0.0, le=1.0)
+    mlflow_gate_discard_threshold: float = Field(default=MLFLOW_DISCARD_THRESHOLD, ge=0.0, le=1.0)
 
 
 class AnalyzeRequest(BaseModel):
@@ -820,10 +829,16 @@ class MlflowTrainingPreviewReviewItem(BaseModel):
     constructiveness_label: Optional[int] = Field(default=None, ge=0, le=1)
     clear_constructiveness: bool = False
     lock_state: Optional[bool] = None
+    label_source: Optional[str] = Field(default=None, max_length=64)
+    label_confidence: Optional[str] = Field(default=None, max_length=32)
 
 
 class MlflowTrainingPreviewReviewRequest(BaseModel):
     updates: List[MlflowTrainingPreviewReviewItem] = Field(min_length=1)
+
+
+class MlflowTrainingPreviewGeminiReviewRequest(BaseModel):
+    ids: List[int] = Field(min_length=1, max_length=25)
 
 
 class MlflowManualImportArtifactRequest(BaseModel):
@@ -1701,6 +1716,86 @@ def parse_json_array_from_llm(raw: str) -> List[Dict[str, Any]]:
     return extract_items(parsed)
 
 
+def build_mlflow_gemini_review_prompt(rows: List[sqlite3.Row]) -> str:
+    payload = []
+    for row in rows:
+        payload.append(
+            {
+                "id": int(row["id"]),
+                "text": str(row["text"] or "")[:1200],
+                "model_score": row["score"],
+                "current_toxicity_label": normalize_int(row["pseudo_label"]),
+                "constructiveness_score": row["constructiveness_score"],
+                "current_constructiveness_label": normalize_int(row["constructiveness_label"]),
+                "gate_bucket": row["gate_bucket"],
+                "domain_category": row["domain_category"],
+                "url": row["url"],
+            }
+        )
+    return (
+        "Bạn là reviewer dữ liệu tiếng Việt cho bài toán toxic-content detection.\n"
+        "Hãy review từng comment và chỉ trả về JSON hợp lệ, không markdown, không giải thích ngoài JSON.\n"
+        "Schema bắt buộc: một JSON array, mỗi object gồm:\n"
+        "- id: number, đúng id đầu vào\n"
+        "- toxicity_label: 0 hoặc 1, với 1 = toxic, 0 = clean\n"
+        "- constructiveness_label: 0, 1, hoặc null; dùng null nếu không đủ chắc chắn\n"
+        "- confidence: low, medium, hoặc high\n"
+        "- reason: chuỗi ngắn tối đa 160 ký tự bằng tiếng Việt\n"
+        "- action: apply hoặc review_more; dùng review_more nếu mơ hồ/thiếu ngữ cảnh\n"
+        "Ưu tiên chất lượng nhãn training hơn tốc độ. Không tự cân bằng toxic/clean.\n"
+        "Dữ liệu cần review:\n"
+        f"{json.dumps(payload, ensure_ascii=False)}"
+    )
+
+
+def normalize_gemini_review_suggestions(raw: str, expected_ids: set[int]) -> List[Dict[str, Any]]:
+    parsed_items = parse_json_array_from_llm(raw)
+    suggestions: List[Dict[str, Any]] = []
+    seen_ids: set[int] = set()
+    for item in parsed_items:
+        row_id = normalize_int(item.get("id"))
+        if row_id is None or row_id not in expected_ids or row_id in seen_ids:
+            continue
+
+        toxicity = normalize_int(item.get("toxicity_label"))
+        if toxicity not in {0, 1}:
+            toxicity = normalize_int(item.get("pseudo_label"))
+        if toxicity not in {0, 1}:
+            continue
+
+        constructiveness = normalize_int(item.get("constructiveness_label"))
+        if constructiveness not in {0, 1}:
+            constructiveness = None
+
+        confidence = str(item.get("confidence") or "").strip().lower()
+        if confidence not in {"low", "medium", "high"}:
+            confidence = "medium"
+
+        action = str(item.get("action") or "").strip().lower()
+        if action not in {"apply", "review_more"}:
+            action = "apply" if confidence == "high" else "review_more"
+
+        reason = str(item.get("reason") or "").strip()
+        if len(reason) > 180:
+            reason = reason[:177].rstrip() + "..."
+
+        suggestions.append(
+            {
+                "id": row_id,
+                "toxicity_label": int(toxicity),
+                "constructiveness_label": constructiveness,
+                "confidence": confidence,
+                "reason": reason,
+                "action": action,
+            }
+        )
+        seen_ids.add(row_id)
+
+    if not suggestions:
+        raise HTTPException(status_code=502, detail="Gemini response did not contain valid review suggestions")
+    return suggestions
+
+
 def build_synthetic_prompt(
     domain: str,
     style: str,
@@ -1999,6 +2094,7 @@ def init_feedback_db() -> None:
                 verification_status TEXT NOT NULL,
                 segment_hash TEXT,
                 context_segment_hash TEXT,
+                dedupe_key TEXT,
                 html_tag TEXT,
                 seg_threshold_used REAL,
                 label_source TEXT,
@@ -2164,6 +2260,14 @@ def init_feedback_db() -> None:
         ensure_table_column(conn, "mlflow_comment_item", "selected_for_training", "INTEGER NOT NULL DEFAULT 1")
         ensure_table_column(conn, "mlflow_comment_item", "training_review_status", "TEXT NOT NULL DEFAULT 'auto'")
         ensure_table_column(conn, "mlflow_comment_item", "is_locked", "INTEGER NOT NULL DEFAULT 0")
+        ensure_table_column(conn, "mlflow_comment_item", "dedupe_key", "TEXT")
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_mlflow_item_dedupe_key
+            ON mlflow_comment_item(dedupe_key)
+            WHERE dedupe_key IS NOT NULL AND dedupe_key <> ''
+            """
+        )
         ensure_table_column(conn, "mlflow_do_run", "droplet_id", "TEXT")
         ensure_table_column(conn, "mlflow_do_run", "artifact_uri", "TEXT")
         ensure_table_column(conn, "mlflow_do_run", "artifact_checksum", "TEXT")
@@ -3607,6 +3711,288 @@ def infer_constructiveness_label(score: Optional[float], explicit_label: Optiona
     return None, "masked"
 
 
+def chunked(values: List[Any], size: int = 900) -> List[List[Any]]:
+    return [values[idx : idx + size] for idx in range(0, len(values), size)]
+
+
+def normalize_mlflow_html_tag(value: Any) -> str:
+    if isinstance(value, list):
+        value = value[0] if value else ""
+    return str(value or "").strip().lower()
+
+
+def get_mlflow_effective_hash(segment_hash: Optional[str], context_segment_hash: Optional[str]) -> str:
+    return str(context_segment_hash or segment_hash or "").strip()
+
+
+def build_mlflow_dedupe_key(
+    text: str,
+    html_tag: str,
+    segment_hash: Optional[str],
+    context_segment_hash: Optional[str],
+) -> str:
+    tag = normalize_mlflow_html_tag(html_tag)
+    effective_hash = get_mlflow_effective_hash(segment_hash, context_segment_hash)
+    if not effective_hash:
+        effective_hash = build_segment_hash(text, tag)
+    return f"comment_only_v3:{effective_hash}:{tag}"
+
+
+def classify_mlflow_gate(
+    score: float,
+    accept_threshold: float,
+    discard_threshold: float,
+) -> Dict[str, Any]:
+    if score >= accept_threshold:
+        return {
+            "gate_bucket": "accepted",
+            "verification_status": "auto_accepted",
+            "pseudo_label": 1,
+            "label_source": "auto_gate",
+            "label_confidence": "high",
+            "selected_for_training": 1,
+            "training_review_status": "auto",
+        }
+    if score <= discard_threshold:
+        return {
+            "gate_bucket": "accepted",
+            "verification_status": "auto_accepted",
+            "pseudo_label": 0,
+            "label_source": "auto_gate",
+            "label_confidence": "high",
+            "selected_for_training": 1,
+            "training_review_status": "auto",
+        }
+    return {
+        "gate_bucket": "candidate",
+        "verification_status": "unverified",
+        "pseudo_label": 1 if score >= 0.5 else 0,
+        "label_source": "auto_gate",
+        "label_confidence": "medium",
+        "selected_for_training": 0,
+        "training_review_status": "pending",
+    }
+
+
+def build_mlflow_comment_rows(
+    response_results: List[Dict[str, Any]],
+    batch_id: str,
+    job_id: str,
+    accept_threshold: float,
+    discard_threshold: float,
+    created_at: str,
+) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    for result in response_results:
+        if result.get("status") != "ok":
+            continue
+        url = str(result.get("url") or "")
+        url_hash = str(result.get("url_hash") or hash_url(url))
+        for seg in (result.get("toxicity") or {}).get("by_segment") or []:
+            score = normalize_score(seg.get("score"))
+            text = str(seg.get("text") or seg.get("text_preview") or "").strip()
+            if score is None or not text:
+                continue
+
+            seg_threshold_used = normalize_score(seg.get("seg_threshold_used"))
+            constructiveness_score = normalize_score(seg.get("constructiveness_score"))
+            constructiveness_label_raw = normalize_int(seg.get("constructiveness_label"))
+            constructiveness_label, constructiveness_confidence = infer_constructiveness_label(
+                constructiveness_score,
+                constructiveness_label_raw,
+            )
+            segment_hash = str(seg.get("segment_hash") or "").strip() or None
+            context_segment_hash = str(seg.get("context_segment_hash") or "").strip() or None
+            html_tag = normalize_mlflow_html_tag(seg.get("html_tags"))
+            gate = classify_mlflow_gate(score, accept_threshold, discard_threshold)
+
+            rows.append(
+                {
+                    "batch_id": batch_id,
+                    "job_id": job_id,
+                    "url": url,
+                    "url_hash": url_hash,
+                    "segment_id": seg.get("segment_id"),
+                    "domain_category": seg.get("domain_category") or result.get("domain_category"),
+                    "text": text,
+                    "score": score,
+                    "pseudo_label": gate["pseudo_label"],
+                    "constructiveness_score": constructiveness_score,
+                    "constructiveness_label": constructiveness_label,
+                    "constructiveness_confidence": constructiveness_confidence,
+                    "selected_for_training": gate["selected_for_training"],
+                    "training_review_status": gate["training_review_status"],
+                    "gate_bucket": gate["gate_bucket"],
+                    "verification_status": gate["verification_status"],
+                    "segment_hash": segment_hash,
+                    "context_segment_hash": context_segment_hash,
+                    "_effective_hash": get_mlflow_effective_hash(segment_hash, context_segment_hash),
+                    "dedupe_key": build_mlflow_dedupe_key(text, html_tag, segment_hash, context_segment_hash),
+                    "html_tag": html_tag,
+                    "seg_threshold_used": seg_threshold_used,
+                    "label_source": gate["label_source"],
+                    "label_confidence": gate["label_confidence"],
+                    "created_at": created_at,
+                }
+            )
+    return rows
+
+
+def load_existing_mlflow_url_hashes(conn: sqlite3.Connection, url_hashes: List[str]) -> set[str]:
+    existing: set[str] = set()
+    for group in chunked([value for value in sorted(set(url_hashes)) if value]):
+        placeholders = ", ".join("?" for _ in group)
+        rows = conn.execute(
+            f"SELECT DISTINCT url_hash FROM mlflow_comment_item WHERE url_hash IN ({placeholders})",
+            tuple(group),
+        ).fetchall()
+        existing.update(str(row[0]) for row in rows if row[0])
+    return existing
+
+
+def load_existing_mlflow_dedupe_keys(conn: sqlite3.Connection, dedupe_keys: List[str]) -> set[str]:
+    existing: set[str] = set()
+    for group in chunked([value for value in sorted(set(dedupe_keys)) if value]):
+        placeholders = ", ".join("?" for _ in group)
+        rows = conn.execute(
+            f"SELECT dedupe_key FROM mlflow_comment_item WHERE dedupe_key IN ({placeholders})",
+            tuple(group),
+        ).fetchall()
+        existing.update(str(row[0]) for row in rows if row[0])
+    return existing
+
+
+def load_existing_mlflow_hash_tag_keys(conn: sqlite3.Connection, rows: List[Dict[str, Any]]) -> set[str]:
+    hashes = sorted({str(row.get("_effective_hash") or "") for row in rows if row.get("_effective_hash")})
+    if not hashes:
+        return set()
+
+    existing: set[str] = set()
+    for group in chunked(hashes):
+        placeholders = ", ".join("?" for _ in group)
+        db_rows = conn.execute(
+            f"""
+            SELECT COALESCE(NULLIF(context_segment_hash, ''), NULLIF(segment_hash, '')) AS effective_hash,
+                   COALESCE(html_tag, '') AS html_tag
+            FROM mlflow_comment_item
+            WHERE COALESCE(NULLIF(context_segment_hash, ''), NULLIF(segment_hash, '')) IN ({placeholders})
+            """,
+            tuple(group),
+        ).fetchall()
+        for effective_hash, html_tag in db_rows:
+            if effective_hash:
+                existing.add(f"comment_only_v3:{str(effective_hash).strip()}:{normalize_mlflow_html_tag(html_tag)}")
+    return existing
+
+
+def insert_mlflow_comment_rows(
+    *,
+    batch_id: str,
+    model_id: str,
+    source_job_id: str,
+    rows: List[Dict[str, Any]],
+    options_json: str,
+    created_at: str,
+    batch_created: bool = False,
+) -> Dict[str, Any]:
+    init_feedback_db()
+    stats: Dict[str, Any] = {
+        "enabled": True,
+        "batch_id": batch_id if batch_created else None,
+        "candidate_rows": len(rows),
+        "inserted": 0,
+        "skipped_existing_url": 0,
+        "skipped_duplicate_item": 0,
+        "counts": {"accepted": 0, "candidate": 0, "discarded": 0, "total": 0},
+    }
+
+    with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+        existing_url_hashes = load_existing_mlflow_url_hashes(
+            conn,
+            [str(row.get("url_hash") or "") for row in rows],
+        )
+
+        url_filtered: List[Dict[str, Any]] = []
+        for row in rows:
+            if str(row.get("url_hash") or "") in existing_url_hashes:
+                stats["skipped_existing_url"] += 1
+                continue
+            url_filtered.append(row)
+
+        existing_dedupe_keys = load_existing_mlflow_dedupe_keys(
+            conn,
+            [str(row.get("dedupe_key") or "") for row in url_filtered],
+        )
+        existing_hash_tag_keys = load_existing_mlflow_hash_tag_keys(conn, url_filtered)
+        seen_dedupe_keys: set[str] = set()
+        insert_rows: List[Dict[str, Any]] = []
+        for row in url_filtered:
+            dedupe_key = str(row.get("dedupe_key") or "")
+            if dedupe_key and (
+                dedupe_key in existing_dedupe_keys
+                or dedupe_key in existing_hash_tag_keys
+                or dedupe_key in seen_dedupe_keys
+            ):
+                stats["skipped_duplicate_item"] += 1
+                continue
+            if dedupe_key:
+                seen_dedupe_keys.add(dedupe_key)
+            insert_rows.append(row)
+
+        if insert_rows and not batch_created:
+            conn.execute(
+                """
+                INSERT INTO mlflow_crawl_batch (batch_id, model_id, status, source_job_id, created_at, options_json)
+                VALUES (?, ?, 'running', ?, ?, ?)
+                """,
+                (batch_id, model_id, source_job_id, created_at, options_json),
+            )
+            stats["batch_id"] = batch_id
+            batch_created = True
+
+        if insert_rows:
+            conn.executemany(
+                """
+                INSERT OR IGNORE INTO mlflow_comment_item (
+                    batch_id, job_id, url, url_hash, segment_id, domain_category, text, score, pseudo_label,
+                    constructiveness_score, constructiveness_label, constructiveness_confidence,
+                    selected_for_training, training_review_status,
+                    gate_bucket, verification_status, segment_hash, context_segment_hash, dedupe_key,
+                    html_tag, seg_threshold_used, label_source, label_confidence, created_at
+                ) VALUES (
+                    :batch_id, :job_id, :url, :url_hash, :segment_id, :domain_category, :text, :score, :pseudo_label,
+                    :constructiveness_score, :constructiveness_label, :constructiveness_confidence,
+                    :selected_for_training, :training_review_status,
+                    :gate_bucket, :verification_status, :segment_hash, :context_segment_hash, :dedupe_key,
+                    :html_tag, :seg_threshold_used, :label_source, :label_confidence, :created_at
+                )
+                """,
+                insert_rows,
+            )
+
+        if batch_created:
+            conn.execute(
+                """
+                UPDATE mlflow_crawl_batch
+                SET status = 'completed', completed_at = ?
+                WHERE batch_id = ?
+                """,
+                (datetime.utcnow().isoformat() + "Z", batch_id),
+            )
+            stats["inserted"] = int(
+                conn.execute(
+                    "SELECT COUNT(1) FROM mlflow_comment_item WHERE batch_id = ?",
+                    (batch_id,),
+                ).fetchone()[0]
+                or 0
+            )
+            stats["counts"] = build_mlflow_gate_counts(conn, batch_id)
+
+        conn.commit()
+
+    return stats
+
+
 def balance_training_rows(rows: List[sqlite3.Row], strategy: str) -> Tuple[List[sqlite3.Row], Dict[str, Any]]:
     toxic_rows = [row for row in rows if normalize_int(row["pseudo_label"]) == 1]
     clean_rows = [row for row in rows if normalize_int(row["pseudo_label"]) == 0]
@@ -4376,6 +4762,7 @@ def mlflow_ingest(request: MlflowIngestRequest) -> Dict[str, Any]:
                     now,
                     json.dumps(
                         {
+                            "source": "admin_ingest",
                             "batch_size": options.batch_size,
                             "max_length": options.max_length,
                             "page_threshold": options.page_threshold,
@@ -4475,102 +4862,37 @@ def mlflow_ingest(request: MlflowIngestRequest) -> Dict[str, Any]:
             seg_by_url,
         )
 
-        rows_to_insert: List[Tuple[Any, ...]] = []
         created_at = datetime.utcnow().isoformat() + "Z"
-        for result in response_results:
-            if result.get("status") != "ok":
-                continue
-            url = str(result.get("url") or "")
-            url_hash = str(result.get("url_hash") or hash_url(url))
-            for seg in (result.get("toxicity") or {}).get("by_segment") or []:
-                score = normalize_score(seg.get("score"))
-                if score is None:
-                    continue
-                seg_threshold_used = normalize_score(seg.get("seg_threshold_used"))
-                constructiveness_score = normalize_score(seg.get("constructiveness_score"))
-                constructiveness_label_raw = normalize_int(seg.get("constructiveness_label"))
-                constructiveness_label, constructiveness_confidence = infer_constructiveness_label(
-                    constructiveness_score,
-                    constructiveness_label_raw,
-                )
-
-                if score >= accept_threshold:
-                    gate_bucket = "accepted"
-                    verification_status = "auto_accepted"
-                    pseudo_label = 1
-                    label_source = "auto_gate"
-                    label_confidence = "high"
-                    selected_for_training = 1
-                    training_review_status = "auto"
-                elif score <= discard_threshold:
-                    gate_bucket = "accepted"
-                    verification_status = "auto_accepted"
-                    pseudo_label = 0
-                    label_source = "auto_gate"
-                    label_confidence = "high"
-                    selected_for_training = 1
-                    training_review_status = "auto"
-                else:
-                    gate_bucket = "candidate"
-                    verification_status = "unverified"
-                    pseudo_label = 1 if score >= 0.5 else 0
-                    label_source = "auto_gate"
-                    label_confidence = "medium"
-                    selected_for_training = 0
-                    training_review_status = "pending"
-
-                rows_to_insert.append(
-                    (
-                        batch_id,
-                        source_job_id,
-                        url,
-                        url_hash,
-                        seg.get("segment_id"),
-                        seg.get("domain_category") or result.get("domain_category"),
-                        seg.get("text") or seg.get("text_preview") or "",
-                        score,
-                        pseudo_label,
-                        constructiveness_score,
-                        constructiveness_label,
-                        constructiveness_confidence,
-                        selected_for_training,
-                        training_review_status,
-                        gate_bucket,
-                        verification_status,
-                        seg.get("segment_hash"),
-                        seg.get("context_segment_hash"),
-                        ((seg.get("html_tags") or [None])[0] if isinstance(seg.get("html_tags"), list) else None),
-                        seg_threshold_used,
-                        label_source,
-                        label_confidence,
-                        created_at,
-                    )
-                )
-
-        with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
-            if rows_to_insert:
-                conn.executemany(
-                    """
-                    INSERT INTO mlflow_comment_item (
-                        batch_id, job_id, url, url_hash, segment_id, domain_category, text, score, pseudo_label,
-                        constructiveness_score, constructiveness_label, constructiveness_confidence,
-                        selected_for_training, training_review_status,
-                        gate_bucket, verification_status, segment_hash, context_segment_hash,
-                        html_tag, seg_threshold_used, label_source, label_confidence, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    rows_to_insert,
-                )
-            conn.execute(
-                """
-                UPDATE mlflow_crawl_batch
-                SET status = 'completed', completed_at = ?
-                WHERE batch_id = ?
-                """,
-                (datetime.utcnow().isoformat() + "Z", batch_id),
-            )
-            counts = build_mlflow_gate_counts(conn, batch_id)
-            conn.commit()
+        mlflow_options_json = json.dumps(
+            {
+                "source": "admin_ingest",
+                "batch_size": options.batch_size,
+                "max_length": options.max_length,
+                "page_threshold": options.page_threshold,
+                "seg_threshold": options.seg_threshold,
+                "gate_accept_threshold": accept_threshold,
+                "gate_discard_threshold": discard_threshold,
+                "persist_unused": options.persist_unused,
+            },
+            ensure_ascii=False,
+        )
+        mlflow_collection = insert_mlflow_comment_rows(
+            batch_id=batch_id,
+            model_id=model_id,
+            source_job_id=source_job_id,
+            rows=build_mlflow_comment_rows(
+                response_results,
+                batch_id,
+                source_job_id,
+                accept_threshold,
+                discard_threshold,
+                created_at,
+            ),
+            options_json=mlflow_options_json,
+            created_at=now,
+            batch_created=True,
+        )
+        counts = mlflow_collection["counts"]
 
         return {
             "batch_id": batch_id,
@@ -4582,6 +4904,12 @@ def mlflow_ingest(request: MlflowIngestRequest) -> Dict[str, Any]:
                 "discard": discard_threshold,
             },
             "counts": counts,
+            "dedupe": {
+                "candidate_rows": mlflow_collection["candidate_rows"],
+                "inserted": mlflow_collection["inserted"],
+                "skipped_existing_url": mlflow_collection["skipped_existing_url"],
+                "skipped_duplicate_item": mlflow_collection["skipped_duplicate_item"],
+            },
             "crawl_summary": {
                 "status_counts": crawl_status_counts,
                 "timeout_count": crawl_timeout_count,
@@ -5207,6 +5535,48 @@ def mlflow_training_preview(
     }
 
 
+@app.post("/api/mlflow/training-preview/gemini-review", dependencies=[Depends(require_admin)])
+def mlflow_training_preview_gemini_review(request: MlflowTrainingPreviewGeminiReviewRequest) -> Dict[str, Any]:
+    init_feedback_db()
+    ids = []
+    seen: set[int] = set()
+    for item_id in request.ids:
+        if item_id not in seen:
+            ids.append(item_id)
+            seen.add(item_id)
+    placeholders = ", ".join(["?"] * len(ids))
+
+    with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            f"""
+            SELECT id, batch_id, url, domain_category, text, score, pseudo_label,
+                   constructiveness_score, constructiveness_label, gate_bucket,
+                   selected_for_training, training_review_status, is_locked
+            FROM mlflow_comment_item
+            WHERE id IN ({placeholders})
+              AND gate_bucket IN ('accepted', 'candidate')
+            ORDER BY id ASC
+            """,
+            tuple(ids),
+        ).fetchall()
+
+    if not rows:
+        raise HTTPException(status_code=404, detail="No training preview rows found for provided ids")
+
+    prompt = build_mlflow_gemini_review_prompt(rows)
+    raw = call_gemini(prompt)
+    suggestions = normalize_gemini_review_suggestions(raw, {int(row["id"]) for row in rows})
+    return {
+        "status": "ok",
+        "provider": "gemini",
+        "model": get_setting("GEMINI_MODEL", "gemini-1.5-flash-latest"),
+        "suggestions": suggestions,
+        "requested": len(ids),
+        "reviewed": len(suggestions),
+    }
+
+
 @app.post("/api/mlflow/training-preview/review", dependencies=[Depends(require_admin)])
 def mlflow_training_preview_review(request: MlflowTrainingPreviewReviewRequest) -> Dict[str, Any]:
     init_feedback_db()
@@ -5243,7 +5613,9 @@ def mlflow_training_preview_review(request: MlflowTrainingPreviewReviewRequest) 
                 values.append("manual_approved" if item.selected_for_training else "manual_removed")
             if item.pseudo_label in {0, 1}:
                 fields.extend(["pseudo_label = ?", "gate_bucket = ?", "verification_status = ?", "label_source = ?", "label_confidence = ?"])
-                values.extend([int(item.pseudo_label), "accepted", "manual_accepted", "manual_override", "high"])
+                source = (item.label_source or "manual_override").strip() or "manual_override"
+                confidence = (item.label_confidence or "high").strip() or "high"
+                values.extend([int(item.pseudo_label), "accepted", "manual_accepted", source[:64], confidence[:32]])
             if item.clear_constructiveness:
                 fields.extend(["constructiveness_label = ?", "constructiveness_confidence = ?"])
                 values.extend([None, "masked"])
@@ -6068,11 +6440,12 @@ def mlflow_kaggle_status(run_id: str = Query(..., min_length=1)) -> Dict[str, An
             prev_artifact_uri = str(row["artifact_uri"] or "").strip()
             remote = _kaggle_http_json("GET", f"{status_url}?job_id={urllib.parse.quote(cloud_job_id)}")
             remote_status = str(remote.get("status") or "").strip().lower()
+            remote_stage = str(remote.get("current_stage") or remote.get("stage") or "").strip()
             artifact_uri = str(remote.get("artifact_uri") or "").strip() or None
             artifact_checksum = str(remote.get("artifact_checksum") or "").strip() or None
             error_message = str(remote.get("error_message") or "").strip() or None
 
-            stage = KAGGLE_STAGES[2]
+            stage = remote_stage if remote_stage in KAGGLE_STAGES else KAGGLE_STAGES[2]
             if remote_status in {"completed", "succeeded", "success"}:
                 remote_status = "completed"
                 stage = KAGGLE_STAGES[-1]
@@ -6080,7 +6453,7 @@ def mlflow_kaggle_status(run_id: str = Query(..., min_length=1)) -> Dict[str, An
                 remote_status = "failed"
                 stage = KAGGLE_STAGES[-1]
             elif remote_status in {"running", "queued"}:
-                stage = KAGGLE_STAGES[2]
+                stage = remote_stage if remote_stage in KAGGLE_STAGES else KAGGLE_STAGES[2]
             else:
                 remote_status = "running"
 
@@ -6290,6 +6663,11 @@ def analyze(request: AnalyzeRequest) -> Dict[str, Any]:
         urls = normalize_input_urls(request.urls)
         if not urls:
             raise HTTPException(status_code=400, detail="No valid URLs provided.")
+        mlflow_accept_threshold = float(options.mlflow_gate_accept_threshold)
+        mlflow_discard_threshold = float(options.mlflow_gate_discard_threshold)
+        if mlflow_discard_threshold > mlflow_accept_threshold:
+            raise HTTPException(status_code=400, detail="mlflow_gate_discard_threshold must be <= mlflow_gate_accept_threshold")
+
         job_id = uuid.uuid4().hex
         out_dir = BASE_DIR / "data" / "processed" / f"job_{job_id}"
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -6424,6 +6802,47 @@ def analyze(request: AnalyzeRequest) -> Dict[str, Any]:
             seg_by_url,
         )
 
+        mlflow_collection: Dict[str, Any] = {
+            "enabled": bool(options.collect_for_mlflow),
+            "batch_id": None,
+            "candidate_rows": 0,
+            "inserted": 0,
+            "skipped_existing_url": 0,
+            "skipped_duplicate_item": 0,
+            "counts": {"accepted": 0, "candidate": 0, "discarded": 0, "total": 0},
+        }
+        if options.collect_for_mlflow:
+            collection_created_at = datetime.utcnow().isoformat() + "Z"
+            collection_batch_id = f"mlf_auto_{uuid.uuid4().hex[:12]}"
+            mlflow_options_json = json.dumps(
+                {
+                    "source": "user_analyze",
+                    "batch_size": options.batch_size,
+                    "max_length": options.max_length,
+                    "page_threshold": options.page_threshold,
+                    "seg_threshold": options.seg_threshold,
+                    "gate_accept_threshold": mlflow_accept_threshold,
+                    "gate_discard_threshold": mlflow_discard_threshold,
+                },
+                ensure_ascii=False,
+            )
+            mlflow_collection = insert_mlflow_comment_rows(
+                batch_id=collection_batch_id,
+                model_id=model_id,
+                source_job_id=job_id,
+                rows=build_mlflow_comment_rows(
+                    response_results,
+                    collection_batch_id,
+                    job_id,
+                    mlflow_accept_threshold,
+                    mlflow_discard_threshold,
+                    collection_created_at,
+                ),
+                options_json=mlflow_options_json,
+                created_at=collection_created_at,
+                batch_created=False,
+            )
+
         logger.info("Job %s: completed", job_id)
         return {
             "job_id": job_id,
@@ -6434,6 +6853,7 @@ def analyze(request: AnalyzeRequest) -> Dict[str, Any]:
                 "page_threshold": options.page_threshold,
             },
             "thresholds_by_domain": thresholds_by_domain,
+            "mlflow_collection": mlflow_collection,
             "results": response_results,
         }
     except HTTPException:

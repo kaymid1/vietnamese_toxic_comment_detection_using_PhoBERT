@@ -52,14 +52,54 @@ def log(msg):
     print(f"[{time.time()-t0:8.1f}s] {msg}", flush=True)
 
 def show_gpu():
-    if torch.cuda.is_available():
+    if CUDA_USABLE:
         log(f"GPU: {torch.cuda.get_device_name(0)}")
         free, total = torch.cuda.mem_get_info()
         log(f"VRAM free/total: {free/1e9:.2f}GB / {total/1e9:.2f}GB")
+    elif torch.cuda.is_available():
+        log("CUDA device detected but disabled for this run; falling back to CPU.")
     else:
         log("No GPU detected (CPU only).")
 
 os.environ["WANDB_DISABLED"] = "true"
+
+def _env_int(name, default):
+    try:
+        return int(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+def detect_cuda_usable():
+    if os.environ.get("VIETTOXIC_FORCE_CPU", "").strip().lower() in {"1", "true", "yes", "on"}:
+        log("VIETTOXIC_FORCE_CPU is enabled; CUDA disabled.")
+        return False
+    if not torch.cuda.is_available():
+        return False
+
+    min_major = _env_int("VIETTOXIC_MIN_CUDA_CAPABILITY_MAJOR", 7)
+    try:
+        major, minor = torch.cuda.get_device_capability(0)
+        device_name = torch.cuda.get_device_name(0)
+        if major < min_major:
+            log(
+                f"[WARN] GPU {device_name} has CUDA capability {major}.{minor}; "
+                f"minimum required is {min_major}.0 for the current PyTorch wheel. "
+                "Falling back to CPU to avoid cudaErrorNoKernelImageForDevice."
+            )
+            return False
+
+        probe = torch.ones(1, device="cuda")
+        _ = probe + 1
+        torch.cuda.synchronize()
+        return True
+    except Exception as exc:
+        log(f"[WARN] CUDA probe failed ({type(exc).__name__}: {exc}); falling back to CPU.")
+        return False
+
+CUDA_USABLE = detect_cuda_usable()
+if not CUDA_USABLE:
+    os.environ["CUDA_VISIBLE_DEVICES"] = ""
+    os.environ["ACCELERATE_USE_CPU"] = "true"
 
 # ================================================================
 # Config — tune here
@@ -149,7 +189,7 @@ TEMP_MAX_ITERS   = 300
 log("Start. Setting seeds...")
 set_seed(SEED)
 random.seed(SEED); np.random.seed(SEED); torch.manual_seed(SEED)
-if torch.cuda.is_available():
+if CUDA_USABLE:
     torch.cuda.manual_seed_all(SEED)
 show_gpu()
 
@@ -796,7 +836,7 @@ class TemperatureScaler(torch.nn.Module):
         return logits / self.temperature.clamp_min(1e-6)
 
 def fit_temperature_scaler(logits_np, labels_np, lr=0.01, max_iters=300):
-    device  = "cuda" if torch.cuda.is_available() else "cpu"
+    device  = "cuda" if CUDA_USABLE else "cpu"
     logits  = torch.tensor(np.asarray(logits_np)[:, TOXICITY_TASK_INDEX], dtype=torch.float32, device=device)
     labels  = torch.tensor(task_labels(labels_np, TOXICITY_TASK_INDEX), dtype=torch.float32, device=device)
     scaler  = TemperatureScaler().to(device)
@@ -815,10 +855,20 @@ def fit_temperature_scaler(logits_np, labels_np, lr=0.01, max_iters=300):
 # ================================================================
 # Training
 # ================================================================
+def build_training_arguments(**kwargs):
+    if CUDA_USABLE:
+        return TrainingArguments(**kwargs)
+    try:
+        return TrainingArguments(**kwargs, use_cpu=True)
+    except TypeError as exc:
+        if "use_cpu" not in str(exc):
+            raise
+        return TrainingArguments(**kwargs, no_cuda=True)
+
 steps_per_epoch = max(1, len(tokenized_dataset["train"]) // (BATCH_SIZE * GRAD_ACCUM))
 EVAL_STEPS      = max(200, steps_per_epoch // 2)
 
-training_args = TrainingArguments(
+training_args = build_training_arguments(
     output_dir=f"{OUTPUT_BASE}/checkpoints",
     eval_strategy="steps",      eval_steps=EVAL_STEPS,
     save_strategy="steps",      save_steps=EVAL_STEPS,
@@ -832,7 +882,7 @@ training_args = TrainingArguments(
     load_best_model_at_end=True,
     metric_for_best_model=PRIMARY_METRIC, greater_is_better=True,
     logging_steps=50, logging_first_step=True, save_total_limit=2,
-    fp16=torch.cuda.is_available(), seed=SEED, report_to=[],
+    fp16=CUDA_USABLE, seed=SEED, report_to=[],
     remove_unused_columns=False,
 )
 
@@ -1117,7 +1167,11 @@ with open(f"{RESULTS_BASE}/error_analysis.json","w",encoding="utf-8") as f:
 # ================================================================
 results = {
     "dataset_version": run_dataset_tag, "model": MODEL_NAME,
-    "env": {"torch": torch.__version__, "cuda_available": torch.cuda.is_available()},
+    "env": {
+        "torch": torch.__version__,
+        "cuda_available": torch.cuda.is_available(),
+        "cuda_usable": CUDA_USABLE,
+    },
     "config": {
         "MODEL_NAME": MODEL_NAME, "MAX_LENGTH": MAX_LENGTH,
         "BATCH_SIZE": BATCH_SIZE, "GRAD_ACCUM": GRAD_ACCUM,

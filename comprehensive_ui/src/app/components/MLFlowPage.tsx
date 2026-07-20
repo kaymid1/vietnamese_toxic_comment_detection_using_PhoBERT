@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useRef, useState, type ChangeEvent, type MouseEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type ChangeEvent, type ComponentProps, type MouseEvent, type ReactNode } from "react";
 import { AnimatePresence, motion } from "motion/react";
-import { RotateCcw } from "lucide-react";
+import { Check, EyeOff, Lock, MessageCircle, Plus, RotateCcw, Sparkles, ThumbsUp, Unlock, X } from "lucide-react";
 import { toast } from "sonner";
 import { Card } from "@/app/components/ui/card";
 import { Button } from "@/app/components/ui/button";
@@ -9,6 +9,7 @@ import { Badge } from "@/app/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/app/components/ui/tabs";
 import { Progress } from "@/app/components/ui/progress";
 import { Checkbox } from "@/app/components/ui/checkbox";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/app/components/ui/tooltip";
 import {
   Dialog,
   DialogContent,
@@ -17,7 +18,12 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/app/components/ui/dialog";
-import { buildApiUrl, useMlflowStore, type MlflowUnusedScope } from "../../hooks/useMlflowStore";
+import {
+  buildApiUrl,
+  useMlflowStore,
+  type MlflowGeminiReviewSuggestion,
+  type MlflowUnusedScope,
+} from "../../hooks/useMlflowStore";
 
 
 interface MLFlowPageProps {
@@ -30,6 +36,68 @@ interface MLFlowPageProps {
 const MLFLOW_URLS_DRAFT_KEY = "viettoxic:mlflow:urlsText";
 const MLFLOW_MODEL_DRAFT_KEY = "viettoxic:mlflow:selectedModel";
 const MLFLOW_CLEAR_ALL_CONFIRM_TOKEN = "DELETE_ALL_MLFLOW_DATA";
+
+const formatToxicityLabel = (label?: number | null) => {
+  if (label === 1) return "Độc hại";
+  if (label === 0) return "Sạch";
+  return "Chưa có nhãn";
+};
+
+const formatConstructivenessLabel = (label?: number | null) => {
+  if (label === 1) return "Có tính xây dựng";
+  if (label === 0) return "Không rõ/không đóng góp";
+  return "Đang ẩn";
+};
+
+const formatConfidenceLabel = (confidence?: string | null) => {
+  if (confidence === "high") return "Tin cậy cao";
+  if (confidence === "medium") return "Tin cậy vừa";
+  if (confidence === "low") return "Tin cậy thấp";
+  return "Chưa rõ độ tin cậy";
+};
+
+const formatGateBucketLabel = (bucket?: string | null) => {
+  if (bucket === "accepted") return "Đã duyệt";
+  if (bucket === "candidate") return "Cần xem lại";
+  if (bucket === "discarded") return "Đã loại";
+  return bucket || "-";
+};
+
+const formatReviewStatusLabel = (status?: string | null) => {
+  if (status === "auto") return "Tự động";
+  if (status === "manual") return "Admin chỉnh";
+  if (status === "gemini_assist") return "Gemini hỗ trợ";
+  if (status === "removed") return "Đã bỏ khỏi train";
+  return status || "-";
+};
+
+const formatGeminiActionLabel = (action?: string | null) => {
+  if (action === "apply") return "Có thể áp dụng";
+  if (action === "review_more") return "Cần xem thêm";
+  return action || "-";
+};
+
+type IconButtonWithTooltipProps = ComponentProps<typeof Button> & {
+  label: string;
+  tooltip?: string;
+  children: ReactNode;
+};
+
+function IconButtonWithTooltip({ label, tooltip, children, ...buttonProps }: IconButtonWithTooltipProps) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span className="inline-flex">
+          <Button aria-label={label} title={label} {...buttonProps}>
+            {children}
+            <span className="sr-only">{label}</span>
+          </Button>
+        </span>
+      </TooltipTrigger>
+      <TooltipContent>{tooltip || label}</TooltipContent>
+    </Tooltip>
+  );
+}
 
 const safeReadLocalStorageString = (key: string, fallback = "") => {
   try {
@@ -87,6 +155,7 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
     refreshCandidates,
     refreshTrainingPreview,
     reviewTrainingPreview,
+    geminiReviewTrainingPreview,
     refreshReviewHistory,
     refreshCrawlHistory,
     reviewCandidates,
@@ -111,6 +180,9 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
     return safeReadLocalStorageString(MLFLOW_MODEL_DRAFT_KEY, availableModels[0] || "");
   });
   const [selectedCandidateIds, setSelectedCandidateIds] = useState<number[]>([]);
+  const [selectedPreviewIds, setSelectedPreviewIds] = useState<number[]>([]);
+  const [geminiSuggestions, setGeminiSuggestions] = useState<Record<number, MlflowGeminiReviewSuggestion>>({});
+  const [geminiReviewing, setGeminiReviewing] = useState(false);
   const [importModelName, setImportModelName] = useState("");
   const [importModelZipFile, setImportModelZipFile] = useState<File | null>(null);
   const [statusText, setStatusText] = useState<string | null>(null);
@@ -168,6 +240,19 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
     const availableIds = new Set(candidates.map((item) => item.id));
     setSelectedCandidateIds((prev) => prev.filter((id) => availableIds.has(id)));
   }, [candidates]);
+
+  useEffect(() => {
+    const availableIds = new Set((trainingPreview?.items || []).map((item) => item.id));
+    setSelectedPreviewIds((prev) => prev.filter((id) => availableIds.has(id)));
+    setGeminiSuggestions((prev) => {
+      const next: Record<number, MlflowGeminiReviewSuggestion> = {};
+      for (const [key, value] of Object.entries(prev)) {
+        const id = Number(key);
+        if (availableIds.has(id)) next[id] = value;
+      }
+      return next;
+    });
+  }, [trainingPreview?.items]);
 
   const parsedUrls = useMemo(
     () =>
@@ -243,6 +328,18 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
 
   const handleUnselectAllCandidates = () => {
     setSelectedCandidateIds([]);
+  };
+
+  const togglePreviewSelection = (id: number) => {
+    setSelectedPreviewIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  };
+
+  const handleSelectAllPreviewRows = () => {
+    setSelectedPreviewIds((trainingPreview?.items || []).map((item) => item.id));
+  };
+
+  const handleUnselectAllPreviewRows = () => {
+    setSelectedPreviewIds([]);
   };
 
   const handleCandidateRowToggle = (event: MouseEvent<HTMLDivElement>, id: number) => {
@@ -377,6 +474,49 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
       toast.error("Cập nhật constructiveness thất bại.");
     }
   };
+
+  const handleGeminiReviewPreview = async () => {
+    if (selectedPreviewIds.length === 0) {
+      toast.warning("Chọn ít nhất 1 dòng preview để Gemini review.");
+      return;
+    }
+    setGeminiReviewing(true);
+    try {
+      const payload = await geminiReviewTrainingPreview(selectedPreviewIds);
+      const next = Object.fromEntries(payload.suggestions.map((item) => [item.id, item]));
+      setGeminiSuggestions((prev) => ({ ...prev, ...next }));
+      toast.success(`Gemini đã review ${payload.reviewed}/${payload.requested} dòng.`);
+    } catch (error) {
+      const detail = error instanceof Error && error.message ? error.message : "Gemini review thất bại.";
+      toast.error(detail);
+    } finally {
+      setGeminiReviewing(false);
+    }
+  };
+
+  const handleApplyGeminiSuggestion = async (suggestion: MlflowGeminiReviewSuggestion) => {
+    try {
+      await reviewTrainingPreview([
+        {
+          id: suggestion.id,
+          pseudo_label: suggestion.toxicity_label,
+          ...(suggestion.constructiveness_label === 0 || suggestion.constructiveness_label === 1
+            ? { constructiveness_label: suggestion.constructiveness_label }
+            : { clear_constructiveness: true }),
+          label_source: "gemini_assist",
+          label_confidence: suggestion.confidence,
+        },
+      ]);
+      setGeminiSuggestions((prev) => {
+        const next = { ...prev };
+        delete next[suggestion.id];
+        return next;
+      });
+      toast.success("Đã áp dụng gợi ý Gemini.");
+    } catch {
+      toast.error("Áp dụng gợi ý Gemini thất bại.");
+    }
+  };
   const handlePreviewLock = async (id: number, lockState: boolean) => {
     try {
       await reviewTrainingPreview([{ id, lock_state: lockState }]);
@@ -442,10 +582,8 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
         modelKind: selectedModelKind,
         trainingMode: selectedTrainingMode,
         balanceStrategy,
-        includeBaseModel:
-          selectedModelKind === "phobert" &&
-          selectedTrainingMode === "finetune" &&
-          (finetuneBaseModel.trim() || selectedModel).startsWith("phobert/"),
+        bundleProfile: "clean_victsd_gold",
+        includeBaseModel: false,
         baseModel: selectedTrainingMode === "finetune" ? finetuneBaseModel.trim() || selectedModel : selectedModel,
         includeUnused: includeUnusedInExport,
         unusedScope,
@@ -957,76 +1095,193 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
               <div>
                 <h3 className="font-medium">Training preview</h3>
                 <p className="text-xs text-muted-foreground">
-                  Approved pseudo data, balanced toxic/clean, constructiveness masked when confidence is low.
+                  Dữ liệu đã duyệt để train, cân bằng độc hại/sạch; nhãn tính xây dựng sẽ ẩn khi độ tin cậy thấp.
                 </p>
               </div>
-              <Button size="sm" variant="outline" onClick={() => refreshTrainingPreview(trainingPreview?.page || 1, "all_batches")}>
-                Refresh preview
-              </Button>
+              <div className="flex flex-wrap gap-2">
+                <IconButtonWithTooltip
+                  label="Chọn tất cả mẫu đang hiển thị"
+                  size="icon"
+                  variant="outline"
+                  onClick={handleSelectAllPreviewRows}
+                  disabled={!trainingPreview?.items.length}
+                >
+                  <Check className="h-4 w-4" />
+                </IconButtonWithTooltip>
+                <IconButtonWithTooltip
+                  label="Bỏ chọn các mẫu đang chọn"
+                  size="icon"
+                  variant="outline"
+                  onClick={handleUnselectAllPreviewRows}
+                  disabled={selectedPreviewIds.length === 0}
+                >
+                  <X className="h-4 w-4" />
+                </IconButtonWithTooltip>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <span className="inline-flex">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={handleGeminiReviewPreview}
+                        disabled={geminiReviewing || selectedPreviewIds.length === 0}
+                        aria-label="Gửi các mẫu đang chọn cho Gemini review"
+                        title="Gửi các mẫu đang chọn cho Gemini review"
+                      >
+                        <Sparkles className="h-4 w-4" />
+                        {geminiReviewing ? "Đang review..." : "Gemini review"}
+                      </Button>
+                    </span>
+                  </TooltipTrigger>
+                  <TooltipContent>Gửi các mẫu đang chọn cho Gemini review</TooltipContent>
+                </Tooltip>
+                <IconButtonWithTooltip
+                  label="Tải lại preview"
+                  size="icon"
+                  variant="outline"
+                  onClick={() => refreshTrainingPreview(trainingPreview?.page || 1, "all_batches")}
+                >
+                  <RotateCcw className="h-4 w-4" />
+                </IconButtonWithTooltip>
+              </div>
             </div>
             <div className="grid gap-2 md:grid-cols-4">
               <div className="rounded-md border p-3">
-                <p className="text-xs text-muted-foreground">Selected</p>
+                <p className="text-xs text-muted-foreground">Đang chọn</p>
                 <p className="text-xl font-semibold">{trainingPreview?.counts.selected ?? 0}</p>
               </div>
               <div className="rounded-md border p-3">
-                <p className="text-xs text-muted-foreground">Toxic / Clean</p>
+                <p className="text-xs text-muted-foreground">Độc hại / Sạch</p>
                 <p className="text-xl font-semibold">
                   {trainingPreview?.counts.selected_toxic ?? 0} / {trainingPreview?.counts.selected_clean ?? 0}
                 </p>
               </div>
               <div className="rounded-md border p-3">
-                <p className="text-xs text-muted-foreground">Balanced export</p>
+                <p className="text-xs text-muted-foreground">Xuất cân bằng</p>
                 <p className="text-xl font-semibold">{trainingPreview?.balance.balanced_count ?? 0}</p>
               </div>
               <div className="rounded-md border p-3">
-                <p className="text-xs text-muted-foreground">Constructiveness</p>
+                <p className="text-xs text-muted-foreground">Tính xây dựng</p>
                 <p className="text-xl font-semibold">
-                  {trainingPreview?.constructiveness.included ?? 0} / {trainingPreview?.constructiveness.masked ?? 0}
+                  {trainingPreview?.constructiveness.included ?? 0} có nhãn
                 </p>
+                <p className="text-xs text-muted-foreground">{trainingPreview?.constructiveness.masked ?? 0} đang ẩn</p>
               </div>
             </div>
             <div className="space-y-1.5 max-h-80 overflow-auto pr-1">
               <AnimatePresence initial={false}>
-                {(trainingPreview?.items || []).slice(0, 20).map((item, index) => (
-                  <motion.div
-                    key={`preview-${item.id}`}
-                    initial={{ opacity: 0, y: 8 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    exit={{ opacity: 0, y: -8 }}
-                    transition={{ duration: 0.18, delay: Math.min(index * 0.015, 0.12) }}
-                    className="rounded-md border border-border/70 p-2.5"
-                  >
-                    <div className="flex flex-wrap items-start justify-between gap-2">
-                      <p className="min-w-0 flex-1 text-sm leading-relaxed line-clamp-2">{item.text}</p>
-                      <div className="flex flex-wrap gap-1">
-                        <Button
-                          size="sm"
-                          variant={item.selected_for_training ? "default" : "outline"}
-                          disabled={Boolean(item.is_locked) && Boolean(item.selected_for_training)}
-                          onClick={() => handlePreviewSelection(item.id, !item.selected_for_training, Boolean(item.is_locked))}
-                        >
-                          {item.selected_for_training ? "Selected" : "Use"}
-                        </Button>
-                        <Button size="sm" variant="outline" onClick={() => handlePreviewLock(item.id, !Boolean(item.is_locked))}>
-                          {item.is_locked ? "Unlock" : "Lock"}
-                        </Button>
-                        <Button size="sm" variant="outline" onClick={() => handlePreviewConstructiveness(item.id, 1)}>C+</Button>
-                        <Button size="sm" variant="outline" onClick={() => handlePreviewConstructiveness(item.id, 0)}>C-</Button>
-                        <Button size="sm" variant="outline" onClick={() => handlePreviewConstructiveness(item.id, null)}>Mask</Button>
+                {(trainingPreview?.items || []).slice(0, 20).map((item, index) => {
+                  const suggestion = geminiSuggestions[item.id];
+                  return (
+                    <motion.div
+                      key={`preview-${item.id}`}
+                      initial={{ opacity: 0, y: 8 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0, y: -8 }}
+                      transition={{ duration: 0.18, delay: Math.min(index * 0.015, 0.12) }}
+                      className="rounded-md border border-border/70 p-2.5"
+                    >
+                      <div className="flex flex-wrap items-start justify-between gap-2">
+                        <Checkbox
+                          checked={selectedPreviewIds.includes(item.id)}
+                          onCheckedChange={() => togglePreviewSelection(item.id)}
+                          aria-label="Chọn mẫu để thao tác hàng loạt"
+                        />
+                        <div className="min-w-0 flex-1 space-y-2">
+                          <p className="text-sm leading-relaxed line-clamp-2">{item.text}</p>
+                          <div className="flex flex-wrap gap-1 text-xs">
+                            <Badge variant={item.pseudo_label === 1 ? "destructive" : "secondary"}>
+                              {formatToxicityLabel(item.pseudo_label)}
+                            </Badge>
+                            <Badge variant="outline">Điểm độc hại {item.score?.toFixed(3) ?? "-"}</Badge>
+                            <Badge variant="outline">{formatConstructivenessLabel(item.constructiveness_label)}</Badge>
+                            <Badge variant={item.is_locked ? "default" : "outline"}>
+                              {item.is_locked ? "Đã khóa" : "Chưa khóa"}
+                            </Badge>
+                            <Badge variant="outline">Review: {formatReviewStatusLabel(item.training_review_status)}</Badge>
+                          </div>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-1">
+                          <IconButtonWithTooltip
+                            label={item.selected_for_training ? "Đã đưa vào train" : "Thêm vào train"}
+                            size="icon"
+                            variant={item.selected_for_training ? "default" : "outline"}
+                            disabled={Boolean(item.is_locked) && Boolean(item.selected_for_training)}
+                            onClick={() => handlePreviewSelection(item.id, !item.selected_for_training, Boolean(item.is_locked))}
+                          >
+                            {item.selected_for_training ? <Check className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
+                          </IconButtonWithTooltip>
+                          <IconButtonWithTooltip
+                            label={item.is_locked ? "Mở khóa mẫu" : "Khóa mẫu"}
+                            size="icon"
+                            variant="outline"
+                            onClick={() => handlePreviewLock(item.id, !Boolean(item.is_locked))}
+                          >
+                            {item.is_locked ? <Unlock className="h-4 w-4" /> : <Lock className="h-4 w-4" />}
+                          </IconButtonWithTooltip>
+                          <div className="ml-1 flex items-center gap-1 rounded-md border bg-muted/20 p-1" aria-label="Tính xây dựng">
+                            <IconButtonWithTooltip
+                              label="Có tính xây dựng"
+                              size="icon"
+                              variant={item.constructiveness_label === 1 ? "default" : "ghost"}
+                              onClick={() => handlePreviewConstructiveness(item.id, 1)}
+                            >
+                              <ThumbsUp className="h-4 w-4" />
+                            </IconButtonWithTooltip>
+                            <IconButtonWithTooltip
+                              label="Không rõ hoặc không đóng góp"
+                              size="icon"
+                              variant={item.constructiveness_label === 0 ? "default" : "ghost"}
+                              onClick={() => handlePreviewConstructiveness(item.id, 0)}
+                            >
+                              <MessageCircle className="h-4 w-4" />
+                            </IconButtonWithTooltip>
+                            <IconButtonWithTooltip
+                              label="Ẩn nhãn tính xây dựng"
+                              size="icon"
+                              variant={item.constructiveness_label == null ? "default" : "ghost"}
+                              onClick={() => handlePreviewConstructiveness(item.id, null)}
+                            >
+                              <EyeOff className="h-4 w-4" />
+                            </IconButtonWithTooltip>
+                          </div>
+                        </div>
                       </div>
-                    </div>
-                    <div className="mt-1 flex flex-wrap gap-1 text-xs">
-                      <Badge variant="outline">bucket={item.gate_bucket}</Badge>
-                      <Badge variant="outline">tox={item.pseudo_label ?? "-"}</Badge>
-                      <Badge variant="outline">score={item.score?.toFixed(3) ?? "-"}</Badge>
-                      <Badge variant="outline">construct={item.constructiveness_label ?? "masked"}</Badge>
-                      <Badge variant="outline">cscore={item.constructiveness_score?.toFixed(3) ?? "-"}</Badge>
-                      <Badge variant="outline">lock={item.is_locked ? "on" : "off"}</Badge>
-                      <Badge variant="outline">review={item.training_review_status ?? "-"}</Badge>
-                    </div>
-                  </motion.div>
-                ))}
+                      {suggestion && (
+                        <div className="mt-2 rounded-md border border-primary/25 bg-primary/5 p-2 text-xs">
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <Badge variant="outline">Gemini</Badge>
+                            <Badge variant="secondary">Đề xuất: {formatToxicityLabel(suggestion.toxicity_label)}</Badge>
+                            <Badge variant="outline">{formatConstructivenessLabel(suggestion.constructiveness_label)}</Badge>
+                            <Badge variant="outline">{formatConfidenceLabel(suggestion.confidence)}</Badge>
+                            <Badge variant="outline">{formatGeminiActionLabel(suggestion.action)}</Badge>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => void handleApplyGeminiSuggestion(suggestion)}
+                            >
+                              <Sparkles className="h-4 w-4" />
+                              Áp dụng đề xuất
+                            </Button>
+                          </div>
+                          {suggestion.reason && <p className="mt-1 text-muted-foreground">{suggestion.reason}</p>}
+                        </div>
+                      )}
+                      <details className="mt-2 text-xs text-muted-foreground">
+                        <summary className="cursor-pointer select-none">Chi tiết kỹ thuật</summary>
+                        <div className="mt-1 flex flex-wrap gap-1">
+                          <Badge variant="outline">bucket: {formatGateBucketLabel(item.gate_bucket)}</Badge>
+                          <Badge variant="outline">toxicity: {item.pseudo_label ?? "-"}</Badge>
+                          <Badge variant="outline">score: {item.score?.toFixed(3) ?? "-"}</Badge>
+                          <Badge variant="outline">constructiveness: {item.constructiveness_label ?? "masked"}</Badge>
+                          <Badge variant="outline">cscore: {item.constructiveness_score?.toFixed(3) ?? "-"}</Badge>
+                          <Badge variant="outline">lock: {item.is_locked ? "on" : "off"}</Badge>
+                          <Badge variant="outline">review: {item.training_review_status ?? "-"}</Badge>
+                        </div>
+                      </details>
+                    </motion.div>
+                  );
+                })}
               </AnimatePresence>
               {(!trainingPreview || trainingPreview.items.length === 0) && (
                 <p className="rounded-md border border-dashed p-4 text-sm text-muted-foreground">
@@ -1743,4 +1998,3 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
     </div>
   );
 }
-

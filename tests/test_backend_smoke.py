@@ -475,6 +475,115 @@ def test_mlflow_lock_prevents_accidental_remove_in_training_preview(client, qa_e
     assert unlock_and_remove.json()["updated"] >= 1
 
 
+def test_mlflow_gemini_review_requires_admin(client, qa_env):
+    _seed_mlflow_batch(qa_env["feedback_db"], batch_id="batch_gemini_auth")
+    response = client.post("/api/mlflow/training-preview/gemini-review", json={"ids": [1]})
+    assert response.status_code == 401
+
+
+def test_mlflow_gemini_review_missing_api_key(client, qa_env, admin_headers):
+    _seed_mlflow_batch(qa_env["feedback_db"], batch_id="batch_gemini_missing_key")
+    preview = client.get(
+        "/api/mlflow/training-preview",
+        headers=admin_headers,
+        params={"scope": "batch", "batch_id": "batch_gemini_missing_key", "strict_batch": "true"},
+    )
+    target_id = preview.json()["items"][0]["id"]
+
+    response = client.post(
+        "/api/mlflow/training-preview/gemini-review",
+        headers=admin_headers,
+        json={"ids": [target_id]},
+    )
+    assert response.status_code == 400
+    assert "Missing GEMINI_API_KEY" in response.json()["detail"]
+
+
+def test_mlflow_gemini_review_parses_mock_response_and_apply_metadata(client, qa_env, admin_headers, monkeypatch):
+    _seed_mlflow_batch(qa_env["feedback_db"], batch_id="batch_gemini_review")
+    preview = client.get(
+        "/api/mlflow/training-preview",
+        headers=admin_headers,
+        params={"scope": "batch", "batch_id": "batch_gemini_review", "strict_batch": "true"},
+    )
+    assert preview.status_code == 200
+    target_id = preview.json()["items"][0]["id"]
+
+    def fake_call_gemini(prompt: str) -> str:
+        assert "toxicity_label" in prompt
+        return json.dumps(
+            [
+                {
+                    "id": target_id,
+                    "toxicity_label": 0,
+                    "constructiveness_label": None,
+                    "confidence": "high",
+                    "reason": "Khong thay cong kich hoac ngon tu doc hai.",
+                    "action": "apply",
+                }
+            ],
+            ensure_ascii=False,
+        )
+
+    monkeypatch.setattr(qa_env["app_module"], "call_gemini", fake_call_gemini)
+    response = client.post(
+        "/api/mlflow/training-preview/gemini-review",
+        headers=admin_headers,
+        json={"ids": [target_id]},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["provider"] == "gemini"
+    assert payload["reviewed"] == 1
+    suggestion = payload["suggestions"][0]
+    assert suggestion["id"] == target_id
+    assert suggestion["toxicity_label"] == 0
+    assert suggestion["constructiveness_label"] is None
+    assert suggestion["confidence"] == "high"
+
+    apply_response = client.post(
+        "/api/mlflow/training-preview/review",
+        headers=admin_headers,
+        json={
+            "updates": [
+                {
+                    "id": target_id,
+                    "pseudo_label": suggestion["toxicity_label"],
+                    "clear_constructiveness": True,
+                    "label_source": "gemini_assist",
+                    "label_confidence": suggestion["confidence"],
+                }
+            ]
+        },
+    )
+    assert apply_response.status_code == 200
+    with sqlite3.connect(qa_env["feedback_db"]) as conn:
+        row = conn.execute(
+            "SELECT pseudo_label, constructiveness_label, label_source, label_confidence FROM mlflow_comment_item WHERE id = ?",
+            (target_id,),
+        ).fetchone()
+    assert row == (0, None, "gemini_assist", "high")
+
+
+def test_mlflow_gemini_review_malformed_response_returns_502(client, qa_env, admin_headers, monkeypatch):
+    _seed_mlflow_batch(qa_env["feedback_db"], batch_id="batch_gemini_bad")
+    preview = client.get(
+        "/api/mlflow/training-preview",
+        headers=admin_headers,
+        params={"scope": "batch", "batch_id": "batch_gemini_bad", "strict_batch": "true"},
+    )
+    target_id = preview.json()["items"][0]["id"]
+
+    monkeypatch.setattr(qa_env["app_module"], "call_gemini", lambda _prompt: "not json")
+    response = client.post(
+        "/api/mlflow/training-preview/gemini-review",
+        headers=admin_headers,
+        json={"ids": [target_id]},
+    )
+    assert response.status_code == 502
+    assert "valid review suggestions" in response.json()["detail"]
+
+
 def test_mlflow_lock_prevents_drop_in_candidate_review(client, qa_env, admin_headers):
     _seed_mlflow_batch(qa_env["feedback_db"], batch_id="batch_lock_candidates")
     candidates = client.get(
@@ -501,3 +610,96 @@ def test_mlflow_lock_prevents_drop_in_candidate_review(client, qa_env, admin_hea
     )
     assert drop_resp.status_code == 200
     assert drop_resp.json()["skipped_locked"] == 1
+
+
+def test_mlflow_collection_dedupes_existing_url_and_duplicate_segment(qa_env):
+    app_module = qa_env["app_module"]
+    now = datetime.utcnow().isoformat() + "Z"
+
+    def response_result(url: str, url_hash: str, context_hash: str) -> list[dict]:
+        return [
+            {
+                "status": "ok",
+                "url": url,
+                "url_hash": url_hash,
+                "domain_category": "news",
+                "toxicity": {
+                    "by_segment": [
+                        {
+                            "segment_id": f"{url_hash}:0",
+                            "text": "Một bình luận mới cần admin review",
+                            "score": 0.91,
+                            "html_tags": ["comment"],
+                            "segment_hash": "segment_hash_shared",
+                            "context_segment_hash": context_hash,
+                            "seg_threshold_used": 0.4,
+                        }
+                    ]
+                },
+            }
+        ]
+
+    first_rows = app_module.build_mlflow_comment_rows(
+        response_result("https://example.com/a", "hash_a", "ctx_hash_a"),
+        "batch_auto_1",
+        "job_auto_1",
+        0.8,
+        0.2,
+        now,
+    )
+    first = app_module.insert_mlflow_comment_rows(
+        batch_id="batch_auto_1",
+        model_id="phobert/v2",
+        source_job_id="job_auto_1",
+        rows=first_rows,
+        options_json='{"source":"user_analyze"}',
+        created_at=now,
+    )
+    assert first["batch_id"] == "batch_auto_1"
+    assert first["inserted"] == 1
+
+    same_url_rows = app_module.build_mlflow_comment_rows(
+        response_result("https://example.com/a", "hash_a", "ctx_hash_a_new"),
+        "batch_auto_2",
+        "job_auto_2",
+        0.8,
+        0.2,
+        now,
+    )
+    same_url = app_module.insert_mlflow_comment_rows(
+        batch_id="batch_auto_2",
+        model_id="phobert/v2",
+        source_job_id="job_auto_2",
+        rows=same_url_rows,
+        options_json='{"source":"user_analyze"}',
+        created_at=now,
+    )
+    assert same_url["batch_id"] is None
+    assert same_url["inserted"] == 0
+    assert same_url["skipped_existing_url"] == 1
+
+    duplicate_segment_rows = app_module.build_mlflow_comment_rows(
+        response_result("https://example.com/b", "hash_b", "ctx_hash_a"),
+        "batch_auto_3",
+        "job_auto_3",
+        0.8,
+        0.2,
+        now,
+    )
+    duplicate_segment = app_module.insert_mlflow_comment_rows(
+        batch_id="batch_auto_3",
+        model_id="phobert/v2",
+        source_job_id="job_auto_3",
+        rows=duplicate_segment_rows,
+        options_json='{"source":"user_analyze"}',
+        created_at=now,
+    )
+    assert duplicate_segment["batch_id"] is None
+    assert duplicate_segment["inserted"] == 0
+    assert duplicate_segment["skipped_duplicate_item"] == 1
+
+    with sqlite3.connect(qa_env["feedback_db"]) as conn:
+        item_count = conn.execute("SELECT COUNT(1) FROM mlflow_comment_item").fetchone()[0]
+        batch_count = conn.execute("SELECT COUNT(1) FROM mlflow_crawl_batch").fetchone()[0]
+    assert item_count == 1
+    assert batch_count == 1

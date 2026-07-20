@@ -11,7 +11,8 @@ Active runtime path:
 1. User submits URLs in the React UI.
 2. Backend crawls **comment sections only** (via `comment_crawl.py` through `backend/crawl_adapter.py`).
 3. Backend runs local model inference (`infer_crawled_local.py`).
-4. UI shows page-level and segment-level toxicity results.
+4. Backend optionally stores new inferred comment data in the MLflow review DB for admin review/retrain bundles.
+5. UI shows page-level and segment-level toxicity results.
 
 The old article/video crawl lane (`setup_and_crawl.py`) is still in the repo, but it is **not** the active crawl adapter path.
 
@@ -24,6 +25,7 @@ The old article/video crawl lane (`setup_and_crawl.py`) is still in the repo, bu
 - **Inference**: local PhoBERT / TF-IDF-LR (`infer_crawled_local.py`)
 - **Crawler in active path**: `comment_crawl.py`
 - **Feedback / metadata storage**: SQLite (`data/processed/feedback/feedback.db`)
+- **MLflow review candidates**: same SQLite DB, table `mlflow_comment_item`
 
 ---
 
@@ -90,6 +92,13 @@ Main app: `comprehensive_ui/src/app/App.tsx`
 3. `comment_crawl.crawl_urls()` accepts legacy params (`enable_video`, `enable_asr`, `allow_selenium_fallback`, `fallback_decisions`) but currently discards them in comment-only flow.
 
 So old docs describing interactive ask-mode Selenium decisions or active video crawl in `/api/analyze` are outdated for current runtime.
+
+4. `/api/analyze` now defaults to `collect_for_mlflow: true`.
+   - New inferred segments are gated with `mlflow_gate_accept_threshold` / `mlflow_gate_discard_threshold`.
+   - A user scan creates an `mlf_auto_*` MLflow batch only when at least one new row is inserted.
+   - If the URL was already collected in `mlflow_comment_item`, the whole URL is skipped for MLflow collection.
+   - If the segment already exists by `context_segment_hash`/`segment_hash` + `html_tag` (or computed `dedupe_key`), it is skipped.
+   - Public analysis results are still returned normally even when MLflow collection skips all rows.
 
 ---
 
