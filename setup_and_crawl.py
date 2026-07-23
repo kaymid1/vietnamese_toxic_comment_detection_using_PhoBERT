@@ -102,7 +102,8 @@ VNC_RDR_PATH = os.path.join(VNC_BASE_DIR, "models", "wordsegmenter", "wordsegmen
 
 DATA_DIR = os.path.join("data", "raw", "crawled_urls")
 EXP_DIR = "experiments"
-LOG_FILE = os.path.join(EXP_DIR, "crawling_log.md")
+DOCS_ARCHIVE_DIR = os.path.join("docs", "archive")
+LOG_FILE = os.path.join(DOCS_ARCHIVE_DIR, "crawling_log.md")
 
 URL_LIST = [
     "https://nhandan.vn/video-ha-noi-chu-dong-binh-on-thi-truong-phuc-vu-tet-nguyen-dan-post940462.html",
@@ -126,6 +127,7 @@ def in_venv() -> bool:
 def ensure_dirs():
     os.makedirs(DATA_DIR, exist_ok=True)
     os.makedirs(EXP_DIR, exist_ok=True)
+    os.makedirs(DOCS_ARCHIVE_DIR, exist_ok=True)
 
 # =========================
 # Setup: Java, venv, pip deps
