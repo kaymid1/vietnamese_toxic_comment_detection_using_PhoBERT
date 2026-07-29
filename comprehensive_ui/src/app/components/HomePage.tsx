@@ -1,67 +1,53 @@
-﻿import { useEffect, useMemo, useState, type ChangeEvent } from "react";
+﻿import { useMemo, useState, type ChangeEvent } from "react";
 import { Button } from "@/app/components/ui/button";
 import { Textarea } from "@/app/components/ui/textarea";
 import { useI18n } from "@/app/i18n/context";
+import { getModelLabel } from "@/app/modelCatalog";
 
 interface HomePageProps {
   onAnalyze: (urls: string[], modelNames: string[]) => Promise<void>;
   availableModels: string[];
+  modelLabels?: Record<string, string>;
   selectedModels: string[];
   onSelectModels: (modelNames: string[]) => void;
   modelsLoading: boolean;
   modelsError?: string | null;
   errorMessage?: string | null;
   onClearError?: () => void;
-  analysisProgress?: number | null;
+  analysisInFlight?: boolean;
+  analysisDisplayProgress?: number;
 }
 
 export function HomePage({
   onAnalyze,
   availableModels,
+  modelLabels,
   selectedModels,
   onSelectModels,
   modelsLoading,
   modelsError,
   errorMessage,
   onClearError,
-  analysisProgress,
+  analysisInFlight = false,
+  analysisDisplayProgress = 0,
 }: HomePageProps) {
   const { t } = useI18n();
   const [urlInput, setUrlInput] = useState("");
-  const [isProcessing, setIsProcessing] = useState(false);
-  const [uiProgress, setUiProgress] = useState(0);
 
   const isDeprecatedModel = (model: string) => model.toLowerCase().includes("deprecated");
   const primaryModel = selectedModels[0] ?? "";
   const compareModel = selectedModels[1] ?? "";
   const compareEnabled = selectedModels.length > 1;
+  const isProcessing = analysisInFlight;
   const compareCandidates = useMemo(
     () => availableModels.filter((model) => model !== primaryModel && !isDeprecatedModel(model)),
     [availableModels, primaryModel],
   );
-  const targetProgress = Math.max(0, Math.min(100, Math.round(analysisProgress ?? 0)));
   const progressPercent = isProcessing
-    ? Math.max(1, Math.min(100, Math.round(uiProgress)))
-    : Math.max(0, Math.min(100, Math.round(uiProgress)));
+    ? Math.max(1, Math.min(100, Math.round(analysisDisplayProgress)))
+    : Math.max(0, Math.min(100, Math.round(analysisDisplayProgress)));
   const progressCircumference = 2 * Math.PI * 7;
   const progressOffset = progressCircumference * (1 - progressPercent / 100);
-
-  useEffect(() => {
-    if (!isProcessing) {
-      setUiProgress(0);
-      return;
-    }
-
-    const tick = window.setInterval(() => {
-      setUiProgress((prev) => {
-        const synced = targetProgress > 0 ? Math.max(prev, targetProgress) : prev;
-        const step = synced < 70 ? 2.4 : synced < 90 ? 0.9 : synced < 97 ? 0.25 : 0;
-        return Math.min(97, synced + step);
-      });
-    }, 120);
-
-    return () => window.clearInterval(tick);
-  }, [isProcessing, targetProgress]);
 
   const handleAnalyze = async () => {
     if (!urlInput.trim() || selectedModels.length === 0) return;
@@ -74,14 +60,7 @@ export function HomePage({
     if (urls.length === 0) return;
 
     onClearError?.();
-    setUiProgress(1);
-    setIsProcessing(true);
-
-    try {
-      await onAnalyze(urls, selectedModels);
-    } finally {
-      setIsProcessing(false);
-    }
+    await onAnalyze(urls, selectedModels);
   };
 
   const handlePrimaryModelChange = (nextModel: string) => {
@@ -155,7 +134,7 @@ export function HomePage({
                   const deprecated = isDeprecatedModel(model);
                   return (
                     <option key={model} value={model} disabled={deprecated} className={deprecated ? "text-muted-foreground" : undefined}>
-                      {model}
+                      {getModelLabel(model, modelLabels)}
                     </option>
                   );
                 })}
@@ -183,7 +162,7 @@ export function HomePage({
                 >
                   {compareCandidates.map((model) => (
                     <option key={model} value={model}>
-                      {model}
+                      {getModelLabel(model, modelLabels)}
                     </option>
                   ))}
                 </select>

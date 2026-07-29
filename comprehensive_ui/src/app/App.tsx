@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { Navigation } from "@/app/components/Navigation";
 import { HomePage } from "@/app/components/HomePage";
 import { I18nContext, createTranslator } from "@/app/i18n/context";
@@ -14,6 +14,7 @@ import { Toaster } from "@/app/components/ui/sonner";
 import { Button } from "@/app/components/ui/button";
 import { Card } from "@/app/components/ui/card";
 import { Input } from "@/app/components/ui/input";
+import { getModelLabel } from "@/app/modelCatalog";
 
 interface ApiSegment {
   segment_id: string;
@@ -121,6 +122,7 @@ interface AnalyzeCompareResponse {
 interface ModelsResponse {
   models?: string[];
   default?: string | null;
+  labels?: Record<string, string>;
 }
 
 
@@ -263,7 +265,6 @@ const writeAdminSession = (session: AdminSession | null) => {
   window.localStorage.setItem(ADMIN_SESSION_KEY, JSON.stringify(session));
 };
 
-const normalizeModelId = (value: string) => value.toLowerCase().replace(/[^a-z0-9]/g, "");
 const isDeprecatedModel = (model: string) => model.toLowerCase().includes("deprecated");
 
 const sortModelsForSelection = (models: string[]) =>
@@ -275,18 +276,6 @@ const sortModelsForSelection = (models: string[]) =>
     }
     return a.localeCompare(b);
   });
-
-const pickPreferredModel = (models: string[]): string | null => {
-  if (models.length === 0) return null;
-  const target = normalizeModelId("phobert_lora_v2");
-  const exact = models.find((model) => normalizeModelId(model) === target);
-  if (exact) return exact;
-  const partial = models.find((model) => normalizeModelId(model).includes(target));
-  if (partial) return partial;
-  const loraFallback = models.find((model) => normalizeModelId(model).includes(normalizeModelId("phobert_lora")));
-  if (loraFallback) return loraFallback;
-  return null;
-};
 
 const parseJsonResponse = async <T,>(response: Response): Promise<T> => {
   const contentType = response.headers.get("content-type") || "";
@@ -549,12 +538,16 @@ export default function App() {
   const [thresholds, setThresholds] = useState<AnalyzeResponse["thresholds"] | null>(null);
   const [thresholdsByDomain, setThresholdsByDomain] = useState<DomainThresholds | null>(null);
   const [availableModels, setAvailableModels] = useState<string[]>([]);
+  const [modelLabels, setModelLabels] = useState<Record<string, string>>({});
   const [selectedModels, setSelectedModels] = useState<string[]>([]);
   const [compareModels, setCompareModels] = useState<Record<string, CompareModelResponse> | null>(null);
   const [activeResultModel, setActiveResultModel] = useState<string | null>(null);
   const [modelsLoading, setModelsLoading] = useState(true);
   const [modelsError, setModelsError] = useState<string | null>(null);
   const [analysisProgress, setAnalysisProgress] = useState<number | null>(null);
+  const [analysisInFlight, setAnalysisInFlight] = useState(false);
+  const [analysisDisplayProgress, setAnalysisDisplayProgress] = useState(0);
+  const analysisInFlightRef = useRef(false);
   const [scanMoreLoadingByUrl, setScanMoreLoadingByUrl] = useState<Record<string, boolean>>({});
   const [theme, setTheme] = useState<"light" | "dark">(getInitialTheme);
   const [language, setLanguage] = useState<Language>("vi");
@@ -630,15 +623,14 @@ export default function App() {
       const sortedModels = sortModelsForSelection(models);
       const nonDeprecatedModels = sortedModels.filter((model) => !isDeprecatedModel(model));
       const apiDefault = data.default && sortedModels.includes(data.default) ? data.default : null;
-      const preferred = pickPreferredModel(nonDeprecatedModels);
       const resolvedDefault =
-        preferred ||
         (apiDefault && !isDeprecatedModel(apiDefault) ? apiDefault : null) ||
         nonDeprecatedModels[0] ||
         sortedModels[0] ||
         null;
 
       setAvailableModels(sortedModels);
+      setModelLabels(data.labels && typeof data.labels === "object" ? data.labels : {});
       const stored = window.localStorage.getItem("viettoxic:models");
       const legacyStored = window.localStorage.getItem("viettoxic:model");
       let parsedStored: unknown = null;
@@ -665,6 +657,7 @@ export default function App() {
       const message = error instanceof Error ? error.message : t("app.cannotLoadModels");
       setModelsError(message);
       setAvailableModels([]);
+      setModelLabels({});
       setSelectedModels([]);
     } finally {
       setModelsLoading(false);
@@ -674,6 +667,24 @@ export default function App() {
   useEffect(() => {
     void loadModels();
   }, [loadModels]);
+
+  useEffect(() => {
+    if (!analysisInFlight) {
+      setAnalysisDisplayProgress(0);
+      return;
+    }
+
+    const targetProgress = Math.max(0, Math.min(100, Math.round(analysisProgress ?? 0)));
+    const tick = window.setInterval(() => {
+      setAnalysisDisplayProgress((prev) => {
+        const synced = targetProgress > 0 ? Math.max(prev, targetProgress) : prev;
+        const step = synced < 70 ? 2.4 : synced < 90 ? 0.9 : synced < 97 ? 0.25 : 0;
+        return Math.min(97, synced + step);
+      });
+    }, 120);
+
+    return () => window.clearInterval(tick);
+  }, [analysisInFlight, analysisProgress]);
 
   const clearAdminSession = useCallback(() => {
     writeAdminSession(null);
@@ -753,12 +764,21 @@ export default function App() {
     modelNames: string[],
     optionOverrides?: Partial<AnalyzeOptions>,
   ) => {
+    if (analysisInFlightRef.current) {
+      setErrorMessage("An analysis is already running. Please wait for it to finish.");
+      setCurrentPage("home");
+      return;
+    }
+
     try {
       const normalizedUrls = normalizeInputUrls(urls);
       if (normalizedUrls.length === 0) {
         throw new Error("No valid URLs provided.");
       }
 
+      analysisInFlightRef.current = true;
+      setAnalysisInFlight(true);
+      setAnalysisDisplayProgress(1);
       setErrorMessage(null);
       setCompareModels(null);
       setActiveResultModel(null);
@@ -848,7 +868,9 @@ export default function App() {
       const message = error instanceof Error ? error.message : t("app.unknownError");
       setErrorMessage(message);
     } finally {
+      analysisInFlightRef.current = false;
       setAnalysisProgress(null);
+      setAnalysisInFlight(false);
     }
   };
 
@@ -1018,6 +1040,7 @@ export default function App() {
               <HomePage
                 onAnalyze={handleAnalyze}
                 availableModels={availableModels}
+                modelLabels={modelLabels}
                 selectedModels={selectedModels}
                 onSelectModels={(modelNames: string[]) => {
                   const sanitized = Array.from(new Set(modelNames))
@@ -1033,7 +1056,8 @@ export default function App() {
                 modelsError={modelsError}
                 errorMessage={errorMessage}
                 onClearError={() => setErrorMessage(null)}
-                analysisProgress={analysisProgress}
+                analysisInFlight={analysisInFlight}
+                analysisDisplayProgress={analysisDisplayProgress}
               />
             )}
 
@@ -1045,6 +1069,7 @@ export default function App() {
                 thresholds={thresholds}
                 thresholdsByDomain={thresholdsByDomain}
                 modelId={analysisModelId}
+                modelLabel={getModelLabel(analysisModelId, modelLabels)}
                 compareModelNames={compareModels ? Object.keys(compareModels) : []}
                 activeResultModel={activeResultModel}
                 onSelectResultModel={handleSelectResultModel}

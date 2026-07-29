@@ -121,6 +121,20 @@ MODEL_TYPES = {
     },
 }
 
+PHOBERT_V2_FINETUNED_STORAGE_NAME = "phobert_lora_4.7"
+PHOBERT_V2_FINETUNED_NAME = "phobert_v2_finetuned"
+PHOBERT_V2_FINETUNED_ID = f"phobert/{PHOBERT_V2_FINETUNED_NAME}"
+PHOBERT_V2_FINETUNED_LEGACY_ID = f"phobert/{PHOBERT_V2_FINETUNED_STORAGE_NAME}"
+PHOBERT_V2_BASE_MODEL = "vinai/phobert-base-v2"
+PHOBERT_V1_BASELINE_NAME = "baseline"
+PHOBERT_V1_BASELINE_ID = f"phobert/{PHOBERT_V1_BASELINE_NAME}"
+MODEL_DISPLAY_NAMES = {
+    "tfidf_lr/baseline_tfidf": "TF-IDF + Logistic Regression",
+    PHOBERT_V1_BASELINE_ID: "PhoBERT v1 Baseline",
+    PHOBERT_V2_FINETUNED_ID: "PhoBERT v2 Fine-tuned",
+    PHOBERT_V2_FINETUNED_LEGACY_ID: "PhoBERT v2 Fine-tuned",
+}
+
 TRAINING_TRACKER_DEFAULT_PHASES: List[Dict[str, Any]] = [
     {
         "id": "phase_0",
@@ -174,7 +188,7 @@ TRAINING_TRACKER_DEFAULT_PHASES: List[Dict[str, Any]] = [
             },
             {
                 "id": "p1_group_14",
-                "title": "1.4 Learning rate LoRA",
+                "title": "1.4 Learning rate (full fine-tuning)",
                 "tasks": [
                     {"id": "p1_14_task_1", "label": "Test LR=2e-5", "param": "LEARNING_RATE=2e-5"},
                     {"id": "p1_14_task_2", "label": "Test LR=5e-5", "param": "LEARNING_RATE=5e-5"},
@@ -232,18 +246,18 @@ TRAINING_TRACKER_DEFAULT_PHASES: List[Dict[str, Any]] = [
     },
     {
         "id": "phase_5",
-        "title": "Giai đoạn 5 — LoRA config",
+        "title": "Giai đoạn 5 — Full fine-tuning config",
         "tasks": [
-            {"id": "p5_task_1", "label": "Test r=8", "param": "LORA_R=8"},
-            {"id": "p5_task_2", "label": "Test r=16", "param": "LORA_R=16"},
-            {"id": "p5_task_3", "label": "Test r=32", "param": "LORA_R=32"},
-            {"id": "p5_task_4", "label": "Test lora_alpha=16", "param": "LORA_ALPHA=16"},
-            {"id": "p5_task_5", "label": "Test lora_alpha=32", "param": "LORA_ALPHA=32"},
-            {"id": "p5_task_6", "label": "Test lora_alpha=64", "param": "LORA_ALPHA=64"},
-            {"id": "p5_task_7", "label": "Test lora_dropout=0.05", "param": "LORA_DROPOUT=0.05"},
-            {"id": "p5_task_8", "label": "Test lora_dropout=0.1", "param": "LORA_DROPOUT=0.1"},
-            {"id": "p5_task_9", "label": "Test target_modules: q,v", "param": "LORA_TARGET_MODULES=q,v"},
-            {"id": "p5_task_10", "label": "Test target_modules: q,k,v", "param": "LORA_TARGET_MODULES=q,k,v"},
+            {"id": "p5_task_1", "label": "Test LR=1e-5", "param": "LEARNING_RATE=1e-5"},
+            {"id": "p5_task_2", "label": "Test LR=2e-5", "param": "LEARNING_RATE=2e-5"},
+            {"id": "p5_task_3", "label": "Test LR=3e-5", "param": "LEARNING_RATE=3e-5"},
+            {"id": "p5_task_4", "label": "Test weight_decay=0.01", "param": "WEIGHT_DECAY=0.01"},
+            {"id": "p5_task_5", "label": "Test weight_decay=0.05", "param": "WEIGHT_DECAY=0.05"},
+            {"id": "p5_task_6", "label": "Test warmup_ratio=0.08", "param": "WARMUP_RATIO=0.08"},
+            {"id": "p5_task_7", "label": "Test head_dropout=0.05", "param": "HEAD_DROPOUT=0.05"},
+            {"id": "p5_task_8", "label": "Test head_dropout=0.1", "param": "HEAD_DROPOUT=0.1"},
+            {"id": "p5_task_9", "label": "Test gradient accumulation=1", "param": "GRAD_ACCUM=1"},
+            {"id": "p5_task_10", "label": "Test gradient accumulation=2", "param": "GRAD_ACCUM=2"},
         ],
     },
 ]
@@ -911,10 +925,15 @@ def list_all_models(model_root: Path) -> List[Dict[str, str]]:
     models: List[Dict[str, str]] = []
     for model_type in list_model_types(model_root):
         for name in list_models_by_type(model_root, model_type):
+            public_name = (
+                PHOBERT_V2_FINETUNED_NAME
+                if model_type == "phobert" and name == PHOBERT_V2_FINETUNED_STORAGE_NAME
+                else name
+            )
             models.append({
-                "id": f"{model_type}/{name}",
+                "id": f"{model_type}/{public_name}",
                 "type": model_type,
-                "name": name,
+                "name": public_name,
             })
     return models
 
@@ -923,31 +942,83 @@ def _is_deprecated_model_name(name: str) -> bool:
     return "deprecated" in name.lower()
 
 
+def _load_model_json(model_dir: Path, filename: str) -> Dict[str, Any]:
+    path = model_dir / filename
+    if not path.is_file():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def get_phobert_base_model(model_dir: Path) -> Optional[str]:
+    manifest = _load_model_json(model_dir, "training_manifest.json")
+    manifest_hyperparams = manifest.get("hyperparams")
+    if isinstance(manifest_hyperparams, dict):
+        base_model = manifest_hyperparams.get("base_model")
+        if isinstance(base_model, str) and base_model.strip():
+            return base_model.strip()
+
+    run_config = _load_model_json(model_dir, "run_config.json")
+    run_hyperparameters = run_config.get("hyperparameters")
+    if isinstance(run_hyperparameters, dict):
+        base_model = run_hyperparameters.get("MODEL_NAME")
+        if isinstance(base_model, str) and base_model.strip():
+            return base_model.strip()
+    return None
+
+
+def _is_compatible_model(model_type: str, model_dir: Path) -> bool:
+    try:
+        validate_model_artifacts(model_type, model_dir)
+    except (FileNotFoundError, OSError, ValueError):
+        return False
+    return True
+
+
 def get_default_model_id(model_root: Path) -> Optional[str]:
     phobert_models = list_models_by_type(model_root, "phobert")
-    non_deprecated_phobert = [m for m in phobert_models if not _is_deprecated_model_name(m)]
+    preferred_dir = model_root / "phobert" / PHOBERT_V2_FINETUNED_STORAGE_NAME
+    if (
+        PHOBERT_V2_FINETUNED_STORAGE_NAME in phobert_models
+        and get_phobert_base_model(preferred_dir) == PHOBERT_V2_BASE_MODEL
+        and _is_compatible_model("phobert", preferred_dir)
+    ):
+        return PHOBERT_V2_FINETUNED_ID
 
-    preferred_phobert = "finetune_phobert_focalgamma_2"
-    if preferred_phobert in non_deprecated_phobert:
-        return f"phobert/{preferred_phobert}"
+    for name in phobert_models:
+        if name in {PHOBERT_V2_FINETUNED_STORAGE_NAME, PHOBERT_V1_BASELINE_NAME}:
+            continue
+        if _is_deprecated_model_name(name):
+            continue
+        if _is_compatible_model("phobert", model_root / "phobert" / name):
+            return f"phobert/{name}"
 
-    if non_deprecated_phobert:
-        if "v2" in non_deprecated_phobert:
-            return "phobert/v2"
-        return f"phobert/{non_deprecated_phobert[0]}"
+    legacy_dir = model_root / "phobert" / PHOBERT_V1_BASELINE_NAME
+    if (
+        PHOBERT_V1_BASELINE_NAME in phobert_models
+        and _is_compatible_model("phobert", legacy_dir)
+    ):
+        return PHOBERT_V1_BASELINE_ID
 
-    if phobert_models:
-        if "v2" in phobert_models:
-            return "phobert/v2"
-        return f"phobert/{phobert_models[0]}"
-
-    all_models = list_all_models(model_root)
-    non_deprecated_all = [m for m in all_models if not _is_deprecated_model_name(str(m.get("name") or ""))]
-    if non_deprecated_all:
-        return str(non_deprecated_all[0].get("id") or "") or None
-    if not all_models:
-        return None
-    return all_models[0]["id"]
+    for model in list_all_models(model_root):
+        model_type = str(model.get("type") or "")
+        name = str(model.get("name") or "")
+        model_id = str(model.get("id") or "")
+        if not model_type or not name or not model_id:
+            continue
+        if model_id == PHOBERT_V2_FINETUNED_ID:
+            continue
+        storage_name = (
+            PHOBERT_V2_FINETUNED_STORAGE_NAME
+            if model_id == PHOBERT_V2_FINETUNED_ID
+            else name
+        )
+        if _is_compatible_model(model_type, model_root / model_type / storage_name):
+            return model_id
+    return None
 
 
 def validate_model_artifacts(model_type: str, model_dir: Path) -> None:
@@ -1058,15 +1129,23 @@ def resolve_model_path(model_root: Path, model_id: Optional[str]) -> Tuple[str, 
     models = list_models_by_type(model_root, model_type)
     if not models:
         raise ValueError(f"No models found under {base_dir}")
-    if name not in models:
+    storage_name = name
+    public_name = name
+    if model_type == "phobert" and name in {
+        PHOBERT_V2_FINETUNED_NAME,
+        PHOBERT_V2_FINETUNED_STORAGE_NAME,
+    }:
+        storage_name = PHOBERT_V2_FINETUNED_STORAGE_NAME
+        public_name = PHOBERT_V2_FINETUNED_NAME
+    if storage_name not in models:
         raise ValueError(f"Model '{model_id}' not found. Available: {models}")
 
-    model_path = base_dir / name
+    model_path = base_dir / storage_name
     if not model_path.is_dir():
         raise ValueError(f"Model '{model_id}' is not a directory under {base_dir}")
 
     validate_model_artifacts(model_type, model_path)
-    return model_type, name, model_path
+    return model_type, public_name, model_path
 
 
 def hash_url(url: str) -> str:
@@ -1976,6 +2055,48 @@ def seed_training_tracker_default(conn: sqlite3.Connection) -> None:
                 )
 
 
+def migrate_training_tracker_lora_terminology(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        UPDATE training_tracker_group
+        SET title = '1.4 Learning rate (full fine-tuning)', updated_at = CURRENT_TIMESTAMP
+        WHERE id = 'p1_group_14' AND lower(title) LIKE '%lora%'
+        """
+    )
+    conn.execute(
+        """
+        UPDATE training_tracker_phase
+        SET title = 'Giai đoạn 5 — Full fine-tuning config', updated_at = CURRENT_TIMESTAMP
+        WHERE id = 'phase_5' AND lower(title) LIKE '%lora%'
+        """
+    )
+    replacements = {
+        "p5_task_1": ("Test LR=1e-5", "LEARNING_RATE=1e-5"),
+        "p5_task_2": ("Test LR=2e-5", "LEARNING_RATE=2e-5"),
+        "p5_task_3": ("Test LR=3e-5", "LEARNING_RATE=3e-5"),
+        "p5_task_4": ("Test weight_decay=0.01", "WEIGHT_DECAY=0.01"),
+        "p5_task_5": ("Test weight_decay=0.05", "WEIGHT_DECAY=0.05"),
+        "p5_task_6": ("Test warmup_ratio=0.08", "WARMUP_RATIO=0.08"),
+        "p5_task_7": ("Test head_dropout=0.05", "HEAD_DROPOUT=0.05"),
+        "p5_task_8": ("Test head_dropout=0.1", "HEAD_DROPOUT=0.1"),
+        "p5_task_9": ("Test gradient accumulation=1", "GRAD_ACCUM=1"),
+        "p5_task_10": ("Test gradient accumulation=2", "GRAD_ACCUM=2"),
+    }
+    for task_id, (label, param) in replacements.items():
+        conn.execute(
+            """
+            UPDATE training_tracker_task
+            SET label = ?, param = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND (
+                upper(COALESCE(param, '')) LIKE 'LORA_%'
+                OR lower(label) LIKE '%lora%'
+                OR lower(label) LIKE 'test r=%'
+            )
+            """,
+            (label, param, task_id),
+        )
+
+
 def init_feedback_db() -> None:
     FEEDBACK_DIR.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
@@ -2284,6 +2405,7 @@ def init_feedback_db() -> None:
             """
         )
 
+        migrate_training_tracker_lora_terminology(conn)
         seed_training_tracker_default(conn)
         conn.commit()
 
@@ -6868,9 +6990,14 @@ def get_models() -> Dict[str, Any]:
     try:
         model_root = resolve_model_root()
         models = list_all_models(model_root)
+        model_ids = [m["id"] for m in models]
         return {
-            "models": [m["id"] for m in models],
+            "models": model_ids,
             "default": get_default_model_id(model_root),
+            "labels": {
+                model_id: MODEL_DISPLAY_NAMES.get(model_id, model_id)
+                for model_id in model_ids
+            },
         }
     except (PermissionError, OSError, NotADirectoryError) as exc:
         raise HTTPException(status_code=500, detail=f"Failed to list models: {exc}") from exc

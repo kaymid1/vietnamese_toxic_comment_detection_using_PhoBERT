@@ -7,6 +7,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { AlertTriangle, CheckCircle, CircleHelp, Download, ExternalLink, RotateCcw } from "lucide-react";
 import { PieChart, Pie, Cell, ResponsiveContainer, Legend, Tooltip as RechartTooltip } from "recharts";
 import { useI18n } from "@/app/i18n/context";
+import { getModelLabel } from "@/app/modelCatalog";
 
 interface SegmentData {
   segment_id: string;
@@ -94,6 +95,7 @@ interface ResultsPageProps {
   } | null;
   thresholdsByDomain?: DomainThresholds | null;
   modelId?: string | null;
+  modelLabel?: string | null;
   compareModelNames?: string[];
   activeResultModel?: string | null;
   onSelectResultModel?: (modelName: string) => void;
@@ -146,6 +148,7 @@ export function ResultsPage({
   thresholds,
   thresholdsByDomain,
   modelId,
+  modelLabel,
   compareModelNames,
   activeResultModel,
   onSelectResultModel,
@@ -192,7 +195,7 @@ export function ResultsPage({
           {jobId && <p className="text-sm text-muted-foreground mt-2">{t("results.jobId", { id: jobId })}</p>}
           {modelId && (
             <p className="text-sm text-muted-foreground">
-              {t("results.viewingModel")} <span className="font-medium text-foreground">{modelId}</span>
+              {t("results.viewingModel")} <span className="font-medium text-foreground">{modelLabel || modelId}</span>
             </p>
           )}
           {errorMessage && (
@@ -210,7 +213,7 @@ export function ResultsPage({
               >
                 {compareModelNames.map((model) => (
                   <option key={model} value={model}>
-                    {model}
+                    {getModelLabel(model)}
                   </option>
                 ))}
               </select>
@@ -639,7 +642,7 @@ export function ResultsPage({
                       <div className="min-w-0">
                         <p className="truncate text-sm font-medium text-foreground">{item.result.url}</p>
                         <p className="text-xs text-muted-foreground">
-                          {item.modelId || t("results.unknownModel")} • {new Date(item.savedAt).toLocaleString(dateLocale)}
+                          {getModelLabel(item.modelId) || t("results.unknownModel")} • {new Date(item.savedAt).toLocaleString(dateLocale)}
                         </p>
                       </div>
                       <span

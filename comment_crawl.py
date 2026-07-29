@@ -16,6 +16,7 @@ Usage (as library):
 from __future__ import annotations
 
 import hashlib
+import html as html_lib
 import json
 import logging
 import os
@@ -26,7 +27,8 @@ import subprocess
 import time
 import unicodedata
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
+from urllib.request import Request, urlopen
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +51,7 @@ BATCH_INTER_URL_DELAY_MAX = max(
     float(os.getenv("COMMENT_CRAWL_INTER_URL_DELAY_MAX", "6.0")),
 )
 COMMENT_CRAWL_SCHEMA_VERSION = "comment_only_v3"
+_VNEXPRESS_COMMENT_API = "https://usi-saas.vnexpress.net/index/get"
 
 
 def _proxy_pool() -> list[str]:
@@ -185,6 +188,87 @@ def _looks_like_article_blob(text: str) -> bool:
     if sentence_like >= 6 and len(txt) >= 420:
         return True
     return False
+
+
+def _strip_html_to_text(value: Any) -> str:
+    text = html_lib.unescape(str(value or ""))
+    text = re.sub(r"(?i)<br\s*/?>", "\n", text)
+    text = re.sub(r"(?s)<[^>]+>", " ", text)
+    return _normalize_text(html_lib.unescape(text))
+
+
+def _http_get_text(url: str, *, referer: str | None = None, timeout: int = 15) -> str:
+    headers = {
+        "User-Agent": _pick_user_agent(),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,application/json;q=0.8,*/*;q=0.7",
+        "Accept-Language": "vi,en-US;q=0.9,en;q=0.8",
+    }
+    if referer:
+        headers["Referer"] = referer
+    req = Request(url, headers=headers)
+    with urlopen(req, timeout=timeout) as response:
+        charset = response.headers.get_content_charset() or "utf-8"
+        return response.read().decode(charset, errors="replace")
+
+
+def _extract_meta_content(page_html: str, name: str) -> str | None:
+    patterns = [
+        rf"<meta[^>]+name=[\"']{re.escape(name)}[\"'][^>]+content=[\"']([^\"']+)[\"']",
+        rf"<meta[^>]+content=[\"']([^\"']+)[\"'][^>]+name=[\"']{re.escape(name)}[\"']",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, page_html, flags=re.IGNORECASE)
+        if match:
+            return html_lib.unescape(match.group(1)).strip()
+    return None
+
+
+def _extract_js_int(page_html: str, name: str) -> int | None:
+    match = re.search(rf"\b{re.escape(name)}\s*=\s*(\d+)", page_html)
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return None
+
+
+def _to_int(value: Any, default: int) -> int:
+    try:
+        return int(str(value).strip())
+    except Exception:
+        return default
+
+
+def _extract_vnexpress_comment_config(page_html: str, url: str) -> dict[str, Any] | None:
+    component_input_matches = re.findall(
+        r"data-component-input=(['\"])(.*?)\1",
+        page_html,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    for _, raw_value in component_input_matches:
+        try:
+            parsed = json.loads(html_lib.unescape(raw_value))
+        except Exception:
+            continue
+        if isinstance(parsed, dict) and parsed.get("article_id"):
+            return parsed
+
+    article_id = _extract_meta_content(page_html, "tt_article_id")
+    if not article_id:
+        match = re.search(r"-(\d+)\.html(?:$|[?#])", url)
+        article_id = match.group(1) if match else None
+    if not article_id:
+        return None
+
+    return {
+        "article_id": _to_int(article_id, 0),
+        "article_type": 1,
+        "site_id": _to_int(_extract_meta_content(page_html, "tt_site_id") or _extract_js_int(page_html, "site_id"), 1000000),
+        "category_id": _to_int(_extract_meta_content(page_html, "tt_category_id") or _extract_js_int(page_html, "PAGE_FOLDER"), 0),
+        "limit": 24,
+        "tab_active": "most_like",
+    }
 
 
 def _make_segment_hash(text: str, html_tag_effective: str) -> str:
@@ -737,6 +821,16 @@ class NewsSiteCommentCrawler:
         self.last_attempts = 0
         self.last_comment_cap_hit = False
 
+        try:
+            api_comments = self._crawl_vnexpress_comments_via_api(url)
+        except Exception as exc:
+            api_comments = []
+            warning = f"VnExpress API extraction failed, falling back to browser crawl: {exc}"
+            self.last_warnings.append(warning)
+            logger.warning(warning)
+        if api_comments:
+            return self._apply_comment_limit(api_comments, phase="vnexpress api extraction")
+
         attempts = max(1, CRAWL_RETRY_MAX_ATTEMPTS)
         for attempt in range(1, attempts + 1):
             self.last_attempts = attempt
@@ -798,6 +892,101 @@ class NewsSiteCommentCrawler:
                 time.sleep(backoff)
 
         return []
+
+    def _crawl_vnexpress_comments_via_api(self, url: str) -> list[str]:
+        hostname = (urlparse(url).hostname or "").lower()
+        if not (hostname == "vnexpress.net" or hostname.endswith(".vnexpress.net")):
+            return []
+
+        page_html = _http_get_text(url, timeout=min(20, max(8, self.max_runtime_seconds)))
+        config = _extract_vnexpress_comment_config(page_html, url)
+        if not config:
+            return []
+
+        article_id = str(config.get("article_id") or "").strip()
+        site_id = str(config.get("site_id") or "").strip()
+        category_id = str(config.get("category_id") or "").strip()
+        article_type = str(config.get("article_type") or config.get("objecttype") or "1").strip()
+        if not article_id or not site_id or not category_id:
+            return []
+
+        cap = self.max_comments_per_url
+        page_limit = min(200, max(1, cap if cap > 0 else int(config.get("limit") or 100)))
+        offset = 0
+        total_top_level: int | None = None
+        comments: list[str] = []
+        seen: set[str] = set()
+
+        def append_item(item: Any) -> None:
+            if cap > 0 and len(comments) >= cap:
+                return
+            if not isinstance(item, dict):
+                return
+            text = _strip_html_to_text(item.get("content"))
+            if text:
+                self._append_candidate(text, seen, comments, strict_context=False)
+            replies = item.get("replys") or item.get("replies") or {}
+            reply_items = replies.get("items") if isinstance(replies, dict) else []
+            if isinstance(reply_items, list):
+                for reply in reply_items:
+                    append_item(reply)
+                    if cap > 0 and len(comments) >= cap:
+                        return
+
+        while True:
+            params: dict[str, Any] = {
+                "offset": offset,
+                "limit": page_limit,
+                "sort": "like",
+                "objecttype": article_type,
+                "siteid": site_id,
+                "categoryid": category_id,
+                "tab_active": str(config.get("tab_active") or "most_like"),
+                "objectid": article_id,
+            }
+            if config.get("sign"):
+                params["sign"] = str(config["sign"])
+
+            api_url = f"{_VNEXPRESS_COMMENT_API}?{urlencode(params)}"
+            raw = _http_get_text(api_url, referer=url, timeout=min(20, max(8, self.max_runtime_seconds)))
+            payload = json.loads(raw)
+            if int(payload.get("error") or 0) != 0:
+                raise RuntimeError(str(payload.get("errorDescription") or "VnExpress comment API returned an error"))
+
+            data = payload.get("data") if isinstance(payload, dict) else None
+            items = data.get("items") if isinstance(data, dict) else []
+            if not isinstance(items, list) or not items:
+                break
+
+            if total_top_level is None:
+                try:
+                    total_top_level = int(data.get("total") or 0)
+                except Exception:
+                    total_top_level = None
+
+            before_count = len(comments)
+            for item in items:
+                append_item(item)
+                if cap > 0 and len(comments) >= cap:
+                    self.last_comment_cap_hit = True
+                    break
+
+            offset += len(items)
+            if cap > 0 and len(comments) >= cap:
+                break
+            if len(comments) == before_count and len(items) < page_limit:
+                break
+            if total_top_level is not None and offset >= total_top_level:
+                break
+            if len(items) < page_limit:
+                break
+
+        logger.info(
+            "VnExpress API extraction finished with %d comment candidate(s) for article_id=%s",
+            len(comments),
+            article_id,
+        )
+        return comments
 
     def _crawl_comments_once(self, url: str) -> list[str]:
         from selenium.common.exceptions import TimeoutException
@@ -1819,6 +2008,15 @@ def _load_cached_meta_if_fresh(output_dir: str) -> dict[str, Any] | None:
             cached.get("url") or output_dir,
             cache_schema or "<missing>",
             COMMENT_CRAWL_SCHEMA_VERSION,
+        )
+        return None
+
+    if str(cached.get("status") or "") != "ok" or _to_int(cached.get("total_comments"), 0) <= 0:
+        logger.info(
+            "Cache bypass for %s: previous status=%s total_comments=%s",
+            cached.get("url") or output_dir,
+            cached.get("status"),
+            cached.get("total_comments"),
         )
         return None
 

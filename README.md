@@ -185,21 +185,36 @@ Source of truth: `backend/app.py`.
 
 ---
 
-## Model resolution and default model
+## Runtime models, selection, and default
 
 Model root resolution order:
 
 1. `VIETTOXIC_MODEL_OPTIONS_DIR`
 2. fallback: `models/options`
 
-Default model selection in backend (`get_default_model_id`):
+The user-selectable runtime models are:
 
-1. Prefer `phobert/finetune_phobert_focalgamma_2` if present and non-deprecated.
-2. Else prefer `phobert/v2` if present.
-3. Else first non-deprecated PhoBERT model.
-4. Else fallback to first available model.
+- **TF-IDF baseline** — `tfidf_lr/baseline_tfidf`, using TF-IDF features with Logistic Regression.
+- **PhoBERT v1 transformer baseline** — `phobert/baseline`, fully fine-tuned from `vinai/phobert-base`.
+- **PhoBERT v2 fine-tuned model** — `phobert/phobert_v2_finetuned`, displayed as **PhoBERT v2 Fine-tuned**. Its unchanged physical folder is `phobert_lora_4.7` for backward compatibility. The folder's `run_config.json` and `training_manifest.json` both record `vinai/phobert-base-v2` as the base model. The checkpoint contains the full model weights; it is not a LoRA or PEFT adapter.
 
-Deprecated model names (contains `deprecated`) are skipped when possible.
+When the UI first loads with no saved user choice, it uses the default returned by
+`GET /api/models`. An explicit user selection is sent as `options.model_name` and
+always takes precedence over backend fallback behavior. Runtime responses expose the
+selected internal identifier in `model_name`, and the backend also logs it.
+
+Default model selection in the backend and local inference CLI (`get_default_model_id`):
+
+1. Verified `phobert/phobert_v2_finetuned` fine-tuned from `vinai/phobert-base-v2`, when its backing folder is present and compatible.
+2. An available, compatible, non-deprecated PhoBERT checkpoint other than the legacy v1 baseline.
+3. The compatible legacy `phobert/baseline` v1 checkpoint.
+4. The first compatible available model.
+
+Missing or incomplete model folders are skipped during fallback selection. The
+selected PhoBERT checkpoint's local tokenizer is loaded with the model; if local
+tokenizer files are unavailable, inference resolves the recorded base model from
+`training_manifest.json` or `run_config.json`. TF-IDF inference does not load a
+transformer tokenizer.
 
 ---
 
@@ -258,7 +273,7 @@ Notes:
 - `constructiveness` is preserved from raw ViCTSD for constructiveness analysis extension.
 - Preprocess keeps Vietnamese text features: trim, NFC normalization, whitespace normalization, no forced lowercase, punctuation preserved.
 - Current preprocess defaults to `--cross-split-dedup strong` (priority order: `train` -> `validation` -> `test`) to remove cross-split overlap.
-- PhoBERT LoRA macro-F1 scripts now train as multi-label binary tasks with two logits: `toxicity` and `constructiveness`. Toxicity remains the primary detection/deployment task and constructiveness is logged as an auxiliary task metric.
+- PhoBERT full fine-tuning macro-F1 scripts train multi-label binary tasks with two logits: `toxicity` and `constructiveness`. Toxicity remains the primary detection/deployment task and constructiveness is logged as an auxiliary task metric. Some script filenames retain `lora` as a legacy internal name, but the active implementation performs full fine-tuning and contains no LoRA/PEFT path.
 
 Run preprocessing:
 

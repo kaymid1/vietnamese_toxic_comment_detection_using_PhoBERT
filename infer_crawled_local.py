@@ -9,7 +9,7 @@ Domain-aware thresholding: seg_threshold is adjusted per URL category
 
 Example:
   python infer_crawled_local.py \
-    --model_name phobert/v2 \
+    --model_name phobert/phobert_v2_finetuned \
     --model_base_dir models/options \
     --data_dir data/raw/crawled_urls \
     --out_dir data/processed \
@@ -23,7 +23,7 @@ Threshold overrides per category (optional):
 
 Notes:
 - Local only: model loaded from local checkpoint
-- Tokenizer from HF ("vinai/phobert-base") unless you pass --tokenizer_name
+- Tokenizer is loaded from the selected checkpoint, with its recorded base model as fallback
 - Device auto: CUDA > MPS (Apple Silicon) > CPU
 - domain_classifier.py must be in the same directory as this script
 """
@@ -60,6 +60,14 @@ MODEL_TYPES = {
         "required_any": (),
     },
 }
+
+PHOBERT_V2_FINETUNED_STORAGE_NAME = "phobert_lora_4.7"
+PHOBERT_V2_FINETUNED_NAME = "phobert_v2_finetuned"
+PHOBERT_V2_FINETUNED_ID = f"phobert/{PHOBERT_V2_FINETUNED_NAME}"
+PHOBERT_V2_FINETUNED_LEGACY_ID = f"phobert/{PHOBERT_V2_FINETUNED_STORAGE_NAME}"
+PHOBERT_V2_BASE_MODEL = "vinai/phobert-base-v2"
+PHOBERT_V1_BASELINE_NAME = "baseline"
+PHOBERT_V1_BASELINE_ID = f"phobert/{PHOBERT_V1_BASELINE_NAME}"
 
 
 # ---------------------------------------------------------------------------
@@ -222,24 +230,100 @@ def list_all_models(model_root: Path) -> List[Dict[str, str]]:
     models: List[Dict[str, str]] = []
     for model_type in list_model_types(model_root):
         for name in list_models_by_type(model_root, model_type):
+            public_name = (
+                PHOBERT_V2_FINETUNED_NAME
+                if model_type == "phobert" and name == PHOBERT_V2_FINETUNED_STORAGE_NAME
+                else name
+            )
             models.append({
-                "id": f"{model_type}/{name}",
+                "id": f"{model_type}/{public_name}",
                 "type": model_type,
-                "name": name,
+                "name": public_name,
             })
     return models
 
 
+def _is_deprecated_model_name(name: str) -> bool:
+    return "deprecated" in name.lower()
+
+
+def _load_model_json(model_dir: Path, filename: str) -> Dict[str, Any]:
+    path = model_dir / filename
+    if not path.is_file():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def get_phobert_base_model(model_dir: Path) -> Optional[str]:
+    manifest = _load_model_json(model_dir, "training_manifest.json")
+    manifest_hyperparams = manifest.get("hyperparams")
+    if isinstance(manifest_hyperparams, dict):
+        base_model = manifest_hyperparams.get("base_model")
+        if isinstance(base_model, str) and base_model.strip():
+            return base_model.strip()
+
+    run_config = _load_model_json(model_dir, "run_config.json")
+    run_hyperparameters = run_config.get("hyperparameters")
+    if isinstance(run_hyperparameters, dict):
+        base_model = run_hyperparameters.get("MODEL_NAME")
+        if isinstance(base_model, str) and base_model.strip():
+            return base_model.strip()
+    return None
+
+
+def _is_compatible_model(model_type: str, model_dir: Path) -> bool:
+    try:
+        validate_model_artifacts(model_type, model_dir)
+    except (FileNotFoundError, OSError, ValueError):
+        return False
+    return True
+
+
 def get_default_model_id(model_root: Path) -> Optional[str]:
     phobert_models = list_models_by_type(model_root, "phobert")
-    if phobert_models:
-        if "v2" in phobert_models:
-            return "phobert/v2"
-        return f"phobert/{phobert_models[0]}"
-    all_models = list_all_models(model_root)
-    if not all_models:
-        return None
-    return all_models[0]["id"]
+    preferred_dir = model_root / "phobert" / PHOBERT_V2_FINETUNED_STORAGE_NAME
+    if (
+        PHOBERT_V2_FINETUNED_STORAGE_NAME in phobert_models
+        and get_phobert_base_model(preferred_dir) == PHOBERT_V2_BASE_MODEL
+        and _is_compatible_model("phobert", preferred_dir)
+    ):
+        return PHOBERT_V2_FINETUNED_ID
+
+    for name in phobert_models:
+        if name in {PHOBERT_V2_FINETUNED_STORAGE_NAME, PHOBERT_V1_BASELINE_NAME}:
+            continue
+        if _is_deprecated_model_name(name):
+            continue
+        if _is_compatible_model("phobert", model_root / "phobert" / name):
+            return f"phobert/{name}"
+
+    legacy_dir = model_root / "phobert" / PHOBERT_V1_BASELINE_NAME
+    if (
+        PHOBERT_V1_BASELINE_NAME in phobert_models
+        and _is_compatible_model("phobert", legacy_dir)
+    ):
+        return PHOBERT_V1_BASELINE_ID
+
+    for model in list_all_models(model_root):
+        model_type = str(model.get("type") or "")
+        name = str(model.get("name") or "")
+        model_id = str(model.get("id") or "")
+        if not model_type or not name or not model_id:
+            continue
+        if model_id == PHOBERT_V2_FINETUNED_ID:
+            continue
+        storage_name = (
+            PHOBERT_V2_FINETUNED_STORAGE_NAME
+            if model_id == PHOBERT_V2_FINETUNED_ID
+            else name
+        )
+        if _is_compatible_model(model_type, model_root / model_type / storage_name):
+            return model_id
+    return None
 
 
 def validate_model_artifacts(model_type: str, model_dir: Path) -> None:
@@ -257,6 +341,27 @@ def validate_model_artifacts(model_type: str, model_dir: Path) -> None:
         raise FileNotFoundError(
             f"Checkpoint folder missing: {', '.join(missing)}. Files found: {files}"
         )
+
+
+def resolve_phobert_tokenizer_source(
+    model_dir: Path,
+    tokenizer_name: Optional[str] = None,
+) -> str:
+    if tokenizer_name and tokenizer_name.strip():
+        return tokenizer_name.strip()
+
+    local_tokenizer_files = ("tokenizer_config.json", "vocab.txt", "bpe.codes")
+    if all((model_dir / filename).is_file() for filename in local_tokenizer_files):
+        return str(model_dir)
+
+    base_model = get_phobert_base_model(model_dir)
+    if base_model:
+        return base_model
+
+    raise FileNotFoundError(
+        "Selected PhoBERT checkpoint has no complete local tokenizer and no base model "
+        "recorded in training_manifest.json or run_config.json"
+    )
 
 
 def parse_model_id(model_id: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
@@ -291,15 +396,23 @@ def resolve_model_path(model_root: Path, model_id: Optional[str]) -> Tuple[str, 
     models = list_models_by_type(model_root, model_type)
     if not models:
         raise ValueError(f"No models found under {base_dir}")
-    if name not in models:
+    storage_name = name
+    public_name = name
+    if model_type == "phobert" and name in {
+        PHOBERT_V2_FINETUNED_NAME,
+        PHOBERT_V2_FINETUNED_STORAGE_NAME,
+    }:
+        storage_name = PHOBERT_V2_FINETUNED_STORAGE_NAME
+        public_name = PHOBERT_V2_FINETUNED_NAME
+    if storage_name not in models:
         raise ValueError(f"Model '{model_id}' not found. Available: {models}")
 
-    model_path = base_dir / name
+    model_path = base_dir / storage_name
     if not model_path.is_dir():
         raise ValueError(f"Model '{model_id}' is not a directory under {base_dir}")
 
     validate_model_artifacts(model_type, model_path)
-    return model_type, name, model_path
+    return model_type, public_name, model_path
 
 
 # ---------------------------------------------------------------------------
@@ -388,7 +501,7 @@ def infer_crawled(
     max_length: int = 256,
     page_threshold: float = 0.25,
     seg_threshold: float = 0.5,          # fallback / default threshold
-    tokenizer_name: str = "vinai/phobert-base",
+    tokenizer_name: Optional[str] = None,
     device: str = "auto",
     fp16: bool = False,
     limit_pages: int = 0,
@@ -412,7 +525,11 @@ def infer_crawled(
     # ── Validate model path ──────────────────────────────────────────────
     if model_path:
         resolved_model_path = Path(model_path).expanduser().resolve()
-        selected_model_name = resolved_model_path.name
+        selected_model_name = (
+            PHOBERT_V2_FINETUNED_NAME
+            if resolved_model_path.name == PHOBERT_V2_FINETUNED_STORAGE_NAME
+            else resolved_model_path.name
+        )
         inferred_type = model_type
         if model_type is None:
             parts = resolved_model_path.parts
@@ -477,11 +594,19 @@ def infer_crawled(
     tokenizer = None
     model = None
     vectorizer = None
+    tokenizer_source = None
     if debug_force_prob is None:
         if model_type == "phobert":
+            tokenizer_source = resolve_phobert_tokenizer_source(
+                resolved_model_path,
+                tokenizer_name,
+            )
             if not quiet:
-                print("[INFO] Loading tokenizer:", tokenizer_name)
-            tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+                print("[INFO] Loading tokenizer:", tokenizer_source)
+            tokenizer = AutoTokenizer.from_pretrained(
+                tokenizer_source,
+                local_files_only=Path(tokenizer_source).is_dir(),
+            )
 
             if not quiet:
                 print("[INFO] Loading model from:", str(resolved_model_path))
@@ -527,6 +652,8 @@ def infer_crawled(
         print(f"[WARN] No url folders found in: {data_dir}")
         return {
             "page_results": [], "segment_results": [],
+            "model_id": f"{model_type}/{selected_model_name}",
+            "tokenizer_source": tokenizer_source,
             "out_dir": str(out_dir),
             "page_out_path": str(page_out_path),
             "seg_out_path":  str(seg_out_path),
@@ -748,6 +875,8 @@ def infer_crawled(
     return {
         "page_results":     page_results,
         "segment_results":  predictions_all,
+        "model_id":         f"{model_type}/{selected_model_name}",
+        "tokenizer_source": tokenizer_source,
         "out_dir":          str(out_dir),
         "page_out_path":    str(page_out_path),
         "seg_out_path":     str(seg_out_path),
@@ -765,7 +894,11 @@ def main():
         "--model_name",
         type=str,
         default=None,
-        help="Model id under --model_base_dir (e.g. phobert/v2, tfidf_lr/baseline)",
+        help=(
+            "Model id under --model_base_dir "
+            "(e.g. phobert/phobert_v2_finetuned, phobert/baseline, "
+            "tfidf_lr/baseline_tfidf)"
+        ),
     )
     ap.add_argument(
         "--model_base_dir",
@@ -786,7 +919,12 @@ def main():
         choices=["phobert", "tfidf_lr"],
         help="Explicit model type when using --model_path",
     )
-    ap.add_argument("--tokenizer_name",  type=str, default="vinai/phobert-base")
+    ap.add_argument(
+        "--tokenizer_name",
+        type=str,
+        default=None,
+        help="Optional tokenizer override; defaults to the selected checkpoint tokenizer/base metadata",
+    )
     ap.add_argument("--data_dir",        type=str, default="data/raw/crawled_urls")
     ap.add_argument("--out_dir",         type=str, default="data/processed")
     ap.add_argument("--max_length",      type=int, default=256)

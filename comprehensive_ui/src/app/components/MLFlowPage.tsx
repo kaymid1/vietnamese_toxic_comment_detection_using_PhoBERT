@@ -10,6 +10,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/app/components/ui/ta
 import { Progress } from "@/app/components/ui/progress";
 import { Checkbox } from "@/app/components/ui/checkbox";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/app/components/ui/tooltip";
+import { getModelLabel } from "@/app/modelCatalog";
 import {
   Dialog,
   DialogContent,
@@ -870,7 +871,7 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
                     const deprecated = isDeprecatedModel(model);
                     return (
                       <option key={model} value={model} disabled={deprecated} className={deprecated ? "text-muted-foreground" : undefined}>
-                        {model}
+                        {getModelLabel(model)}
                       </option>
                     );
                   })}
@@ -932,7 +933,9 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
             <Card className="p-4 space-y-1 border-border/70 transition-colors hover:border-border">
               <p className="text-sm text-muted-foreground">Infer + Pseudo-label</p>
               <p className="text-3xl font-semibold">{overview?.pipeline_counts?.inferred ?? 0}</p>
-              <p className="text-xs text-muted-foreground">model: {overview?.model_name || selectedModel || "-"}</p>
+              <p className="text-xs text-muted-foreground">
+                model: {getModelLabel(overview?.model_name || selectedModel) || "-"}
+              </p>
             </Card>
             <Card className="p-4 space-y-1 border-border/70 transition-colors hover:border-border">
               <p className="text-sm text-muted-foreground">Gate 0.8 / 0.2</p>
@@ -1725,7 +1728,9 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
                     {availableModels
                       .filter((model) => !isDeprecatedModel(model))
                       .map((model) => (
-                        <option key={`base-${model}`} value={model} />
+                        <option key={`base-${model}`} value={model}>
+                          {getModelLabel(model)}
+                        </option>
                       ))}
                   </datalist>
                   <p className="mt-1 text-xs text-muted-foreground">Để trống để dùng base model mặc định của script finetune.</p>

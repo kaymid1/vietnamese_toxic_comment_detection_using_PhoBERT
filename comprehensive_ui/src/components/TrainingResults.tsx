@@ -212,7 +212,7 @@ export function TrainingResults() {
               className="mt-1 w-full rounded-lg border bg-background px-3 py-2 text-sm text-foreground"
               value={form.scenarioName}
               onChange={(event) => updateField("scenarioName", event.target.value)}
-              placeholder="LoRA r=16, LR=5e-5, gamma=2.0"
+              placeholder="PhoBERT v2 fine-tune, LR=2e-5, gamma=2.0"
             />
           </label>
 
