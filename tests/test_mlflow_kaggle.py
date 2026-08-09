@@ -1035,7 +1035,7 @@ def test_gemini_evaluate_persists_a_compact_vietnamese_assessment(
             ensure_ascii=False,
         )
 
-    monkeypatch.setattr(app_module, "call_gemini", fake_gemini)
+    monkeypatch.setattr(app_module, "call_gemini_with_model", fake_gemini)
 
     response = client.post(
         "/api/mlflow/kaggle/evaluate",

@@ -8264,16 +8264,26 @@ def _load_gemini_evaluation(run_id: str) -> Optional[Dict[str, Any]]:
 def _parse_gemini_evaluation(raw: str) -> Dict[str, Any]:
     cleaned = str(raw or "").strip()
     parsed: Any = None
-    try:
-        parsed = json.loads(cleaned)
-    except json.JSONDecodeError:
-        start = cleaned.find("{")
-        end = cleaned.rfind("}")
-        if start >= 0 and end > start:
-            try:
-                parsed = json.loads(cleaned[start : end + 1])
-            except json.JSONDecodeError:
-                parsed = None
+    candidates = [cleaned]
+    if cleaned.startswith("```") and cleaned.endswith("```"):
+        candidates.append(cleaned.split("\n", 1)[-1].rsplit("```", 1)[0].strip())
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            decoder = json.JSONDecoder()
+            start = candidate.find("{")
+            while start >= 0:
+                try:
+                    parsed, _ = decoder.raw_decode(candidate[start:])
+                except json.JSONDecodeError:
+                    start = candidate.find("{", start + 1)
+                    continue
+                if isinstance(parsed, dict):
+                    break
+                start = candidate.find("{", start + 1)
+        if isinstance(parsed, dict):
+            break
     if not isinstance(parsed, dict):
         raise HTTPException(status_code=502, detail="Gemini Evaluate did not return a valid JSON object")
 
@@ -8319,7 +8329,7 @@ def _build_gemini_evaluate_prompt(
         "Dưới đây là bằng chứng có cấu trúc của một candidate train mới. "
         "Chỉ dựa vào các số liệu này; nếu thiếu bằng chứng, nêu rõ giới hạn. "
         "Không tự promote model và không xem nhận định này là thay thế production gate.\n"
-        "Chỉ trả về một JSON object hợp lệ, không markdown, với schema:\n"
+        "Chỉ trả về một JSON object hợp lệ, không markdown; bắt đầu ngay bằng { và kết thúc bằng }, với schema:\n"
         '{"summary": string, "verdict": "promote"|"review"|"hold", '
         '"recommendation": string, "strengths": [string], "risks": [string], '
         '"metric_observations": [string]}.\n'
@@ -8355,8 +8365,20 @@ def mlflow_kaggle_gemini_evaluate(request: MlflowGeminiEvaluateRequest) -> Dict[
         )
         or ""
     ).strip()
-    evaluation = _parse_gemini_evaluation(call_gemini(_build_gemini_evaluate_prompt(instruction, comparison, previous_run)))
-    model_name = get_setting("GEMINI_MODEL", "gemini-1.5-flash-latest")
+    evaluation_prompt = _build_gemini_evaluate_prompt(instruction, comparison, previous_run)
+    raw_evaluation: Optional[str] = None
+    evaluation: Optional[Dict[str, Any]] = None
+    for attempt in range(1, 3):
+        raw_evaluation = call_gemini_with_model(evaluation_prompt)
+        try:
+            evaluation = _parse_gemini_evaluation(raw_evaluation)
+            break
+        except HTTPException:
+            if attempt < 2:
+                logger.warning("Gemini Evaluate returned invalid JSON; retrying once for run %s", run_id)
+    if evaluation is None or raw_evaluation is None:
+        raise HTTPException(status_code=502, detail="Gemini Evaluate did not return a valid JSON object after retry")
+    model_name = getattr(raw_evaluation, "model", None) or get_setting("GEMINI_MODEL", "gemini-1.5-flash-latest")
     now = datetime.now(timezone.utc).isoformat()
     with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
         conn.execute(
