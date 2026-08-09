@@ -1971,16 +1971,30 @@ def normalize_gemini_review_suggestions(raw: str, expected_ids: set[int]) -> Lis
 
 
 GEMINI_REVIEW_BATCH_SIZE = 3
+GEMINI_REVIEW_JSON_ATTEMPTS = 2
 
 
 def request_mlflow_gemini_review_chunk(rows: List[sqlite3.Row]) -> List[Dict[str, Any]]:
     expected_ids = {int(row["id"]) for row in rows}
-    raw = call_gemini(build_mlflow_gemini_review_prompt(rows))
-    try:
-        suggestions = normalize_gemini_review_suggestions(raw, expected_ids)
-    except HTTPException:
+    suggestions: Optional[List[Dict[str, Any]]] = None
+    for attempt in range(1, GEMINI_REVIEW_JSON_ATTEMPTS + 1):
+        raw = call_gemini(build_mlflow_gemini_review_prompt(rows))
+        try:
+            suggestions = normalize_gemini_review_suggestions(raw, expected_ids)
+            break
+        except HTTPException:
+            if attempt < GEMINI_REVIEW_JSON_ATTEMPTS:
+                logger.warning(
+                    "Gemini returned an invalid review response for %s row(s); retrying (%s/%s)",
+                    len(rows),
+                    attempt + 1,
+                    GEMINI_REVIEW_JSON_ATTEMPTS,
+                )
+
+    if suggestions is None:
         if len(rows) == 1:
-            raise
+            logger.warning("Gemini could not produce a valid review for row id=%s after %s attempts", rows[0]["id"], GEMINI_REVIEW_JSON_ATTEMPTS)
+            return []
         logger.warning("Gemini returned an invalid review batch; retrying %s rows individually", len(rows))
         return [
             suggestion
@@ -6059,6 +6073,9 @@ def mlflow_candidates_gemini_review(request: MlflowTrainingPreviewGeminiReviewRe
     if not rows:
         raise HTTPException(status_code=404, detail="No manual verify rows found for provided ids")
     suggestions = run_mlflow_gemini_review(rows)
+    failed_ids = sorted({int(row["id"]) for row in rows} - {int(item["id"]) for item in suggestions})
+    if not suggestions:
+        raise HTTPException(status_code=502, detail="Gemini could not produce valid review suggestions after retrying")
     return {
         "status": "ok",
         "provider": "gemini",
@@ -6066,6 +6083,7 @@ def mlflow_candidates_gemini_review(request: MlflowTrainingPreviewGeminiReviewRe
         "suggestions": suggestions,
         "requested": len(ids),
         "reviewed": len(suggestions),
+        "failed_ids": failed_ids,
     }
 
 
@@ -6407,6 +6425,9 @@ def mlflow_training_preview_gemini_review(request: MlflowTrainingPreviewGeminiRe
         raise HTTPException(status_code=404, detail="No training preview rows found for provided ids")
 
     suggestions = run_mlflow_gemini_review(rows)
+    failed_ids = sorted({int(row["id"]) for row in rows} - {int(item["id"]) for item in suggestions})
+    if not suggestions:
+        raise HTTPException(status_code=502, detail="Gemini could not produce valid review suggestions after retrying")
     return {
         "status": "ok",
         "provider": "gemini",
@@ -6414,6 +6435,7 @@ def mlflow_training_preview_gemini_review(request: MlflowTrainingPreviewGeminiRe
         "suggestions": suggestions,
         "requested": len(ids),
         "reviewed": len(suggestions),
+        "failed_ids": failed_ids,
     }
 
 

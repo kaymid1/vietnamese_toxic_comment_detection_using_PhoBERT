@@ -989,6 +989,53 @@ def test_mlflow_gemini_review_splits_more_than_three_comments_into_complete_batc
     assert [item["id"] for item in suggestions] == list(range(1, 8))
 
 
+def test_mlflow_gemini_review_keeps_valid_rows_when_one_row_never_returns_json(qa_env, monkeypatch):
+    app_module = qa_env["app_module"]
+    rows = [
+        {
+            "id": row_id,
+            "text": f"comment {row_id}",
+            "score": 0.5,
+            "pseudo_label": 0,
+            "constructiveness_score": None,
+            "constructiveness_label": None,
+            "gate_bucket": "accepted",
+            "domain_category": "news",
+            "url": f"https://example.com/{row_id}",
+        }
+        for row_id in range(1, 4)
+    ]
+    calls_for_bad_row = 0
+
+    def fake_call_gemini(prompt: str) -> str:
+        nonlocal calls_for_bad_row
+        payload_start = prompt.rfind("\n[")
+        payload = json.loads(prompt[payload_start + 1 :])
+        if any(item["id"] == 3 for item in payload):
+            calls_for_bad_row += 1
+            return "not json"
+        return json.dumps(
+            [
+                {
+                    "id": item["id"],
+                    "toxicity_label": 0,
+                    "constructiveness_label": None,
+                    "confidence": "high",
+                    "reason": "JSON hợp lệ",
+                    "action": "apply",
+                }
+                for item in payload
+            ],
+            ensure_ascii=False,
+        )
+
+    monkeypatch.setattr(app_module, "call_gemini", fake_call_gemini)
+    suggestions = app_module.run_mlflow_gemini_review(rows)
+
+    assert [item["id"] for item in suggestions] == [1, 2]
+    assert calls_for_bad_row == app_module.GEMINI_REVIEW_JSON_ATTEMPTS * 2
+
+
 def test_mlflow_manual_verify_gemini_review_and_apply(client, qa_env, admin_headers, monkeypatch):
     _seed_mlflow_batch(qa_env["feedback_db"], batch_id="batch_manual_gemini")
     candidates = client.get(

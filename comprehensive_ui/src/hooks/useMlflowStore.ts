@@ -240,6 +240,7 @@ export interface MlflowGeminiReviewResponse {
   suggestions: MlflowGeminiReviewSuggestion[];
   requested: number;
   reviewed: number;
+  failed_ids?: number[];
 }
 
 export interface MlflowBatchSummary {

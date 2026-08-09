@@ -533,7 +533,11 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
       const payload = await geminiReviewCandidates(selectedCandidateIds);
       const next = Object.fromEntries(payload.suggestions.map((item) => [item.id, item]));
       setCandidateGeminiSuggestions((prev) => ({ ...prev, ...next }));
-      toast.success(`Gemini đã review ${payload.reviewed}/${payload.requested} dòng Manual Verify.`);
+      if (payload.failed_ids?.length) {
+        toast.warning(`Gemini đã review ${payload.reviewed}/${payload.requested} dòng Manual Verify. ${payload.failed_ids.length} dòng chưa có JSON hợp lệ, hãy thử lại các dòng đó.`);
+      } else {
+        toast.success(`Gemini đã review ${payload.reviewed}/${payload.requested} dòng Manual Verify.`);
+      }
     } catch (error) {
       const detail = error instanceof Error && error.message ? error.message : "Gemini review thất bại.";
       toast.error(detail);
@@ -635,7 +639,11 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
       const payload = await geminiReviewTrainingPreview(selectedPreviewIds);
       const next = Object.fromEntries(payload.suggestions.map((item) => [item.id, item]));
       setGeminiSuggestions((prev) => ({ ...prev, ...next }));
-      toast.success(`Gemini đã review ${payload.reviewed}/${payload.requested} dòng.`);
+      if (payload.failed_ids?.length) {
+        toast.warning(`Gemini đã review ${payload.reviewed}/${payload.requested} dòng. ${payload.failed_ids.length} dòng chưa có JSON hợp lệ, hãy thử lại các dòng đó.`);
+      } else {
+        toast.success(`Gemini đã review ${payload.reviewed}/${payload.requested} dòng.`);
+      }
     } catch (error) {
       const detail = error instanceof Error && error.message ? error.message : "Gemini review thất bại.";
       toast.error(detail);
