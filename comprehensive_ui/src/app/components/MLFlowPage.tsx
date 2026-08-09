@@ -9,6 +9,7 @@ import { Input } from "@/app/components/ui/input";
 import { Badge } from "@/app/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/app/components/ui/tabs";
 import { Progress } from "@/app/components/ui/progress";
+import { useProgressNotification } from "@/app/components/ProgressNotification";
 import { Checkbox } from "@/app/components/ui/checkbox";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/app/components/ui/tooltip";
 import { getModelLabel } from "@/app/modelCatalog";
@@ -107,6 +108,7 @@ const safeWriteLocalStorageString = (key: string, value: string) => {
 };
 
 export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdminUnauthorized }: MLFlowPageProps) {
+  const { start: startProgress, update: updateProgress, succeed: succeedProgress, fail: failProgress } = useProgressNotification();
   const isDeprecatedModel = (model: string) => model.toLowerCase().includes("deprecated");
   const {
     loading,
@@ -430,6 +432,7 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
       return;
     }
     setStatusText(null);
+    startProgress("mlflow-ingest", { title: "MLflow ingest", message: "Đang crawl và tạo Training Preview...", value: 8 });
     try {
       const result = await ingest(parsedUrls, selectedModel || undefined);
       const counts = result.counts || {};
@@ -438,6 +441,9 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
       const candidateCount = Number(counts.candidate || 0);
       setStatusText(`Đã ingest batch ${result.batch_id}`);
       setCrawlSummary(summary);
+      succeedProgress("mlflow-ingest", {
+        message: total > 0 ? `Hoàn tất: ${total} segments, ${candidateCount} candidates.` : "Crawl hoàn tất nhưng chưa tìm thấy comment.",
+      });
       setSelectedCandidateIds([]);
       void refreshTrainingPreview(1, "all_batches");
 
@@ -447,6 +453,7 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
         toast.success(`Ingest thành công: ${total} segments, ${candidateCount} candidates.`);
       }
     } catch {
+      failProgress("mlflow-ingest", { message: "Ingest thất bại. Kiểm tra URL hoặc log backend." });
       setStatusText("Ingest thất bại.");
       toast.error("Ingest thất bại.");
     }
@@ -524,6 +531,7 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
       return;
     }
     setCandidateGeminiReviewing(true);
+    startProgress("gemini-candidate-review", { title: "Gemini Review", message: `Đang đánh giá ${selectedCandidateIds.length} dòng Manual Verify...` });
     try {
       setCandidateGeminiSuggestions((prev) => {
         const next = { ...prev };
@@ -533,6 +541,7 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
       const payload = await geminiReviewCandidates(selectedCandidateIds);
       const next = Object.fromEntries(payload.suggestions.map((item) => [item.id, item]));
       setCandidateGeminiSuggestions((prev) => ({ ...prev, ...next }));
+      succeedProgress("gemini-candidate-review", { message: `Đã review ${payload.reviewed}/${payload.requested} dòng.` });
       if (payload.failed_ids?.length) {
         toast.warning(`Gemini đã review ${payload.reviewed}/${payload.requested} dòng Manual Verify. ${payload.failed_ids.length} dòng chưa có JSON hợp lệ, hãy thử lại các dòng đó.`);
       } else {
@@ -540,6 +549,7 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
       }
     } catch (error) {
       const detail = error instanceof Error && error.message ? error.message : "Gemini review thất bại.";
+      failProgress("gemini-candidate-review", { message: detail });
       toast.error(detail);
     } finally {
       setCandidateGeminiReviewing(false);
@@ -630,6 +640,7 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
       return;
     }
     setGeminiReviewing(true);
+    startProgress("gemini-preview-review", { title: "Gemini Review", message: `Đang đánh giá ${selectedPreviewIds.length} dòng Training Preview...` });
     try {
       setGeminiSuggestions((prev) => {
         const next = { ...prev };
@@ -639,6 +650,7 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
       const payload = await geminiReviewTrainingPreview(selectedPreviewIds);
       const next = Object.fromEntries(payload.suggestions.map((item) => [item.id, item]));
       setGeminiSuggestions((prev) => ({ ...prev, ...next }));
+      succeedProgress("gemini-preview-review", { message: `Đã review ${payload.reviewed}/${payload.requested} dòng.` });
       if (payload.failed_ids?.length) {
         toast.warning(`Gemini đã review ${payload.reviewed}/${payload.requested} dòng. ${payload.failed_ids.length} dòng chưa có JSON hợp lệ, hãy thử lại các dòng đó.`);
       } else {
@@ -646,6 +658,7 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
       }
     } catch (error) {
       const detail = error instanceof Error && error.message ? error.message : "Gemini review thất bại.";
+      failProgress("gemini-preview-review", { message: detail });
       toast.error(detail);
     } finally {
       setGeminiReviewing(false);
@@ -818,6 +831,7 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
 
     kaggleTriggerPendingRef.current = true;
     setKaggleTriggerPending(true);
+    startProgress("kaggle-pipeline", { title: "Kaggle pipeline", message: "Đang gửi training job lên Kaggle...", value: 8 });
     try {
       const payload = await triggerDO({
         modelKind: selectedModelKind,
@@ -828,10 +842,12 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
       });
       const trainingLabel = selectedModelKind === "lr_smoke" ? "LR SMOKE" : selectedTrainingMode === "finetune" ? "FINETUNE" : "RETRAIN";
       setStatusText(`Đã trigger Kaggle run ${payload.run_id} (${payload.status}) - ${trainingLabel}.`);
+      updateProgress("kaggle-pipeline", { message: `Run ${payload.run_id} đã được tạo, đang theo dõi tiến trình...`, value: 15 });
       toast.success(`Đã trigger Kaggle run ${payload.run_id} (${trainingLabel}).`);
     } catch (error) {
       const detail = error instanceof Error && error.message ? error.message : "Không rõ nguyên nhân.";
       setStatusText(`Trigger Kaggle pipeline thất bại: ${detail}`);
+      failProgress("kaggle-pipeline", { message: detail });
       toast.error(`Trigger Kaggle pipeline thất bại: ${detail}`);
     } finally {
       kaggleTriggerPendingRef.current = false;
@@ -858,13 +874,16 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
     const runId = typeof doStatus?.run_id === "string" ? doStatus.run_id : "";
     if (!runId) return;
     setGeminiEvaluating(true);
+    startProgress("gemini-evaluate", { title: "Gemini Evaluate", message: "Đang so sánh kết quả train và production..." });
     try {
       const payload = await geminiEvaluateKaggleRun(runId, force);
       setStatusText(payload.status === "cached" ? "Đã tải nhận định Gemini đã lưu." : "Gemini đã đánh giá kết quả train mới.");
+      succeedProgress("gemini-evaluate", { message: payload.status === "cached" ? "Đã tải nhận định đã lưu." : "Đánh giá đã hoàn tất." });
       toast.success(payload.status === "cached" ? "Đã tải nhận định Gemini." : "Gemini Evaluate hoàn tất.");
     } catch (error) {
       const detail = error instanceof Error && error.message ? error.message : "Gemini Evaluate thất bại.";
       setStatusText(detail);
+      failProgress("gemini-evaluate", { message: detail });
       toast.error(detail);
     } finally {
       setGeminiEvaluating(false);
@@ -1066,11 +1085,14 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
     if (prev === doStatusValue) return;
 
     if (doStatusValue === "running") {
+      startProgress("kaggle-pipeline", { title: "Kaggle pipeline", message: "Kaggle đang train mô hình..." });
       toast.message("Kaggle pipeline đang chạy.");
     } else if (doStatusValue === "completed") {
+      succeedProgress("kaggle-pipeline", { message: "Kaggle pipeline đã hoàn tất." });
       toast.success("Kaggle pipeline hoàn tất.");
       if (doRunId) void refreshCompare(doRunId);
     } else if (doStatusValue === "failed") {
+      failProgress("kaggle-pipeline", { message: doIsRestricted ? "GPU bị restricted; hãy chuyển CPU hoặc mở ticket tăng tier." : "Kaggle pipeline thất bại." });
       if (doIsRestricted) {
         toast.error("GPU bị restricted. Hãy chuyển CPU hoặc mở ticket tăng tier.");
       } else {
@@ -1079,7 +1101,13 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
     }
 
     prevDoStatusRef.current = doStatusValue;
-  }, [doIsRestricted, doRunId, doStatusValue, refreshCompare]);
+  }, [doIsRestricted, doRunId, doStatusValue, failProgress, refreshCompare, startProgress, succeedProgress]);
+
+  useEffect(() => {
+    if (ingestStage) {
+      updateProgress("mlflow-ingest", { message: ingestStageMessage || "Đang xử lý ingest...", value: Math.max(8, ingestProgress) });
+    }
+  }, [ingestProgress, ingestStage, ingestStageMessage, updateProgress]);
 
   const doCompletedIndex = doStages.findIndex((s) => s === doCurrentStage);
   const doHasStageProgress = ["running", "failed", "completed", "dry_run"].includes(doStatusValue);

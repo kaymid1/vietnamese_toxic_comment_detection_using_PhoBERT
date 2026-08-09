@@ -11,6 +11,7 @@ import { ContactPage } from "@/app/components/ContactPage";
 import { MLFlowPage } from "@/app/components/MLFlowPage";
 import { SystemSettingsPage } from "@/app/components/SystemSettingsPage";
 import { Toaster } from "@/app/components/ui/sonner";
+import { ProgressNotificationProvider, useProgressNotification } from "@/app/components/ProgressNotification";
 import { Button } from "@/app/components/ui/button";
 import { Card } from "@/app/components/ui/card";
 import { Input } from "@/app/components/ui/input";
@@ -528,6 +529,29 @@ function AdminLoginPage({
   );
 }
 
+function AnalysisProgressBridge({ active, progress, error }: { active: boolean; progress: number | null; error: string | null }) {
+  const { start, update, succeed, fail } = useProgressNotification();
+  const wasActive = useRef(false);
+
+  useEffect(() => {
+    if (active) {
+      wasActive.current = true;
+      start("analysis", { title: "Phân tích nội dung", message: "Đang crawl và suy luận mô hình...", value: Math.max(1, progress ?? 1) });
+      return;
+    }
+    if (!wasActive.current) return;
+    wasActive.current = false;
+    if (error) fail("analysis", { message: error });
+    else succeed("analysis", { message: "Phân tích đã hoàn tất." });
+  }, [active, error, fail, progress, start, succeed, update]);
+
+  useEffect(() => {
+    if (active) update("analysis", { value: Math.max(1, progress ?? 1) });
+  }, [active, progress, update]);
+
+  return null;
+}
+
 export default function App() {
   const [currentPage, setCurrentPage] = useState("home");
   const [analysisResults, setAnalysisResults] = useState<ApiResult[]>([]);
@@ -1027,6 +1051,8 @@ export default function App() {
   return (
     <div className="dashboard-app min-h-screen">
       <I18nContext.Provider value={{ language, setLanguage: handleSetLanguage, t }}>
+        <ProgressNotificationProvider>
+        <AnalysisProgressBridge active={analysisInFlight} progress={analysisDisplayProgress} error={errorMessage} />
         <Navigation
           currentPage={currentPage}
           onNavigate={handleNavigate}
@@ -1128,6 +1154,7 @@ export default function App() {
           </div>
         </main>
         <Toaster position="top-right" />
+        </ProgressNotificationProvider>
       </I18nContext.Provider>
     </div>
   );
