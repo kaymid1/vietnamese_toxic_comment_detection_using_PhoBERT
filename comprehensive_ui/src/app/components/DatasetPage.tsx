@@ -22,7 +22,6 @@ import {
 } from "@/app/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/app/components/ui/tabs";
 import { useI18n } from "@/app/i18n/context";
-import { Sparkles } from "lucide-react";
 
 interface DatasetRow {
   text: string;
@@ -185,12 +184,7 @@ const formatPercent = (value: number, total: number) => {
   return `${((value / total) * 100).toFixed(1)}%`;
 };
 
-interface DatasetPageProps {
-  showSyntheticPanel?: boolean;
-  onOpenSynthetic?: () => void;
-}
-
-export function DatasetPage({ showSyntheticPanel = false, onOpenSynthetic }: DatasetPageProps) {
+export function DatasetPage() {
   const { t } = useI18n();
   const isLegacyDataset = false;
   const [rows, setRows] = useState<DatasetRow[]>([]);
@@ -460,24 +454,6 @@ export function DatasetPage({ showSyntheticPanel = false, onOpenSynthetic }: Dat
             {t("dataset.hero.subtitle")}
           </p>
         </div>
-
-        {showSyntheticPanel && onOpenSynthetic && (
-          <Card className="mb-8 border-primary/30 bg-primary/5 p-6 shadow-lg">
-            <div className="flex flex-wrap items-center justify-between gap-4">
-              <div className="flex items-start gap-3">
-                <div className="rounded-lg bg-primary/10 p-3 text-primary">
-                  <Sparkles className="h-5 w-5" />
-                </div>
-                <div>
-                  <p className="text-xs font-semibold uppercase tracking-[0.18em] text-primary">Admin only</p>
-                  <h2 className="mt-1 text-xl font-semibold">{t("synthetic.adminPanelTitle")}</h2>
-                  <p className="mt-1 text-sm text-muted-foreground">{t("synthetic.adminPanelDescription")}</p>
-                </div>
-              </div>
-              <Button onClick={onOpenSynthetic}>{t("synthetic.openAdminPanel")}</Button>
-            </div>
-          </Card>
-        )}
 
         <Card className="bg-card p-6 mb-8 shadow-lg">
           <div className="flex flex-wrap items-start justify-between gap-4 mb-6">

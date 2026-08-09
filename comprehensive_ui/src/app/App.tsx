@@ -1086,12 +1086,7 @@ export default function App() {
               />
             )}
 
-            {currentPage === "dataset" && (
-              <DatasetPage
-                showSyntheticPanel={Boolean(adminSession?.token)}
-                onOpenSynthetic={() => handleNavigate("dataset_synthetic")}
-              />
-            )}
+            {currentPage === "dataset" && <DatasetPage />}
 
             {currentPage === "dataset_synthetic" && adminSession?.token && (
               <SyntheticGenerationPage
