@@ -138,6 +138,209 @@ def test_mlflow_import_zip_requires_admin(client):
     assert response.status_code == 401
 
 
+def test_synthetic_admin_endpoints_require_admin(client, admin_headers):
+    assert client.get("/api/dataset/synthetic/preview").status_code == 401
+    assert client.post("/api/dataset/synthetic/gemini-review", json={"ids": [1]}).status_code == 401
+    assert (
+        client.get(
+            "/api/dataset/synthetic/preview",
+            headers=admin_headers,
+            params={"reviewed": "true"},
+        ).status_code
+        == 400
+    )
+    assert client.get("/api/dataset/synthetic/training-preview-summary").status_code == 401
+    assert (
+        client.post(
+            "/api/dataset/synthetic/transfer-to-training-preview",
+            json={"ids": [1]},
+        ).status_code
+        == 401
+    )
+
+
+def test_synthetic_gemini_review_persists_provenance_and_transfers(client, qa_env, admin_headers, monkeypatch):
+    created_at = "2026-08-08T09:00:00+00:00"
+    with sqlite3.connect(qa_env["feedback_db"]) as conn:
+        conn.execute(
+            """
+            INSERT INTO synthetic_generation_batch (
+                batch_id, domain, style, target_label, requested_count, generated_count,
+                generator_model, prompt_version, created_at
+            ) VALUES ('synthetic_gemini_batch', 'news', 'informal', 1, 1, 1, 'gemini-test', 'v1', ?)
+            """,
+            (created_at,),
+        )
+        cursor = conn.execute(
+            """
+            INSERT INTO synthetic_dataset_row (
+                batch_id, text, label, constructiveness, domain, style,
+                is_accepted, created_at, reviewed_at
+            ) VALUES ('synthetic_gemini_batch', 'synthetic pending review', 1, NULL, 'news', 'informal', 0, ?, NULL)
+            """,
+            (created_at,),
+        )
+        row_id = int(cursor.lastrowid)
+        conn.commit()
+
+    def fake_call_gemini(prompt: str) -> str:
+        assert "synthetic pending review" in prompt
+        return json.dumps(
+            [
+                {
+                    "id": row_id,
+                    "toxicity_label": 0,
+                    "constructiveness_label": 1,
+                    "confidence": "high",
+                    "reason": "Không có nội dung công kích.",
+                    "action": "apply",
+                }
+            ],
+            ensure_ascii=False,
+        )
+
+    monkeypatch.setattr(qa_env["app_module"], "call_gemini", fake_call_gemini)
+    suggestion_response = client.post(
+        "/api/dataset/synthetic/gemini-review",
+        headers=admin_headers,
+        json={"ids": [row_id]},
+    )
+    assert suggestion_response.status_code == 200
+    suggestion = suggestion_response.json()["suggestions"][0]
+    assert suggestion["toxicity_label"] == 0
+    assert suggestion["constructiveness_label"] == 1
+
+    apply_response = client.post(
+        "/api/dataset/synthetic/review",
+        headers=admin_headers,
+        json={
+            "updates": [
+                {
+                    "id": row_id,
+                    "is_accepted": True,
+                    "label": suggestion["toxicity_label"],
+                    "constructiveness": suggestion["constructiveness_label"],
+                    "review_method": "gemini_assisted",
+                    "label_confidence": suggestion["confidence"],
+                }
+            ]
+        },
+    )
+    assert apply_response.status_code == 200
+    with sqlite3.connect(qa_env["feedback_db"]) as conn:
+        reviewed = conn.execute(
+            """
+            SELECT label, constructiveness, is_accepted, review_method, label_confidence, reviewed_by
+            FROM synthetic_dataset_row WHERE id = ?
+            """,
+            (row_id,),
+        ).fetchone()
+    assert reviewed == (0, 1, 1, "gemini_assisted", "high", "admin")
+
+    transfer = client.post(
+        "/api/dataset/synthetic/transfer-to-training-preview",
+        headers=admin_headers,
+        json={"ids": [row_id]},
+    )
+    assert transfer.json()["transferred"] == 1
+    with sqlite3.connect(qa_env["feedback_db"]) as conn:
+        mlflow_row = conn.execute(
+            """
+            SELECT pseudo_label, constructiveness_label, training_review_status, label_source, label_confidence
+            FROM mlflow_comment_item WHERE source_type = 'synthetic' AND source_row_id = ?
+            """,
+            (row_id,),
+        ).fetchone()
+    assert mlflow_row == (0, 1, "manual_gemini", "gemini_assist", "high")
+
+
+def test_admin_confirms_synthetic_transfer_to_training_preview(client, qa_env, admin_headers):
+    created_at = "2026-08-08T10:00:00+00:00"
+    reviewed_at = "2026-08-08T10:05:00+00:00"
+    with sqlite3.connect(qa_env["feedback_db"]) as conn:
+        conn.execute(
+            """
+            INSERT INTO synthetic_generation_batch (
+                batch_id, domain, style, target_label, requested_count, generated_count,
+                generator_model, prompt_version, created_at
+            ) VALUES ('synthetic_test_batch', 'education', 'formal', 1, 3, 3, 'gemini-test', 'v1', ?)
+            """,
+            (created_at,),
+        )
+        conn.executemany(
+            """
+            INSERT INTO synthetic_dataset_row (
+                batch_id, text, label, constructiveness, domain, style,
+                is_accepted, created_at, reviewed_at
+            ) VALUES ('synthetic_test_batch', ?, ?, ?, 'education', 'formal', ?, ?, ?)
+            """,
+            [
+                ("synthetic toxic sample", 1, 0, 1, created_at, reviewed_at),
+                ("synthetic clean sample", 0, 1, 1, created_at, reviewed_at),
+                ("synthetic rejected sample", 1, None, 0, created_at, reviewed_at),
+            ],
+        )
+        conn.commit()
+
+    summary = client.get(
+        "/api/dataset/synthetic/training-preview-summary",
+        headers=admin_headers,
+    )
+    assert summary.status_code == 200
+    summary_payload = summary.json()
+    assert summary_payload["eligible"] == 2
+    assert summary_payload["toxic"] == 1
+    assert summary_payload["clean"] == 1
+    assert summary_payload["constructive"] == 1
+    assert summary_payload["non_constructive"] == 1
+
+    transfer = client.post(
+        "/api/dataset/synthetic/transfer-to-training-preview",
+        headers=admin_headers,
+        json={"ids": summary_payload["ids"]},
+    )
+    assert transfer.status_code == 200
+    assert transfer.json() == {
+        "transferred": 2,
+        "toxic": 1,
+        "clean": 1,
+        "skipped": 0,
+        "automation_scheduled_for": [],
+    }
+
+    preview = client.get(
+        "/api/mlflow/training-preview",
+        headers=admin_headers,
+        params={"scope": "all_batches"},
+    )
+    assert preview.status_code == 200
+    synthetic_items = [item for item in preview.json()["items"] if item["source_type"] == "synthetic"]
+    assert len(synthetic_items) == 2
+    assert {item["pseudo_label"] for item in synthetic_items} == {0, 1}
+    assert {item["label_source"] for item in synthetic_items} == {"synthetic_review"}
+    assert all(item["source_row_id"] in summary_payload["ids"] for item in synthetic_items)
+
+    summary_after = client.get(
+        "/api/dataset/synthetic/training-preview-summary",
+        headers=admin_headers,
+    ).json()
+    assert summary_after["eligible"] == 0
+    assert summary_after["already_transferred"] == 2
+
+    repeated = client.post(
+        "/api/dataset/synthetic/transfer-to-training-preview",
+        headers=admin_headers,
+        json={"ids": summary_payload["ids"]},
+    )
+    assert repeated.json() == {
+        "transferred": 0,
+        "toxic": 0,
+        "clean": 0,
+        "skipped": 2,
+        "automation_scheduled_for": [],
+    }
+
+
 def test_system_settings_require_admin(client):
     assert client.get("/api/admin/system-settings").status_code == 401
     assert client.patch("/api/admin/system-settings", json={"settings": {}}).status_code == 401
@@ -390,6 +593,21 @@ def test_mlflow_training_preview_and_full_bundle_include_phobert_assets(client, 
     assert preview_payload["counts"]["selected_toxic"] == 1
     assert preview_payload["counts"]["selected_clean"] == 1
     assert preview_payload["constructiveness"]["included"] == 2
+    assert preview_payload["constructiveness"]["constructive"] + preview_payload["constructiveness"]["non_constructive"] == 2
+
+    candidates = client.get(
+        "/api/mlflow/candidates",
+        headers=admin_headers,
+        params={"scope": "batch", "batch_id": "batch_phobert", "strict_batch": "true"},
+    )
+    assert candidates.status_code == 200
+    candidate_payload = candidates.json()
+    preview_ids = {int(item["id"]) for item in preview_payload["items"]}
+    candidate_ids = {int(item["id"]) for item in candidate_payload["items"]}
+    assert preview_ids.isdisjoint(candidate_ids)
+    assert {item["gate_bucket"] for item in preview_payload["items"]} == {"accepted"}
+    assert {item["gate_bucket"] for item in candidate_payload["items"]} == {"candidate"}
+    assert {item["verification_status"] for item in candidate_payload["items"]} == {"unverified"}
 
     response = client.post(
         "/api/mlflow/manual/export-bundle",
@@ -473,6 +691,91 @@ def test_mlflow_lock_prevents_accidental_remove_in_training_preview(client, qa_e
     )
     assert unlock_and_remove.status_code == 200
     assert unlock_and_remove.json()["updated"] >= 1
+    preview_removed = client.get(
+        "/api/mlflow/training-preview",
+        headers=admin_headers,
+        params={"scope": "batch", "batch_id": "batch_lock_preview", "strict_batch": "true"},
+    )
+    assert target_id not in {int(item["id"]) for item in preview_removed.json()["items"]}
+
+
+def test_mlflow_training_plan_and_manual_toxicity_override(client, qa_env, admin_headers):
+    _seed_mlflow_batch(qa_env["feedback_db"], batch_id="batch_training_plan")
+    candidates = client.get(
+        "/api/mlflow/candidates",
+        headers=admin_headers,
+        params={"scope": "batch", "batch_id": "batch_training_plan", "strict_batch": "true"},
+    )
+    candidate_id = int(candidates.json()["items"][0]["id"])
+    include_clean = client.post(
+        "/api/mlflow/candidates/review",
+        headers=admin_headers,
+        json={"updates": [{"id": candidate_id, "action": "include_clean"}]},
+    )
+    assert include_clean.status_code == 200
+    with sqlite3.connect(qa_env["feedback_db"]) as conn:
+        conn.execute(
+            "UPDATE mlflow_comment_item SET text = ? WHERE id = ?",
+            ("sample train text", candidate_id),
+        )
+        accepted_id = int(
+            conn.execute(
+                "SELECT id FROM mlflow_comment_item WHERE batch_id = ? AND id <> ?",
+                ("batch_training_plan", candidate_id),
+            ).fetchone()[0]
+        )
+        conn.commit()
+
+    plan = client.get(
+        "/api/mlflow/training-plan",
+        headers=admin_headers,
+        params={"scope": "batch", "batch_id": "batch_training_plan", "strict_batch": "true", "balance_strategy": "balanced_50_50"},
+    )
+    assert plan.status_code == 200
+    plan_payload = plan.json()
+    assert plan_payload["summary"]["gold_train"] == 1
+    assert plan_payload["summary"]["eligible_mlflow"] == 2
+    assert plan_payload["summary"]["after_balance"] == 2
+    assert plan_payload["summary"]["duplicates_skipped"] == 1
+    assert plan_payload["summary"]["mlflow_added"] == 1
+    assert plan_payload["summary"]["final_train"] == 2
+    assert plan_payload["row_statuses"][str(accepted_id)]["will_finetune"] is True
+    assert plan_payload["row_statuses"][str(candidate_id)]["reason_code"] == "duplicate"
+
+    manual_override = client.post(
+        "/api/mlflow/training-preview/review",
+        headers=admin_headers,
+        json={
+            "updates": [
+                {
+                    "id": accepted_id,
+                    "pseudo_label": 0,
+                    "label_source": "manual_override",
+                    "label_confidence": "high",
+                }
+            ]
+        },
+    )
+    assert manual_override.status_code == 200
+    with sqlite3.connect(qa_env["feedback_db"]) as conn:
+        row = conn.execute(
+            "SELECT pseudo_label, verification_status, training_review_status, label_source FROM mlflow_comment_item WHERE id = ?",
+            (accepted_id,),
+        ).fetchone()
+    assert row == (0, "manual_accepted", "manual_approved", "manual_override")
+
+    deselect = client.post(
+        "/api/mlflow/training-preview/review",
+        headers=admin_headers,
+        json={"updates": [{"id": accepted_id, "selected_for_training": False}]},
+    )
+    assert deselect.status_code == 200
+    plan_after = client.get(
+        "/api/mlflow/training-plan",
+        headers=admin_headers,
+        params={"scope": "batch", "batch_id": "batch_training_plan", "strict_batch": "true", "balance_strategy": "all"},
+    )
+    assert plan_after.json()["row_statuses"][str(accepted_id)]["reason_code"] == "not_selected"
 
 
 def test_mlflow_gemini_review_requires_admin(client, qa_env):
@@ -563,6 +866,209 @@ def test_mlflow_gemini_review_parses_mock_response_and_apply_metadata(client, qa
             (target_id,),
         ).fetchone()
     assert row == (0, None, "gemini_assist", "high")
+
+
+def test_mlflow_bulk_gemini_review_and_apply_preserves_review_origin(client, qa_env, admin_headers, monkeypatch):
+    _seed_mlflow_batch(qa_env["feedback_db"], batch_id="batch_gemini_bulk")
+    with sqlite3.connect(qa_env["feedback_db"]) as conn:
+        conn.execute(
+            """
+            UPDATE mlflow_comment_item
+            SET gate_bucket = 'accepted', verification_status = 'manual_accepted', training_review_status = 'manual_approved'
+            WHERE batch_id = ? AND text = 'candidate sample'
+            """,
+            ("batch_gemini_bulk",),
+        )
+        rows = conn.execute(
+            "SELECT id, training_review_status FROM mlflow_comment_item WHERE batch_id = ? ORDER BY id",
+            ("batch_gemini_bulk",),
+        ).fetchall()
+        conn.commit()
+
+    ids = [int(row[0]) for row in rows]
+    assert [row[1] for row in rows] == ["auto", "manual_approved"]
+
+    def fake_call_gemini(prompt: str) -> str:
+        assert "đúng 2 object" in prompt
+        return json.dumps(
+            [
+                {
+                    "id": item_id,
+                    "toxicity_label": index % 2,
+                    "constructiveness_label": None,
+                    "confidence": "high",
+                    "reason": f"Gợi ý {index + 1}",
+                    "action": "apply",
+                }
+                for index, item_id in enumerate(ids)
+            ],
+            ensure_ascii=False,
+        )
+
+    monkeypatch.setattr(qa_env["app_module"], "call_gemini", fake_call_gemini)
+    review_response = client.post(
+        "/api/mlflow/training-preview/gemini-review",
+        headers=admin_headers,
+        json={"ids": ids},
+    )
+    assert review_response.status_code == 200
+    suggestions = review_response.json()["suggestions"]
+    assert review_response.json()["reviewed"] == 2
+    assert {int(item["id"]) for item in suggestions} == set(ids)
+
+    apply_response = client.post(
+        "/api/mlflow/training-preview/review",
+        headers=admin_headers,
+        json={
+            "updates": [
+                {
+                    "id": item["id"],
+                    "pseudo_label": item["toxicity_label"],
+                    "clear_constructiveness": True,
+                    "label_source": "gemini_assist",
+                    "label_confidence": item["confidence"],
+                    "reviewed_by_gemini": True,
+                }
+                for item in suggestions
+            ]
+        },
+    )
+    assert apply_response.status_code == 200
+    assert apply_response.json()["updated"] == 2
+
+    with sqlite3.connect(qa_env["feedback_db"]) as conn:
+        applied_rows = conn.execute(
+            "SELECT training_review_status, label_source FROM mlflow_comment_item WHERE id IN (?, ?) ORDER BY id",
+            tuple(ids),
+        ).fetchall()
+    assert applied_rows == [("auto_gemini", "gemini_assist"), ("manual_gemini", "gemini_assist")]
+
+
+def test_mlflow_gemini_review_splits_more_than_three_comments_into_complete_batches(qa_env, monkeypatch):
+    app_module = qa_env["app_module"]
+    rows = [
+        {
+            "id": row_id,
+            "text": f"comment {row_id}",
+            "score": 0.5,
+            "pseudo_label": 0,
+            "constructiveness_score": None,
+            "constructiveness_label": None,
+            "gate_bucket": "candidate",
+            "domain_category": "news",
+            "url": f"https://example.com/{row_id}",
+        }
+        for row_id in range(1, 8)
+    ]
+    request_sizes = []
+
+    def fake_call_gemini(prompt: str) -> str:
+        payload_start = prompt.rfind("\n[")
+        assert payload_start >= 0
+        payload = json.loads(prompt[payload_start + 1 :])
+        request_sizes.append(len(payload))
+        return json.dumps(
+            [
+                {
+                    "id": item["id"],
+                    "toxicity_label": item["id"] % 2,
+                    "constructiveness_label": None,
+                    "confidence": "high",
+                    "reason": "Đã review",
+                    "action": "apply",
+                }
+                for item in payload
+            ],
+            ensure_ascii=False,
+        )
+
+    monkeypatch.setattr(app_module, "call_gemini", fake_call_gemini)
+    suggestions = app_module.run_mlflow_gemini_review(rows)
+
+    assert request_sizes == [3, 3, 1]
+    assert [item["id"] for item in suggestions] == list(range(1, 8))
+
+
+def test_mlflow_manual_verify_gemini_review_and_apply(client, qa_env, admin_headers, monkeypatch):
+    _seed_mlflow_batch(qa_env["feedback_db"], batch_id="batch_manual_gemini")
+    candidates = client.get(
+        "/api/mlflow/candidates",
+        headers=admin_headers,
+        params={"scope": "batch", "batch_id": "batch_manual_gemini", "strict_batch": "true"},
+    )
+    assert candidates.status_code == 200
+    candidate_id = int(candidates.json()["items"][0]["id"])
+    with sqlite3.connect(qa_env["feedback_db"]) as conn:
+        conn.execute(
+            "UPDATE mlflow_comment_item SET constructiveness_label = 1 WHERE id = ?",
+            (candidate_id,),
+        )
+        conn.commit()
+
+    def fake_call_gemini(prompt: str) -> str:
+        assert "candidate sample" in prompt
+        return json.dumps(
+            [
+                {
+                    "id": candidate_id,
+                    "toxicity_label": 1,
+                    "constructiveness_label": None,
+                    "confidence": "high",
+                    "reason": "Có công kích trực tiếp.",
+                    "action": "apply",
+                }
+            ],
+            ensure_ascii=False,
+        )
+
+    monkeypatch.setattr(qa_env["app_module"], "call_gemini", fake_call_gemini)
+    review_response = client.post(
+        "/api/mlflow/candidates/gemini-review",
+        headers=admin_headers,
+        json={"ids": [candidate_id]},
+    )
+    assert review_response.status_code == 200
+    suggestion = review_response.json()["suggestions"][0]
+    assert suggestion["toxicity_label"] == 1
+    assert suggestion["constructiveness_label"] is None
+
+    apply_response = client.post(
+        "/api/mlflow/candidates/review",
+        headers=admin_headers,
+        json={
+            "updates": [
+                {
+                    "id": candidate_id,
+                    "action": "include_toxic",
+                    "decision": "accept",
+                    "pseudo_label": 1,
+                    "clear_constructiveness": True,
+                    "label_source": "gemini_assist",
+                    "label_confidence": "high",
+                    "reviewed_by_gemini": True,
+                }
+            ]
+        },
+    )
+    assert apply_response.status_code == 200
+    with sqlite3.connect(qa_env["feedback_db"]) as conn:
+        row = conn.execute(
+            """
+            SELECT gate_bucket, verification_status, pseudo_label, constructiveness_label,
+                   training_review_status, label_source, label_confidence
+            FROM mlflow_comment_item WHERE id = ?
+            """,
+            (candidate_id,),
+        ).fetchone()
+    assert row == ("accepted", "manual_accepted", 1, None, "manual_gemini", "gemini_assist", "high")
+
+    remaining = client.get("/api/mlflow/candidates", headers=admin_headers, params={"scope": "all_batches"})
+    preview = client.get("/api/mlflow/training-preview", headers=admin_headers, params={"scope": "all_batches"})
+    assert candidate_id not in {int(item["id"]) for item in remaining.json()["items"]}
+    preview_by_id = {int(item["id"]): item for item in preview.json()["items"]}
+    assert candidate_id in preview_by_id
+    assert preview_by_id[candidate_id]["training_review_status"] == "manual_gemini"
+    assert preview_by_id[candidate_id]["label_source"] == "gemini_assist"
 
 
 def test_mlflow_gemini_review_malformed_response_returns_502(client, qa_env, admin_headers, monkeypatch):

@@ -695,7 +695,9 @@ export default function App() {
     clearAdminSession();
     setMlflowMounted(false);
     setCurrentPage((page) =>
-      page === "admin_mlflow" || page === "mlflow" || page === "admin_system_settings" ? "admin_login" : page,
+      page === "admin_mlflow" || page === "mlflow" || page === "admin_system_settings" || page === "dataset_synthetic"
+        ? "admin_login"
+        : page,
     );
   }, [clearAdminSession]);
 
@@ -729,7 +731,10 @@ export default function App() {
   }, []);
 
   const handleNavigate = (page: string) => {
-    if ((page === "admin_mlflow" || page === "mlflow" || page === "admin_system_settings") && !adminSession?.token) {
+    if (
+      (page === "admin_mlflow" || page === "mlflow" || page === "admin_system_settings" || page === "dataset_synthetic")
+      && !adminSession?.token
+    ) {
       setCurrentPage("admin_login");
       return;
     }
@@ -1081,10 +1086,19 @@ export default function App() {
               />
             )}
 
-            {currentPage === "dataset" && <DatasetPage />}
+            {currentPage === "dataset" && (
+              <DatasetPage
+                showSyntheticPanel={Boolean(adminSession?.token)}
+                onOpenSynthetic={() => handleNavigate("dataset_synthetic")}
+              />
+            )}
 
-            {currentPage === "dataset_synthetic" && (
-              <SyntheticGenerationPage onBack={() => setCurrentPage("dataset")} />
+            {currentPage === "dataset_synthetic" && adminSession?.token && (
+              <SyntheticGenerationPage
+                onBack={() => setCurrentPage("dataset")}
+                adminToken={adminSession.token}
+                onAdminUnauthorized={handleAdminUnauthorized}
+              />
             )}
 
             {currentPage === "admin_login" && (

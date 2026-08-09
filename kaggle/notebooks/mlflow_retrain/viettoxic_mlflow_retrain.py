@@ -11,6 +11,7 @@
 # - Ban co the dung script `.py` hoac copy cell vao notebook UI tren Kaggle.
 
 # %%
+import hashlib
 import json
 import os
 import pathlib
@@ -18,6 +19,8 @@ import subprocess
 import sys
 import time
 import zipfile
+from datetime import datetime, timezone
+from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -26,6 +29,7 @@ WORKDIR.mkdir(parents=True, exist_ok=True)
 os.environ.setdefault("MLFLOW_ALLOW_FILE_STORE", "true")
 
 BUNDLE_URL = os.getenv("VIETTOXIC_BUNDLE_URL", "").strip()
+BUNDLE_CHECKSUM = os.getenv("VIETTOXIC_BUNDLE_CHECKSUM", "").strip().lower()
 BUNDLE_ZIP = WORKDIR / "mlflow_bundle.zip"
 BUNDLE_DIR = WORKDIR / "bundle"
 SEED = int(os.getenv("VIETTOXIC_SEED", "42"))
@@ -81,15 +85,30 @@ def download_bundle_if_configured() -> None:
         return
     print(f"Downloading bundle from: {BUNDLE_URL}")
     try:
-        with urlopen(BUNDLE_URL) as response:  # nosec B310
+        request = Request(
+            BUNDLE_URL,
+            headers={
+                "User-Agent": "viettoxic-kaggle-retrain/1.0",
+                "ngrok-skip-browser-warning": "1",
+            },
+        )
+        with urlopen(request) as response:  # nosec B310
             BUNDLE_ZIP.write_bytes(response.read())
         print(f"Saved: {BUNDLE_ZIP}")
+
+        if BUNDLE_CHECKSUM:
+            actual_checksum = hashlib.sha256(BUNDLE_ZIP.read_bytes()).hexdigest()
+            if actual_checksum != BUNDLE_CHECKSUM:
+                raise RuntimeError(
+                    f"Bundle checksum mismatch: expected={BUNDLE_CHECKSUM} actual={actual_checksum}"
+                )
+            print(f"Bundle SHA-256 verified: {actual_checksum}")
 
         BUNDLE_DIR.mkdir(parents=True, exist_ok=True)
         with zipfile.ZipFile(BUNDLE_ZIP, "r") as zf:
             zf.extractall(BUNDLE_DIR)
         print(f"Extracted to: {BUNDLE_DIR}")
-    except (HTTPError, URLError, zipfile.BadZipFile) as exc:
+    except (HTTPError, URLError, zipfile.BadZipFile, RuntimeError) as exc:
         msg = (
             f"Bundle download/extract failed ({exc}). "
             "Will continue and try resolving dataset from local paths (/kaggle/input or VIETTOXIC_DATASET_ROOT)."
@@ -189,8 +208,8 @@ def parse_binary_label(value: object) -> int | None:
     return parsed if parsed in (0, 1) else None
 
 
-def load_jsonl_dataset(path: pathlib.Path) -> list[dict[str, int | str]]:
-    rows: list[dict[str, int | str]] = []
+def load_jsonl_dataset(path: pathlib.Path) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
     skipped = 0
     with path.open("r", encoding="utf-8") as f:
         for line_no, raw in enumerate(f, start=1):
@@ -217,16 +236,18 @@ def load_jsonl_dataset(path: pathlib.Path) -> list[dict[str, int | str]]:
             if toxicity is None:
                 skipped += 1
                 continue
-            row: dict[str, int | str] = {"text": text.strip(), "toxicity": toxicity}
+            row: dict[str, Any] = {"text": text.strip(), "toxicity": toxicity}
             if constructiveness is not None:
                 row["constructiveness"] = constructiveness
+            if isinstance(item.get("meta"), dict):
+                row["meta"] = dict(item["meta"])
             rows.append(row)
     if skipped:
         print(f"[WARN] Skipped {skipped} malformed rows in {path}")
     return rows
 
 
-def downsample_rows(rows: list[dict[str, int | str]], max_rows: int) -> list[dict[str, int | str]]:
+def downsample_rows(rows: list[dict[str, Any]], max_rows: int) -> list[dict[str, Any]]:
     if max_rows <= 0 or len(rows) <= max_rows:
         return rows
     import random
@@ -237,8 +258,88 @@ def downsample_rows(rows: list[dict[str, int | str]], max_rows: int) -> list[dic
     return copied[:max_rows]
 
 
+def _mlflow_comment_id(row: dict[str, Any]) -> int | None:
+    meta = row.get("meta")
+    if not isinstance(meta, dict):
+        return None
+    # A clean_victsd_gold bundle can contain both accepted crawled comments and
+    # Gemini-generated comments that were reviewed and accepted in MLflow.
+    # Both carry the same durable mlflow_comment_id provenance contract.
+    source = str(meta.get("source") or "").strip().lower()
+    if source not in {"mlflowaccepted", "syntheticreviewed"}:
+        return None
+    try:
+        item_id = int(meta.get("mlflow_comment_id"))
+    except (TypeError, ValueError):
+        return None
+    return item_id if item_id > 0 else None
+
+
+def select_smoke_train_rows(
+    rows: list[dict[str, Any]],
+    max_rows: int,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Keep every accepted MLflow row and downsample only the gold remainder."""
+    mlflow_rows = [row for row in rows if _mlflow_comment_id(row) is not None]
+    gold_rows = [row for row in rows if _mlflow_comment_id(row) is None]
+    gold_limit = max(0, max_rows - len(mlflow_rows)) if max_rows > 0 else len(gold_rows)
+    selected_gold = downsample_rows(gold_rows, gold_limit)
+    selected = selected_gold + mlflow_rows
+    selected_mlflow_ids = sorted(
+        item_id for item_id in (_mlflow_comment_id(row) for row in selected) if item_id is not None
+    )
+    return selected, {
+        "raw_train": len(rows),
+        "raw_gold": len(gold_rows),
+        "raw_mlflow": len(mlflow_rows),
+        "used_train": len(selected),
+        "used_gold": len(selected_gold),
+        "used_mlflow": len(selected_mlflow_ids),
+        "mlflow_comment_ids": selected_mlflow_ids,
+        "gold_downsampled": max(0, len(gold_rows) - len(selected_gold)),
+        "max_train_requested": max_rows,
+    }
+
+
+def load_expected_mlflow_ids() -> list[int] | None:
+    report_path = BUNDLE_DIR / "build_report.json"
+    if not report_path.exists():
+        return None
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Invalid bundle build_report.json: {exc}") from exc
+    raw_ids = report.get("included_mlflow_ids") if isinstance(report, dict) else None
+    if not isinstance(raw_ids, list):
+        raise RuntimeError("Bundle build_report.json is missing included_mlflow_ids")
+    try:
+        return sorted({int(item_id) for item_id in raw_ids})
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("Bundle build_report.json contains invalid included_mlflow_ids") from exc
+
+
+def verify_smoke_mlflow_coverage(selected_ids: list[int], expected_ids: list[int] | None) -> dict[str, Any]:
+    expected = sorted(set(expected_ids if expected_ids is not None else selected_ids))
+    selected = sorted(set(selected_ids))
+    missing = sorted(set(expected) - set(selected))
+    unexpected = sorted(set(selected) - set(expected)) if expected_ids is not None else []
+    if missing or unexpected:
+        raise RuntimeError(
+            "LR smoke dataset provenance mismatch: "
+            f"expected={expected} selected={selected} missing={missing} unexpected={unexpected}"
+        )
+    ids_sha256 = hashlib.sha256(",".join(str(item_id) for item_id in selected).encode("utf-8")).hexdigest()
+    return {
+        "expected_mlflow_count": len(expected),
+        "included_mlflow_count": len(selected),
+        "included_all_expected_mlflow": selected == expected,
+        "included_mlflow_ids": selected,
+        "included_mlflow_ids_sha256": ids_sha256,
+    }
+
+
 def evaluate_split(name: str, y_true: list[int], y_pred: list[int], positive_name: str = "toxic") -> dict[str, float]:
-    from sklearn.metrics import accuracy_score, f1_score
+    from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 
     metrics = {
         "accuracy": float(accuracy_score(y_true, y_pred)),
@@ -246,6 +347,8 @@ def evaluate_split(name: str, y_true: list[int], y_pred: list[int], positive_nam
         "f1_positive": float(f1_score(y_true, y_pred, pos_label=1, zero_division=0)),
         f"f1_{positive_name}": float(f1_score(y_true, y_pred, pos_label=1, zero_division=0)),
         "f1_negative": float(f1_score(y_true, y_pred, pos_label=0, zero_division=0)),
+        "precision": float(precision_score(y_true, y_pred, pos_label=1, zero_division=0)),
+        "recall": float(recall_score(y_true, y_pred, pos_label=1, zero_division=0)),
     }
     if positive_name == "toxic":
         metrics["f1_clean"] = metrics["f1_negative"]
@@ -423,6 +526,8 @@ def maybe_import_artifact(run_name: str, artifact_path: str) -> dict | None:
 
 
 def run_smoke_retrain() -> dict:
+    started_at = datetime.now(timezone.utc)
+    started_perf = time.perf_counter()
     ensure_python_package("sklearn", "scikit-learn")
     ensure_python_package("joblib")
     if MLFLOW_ENABLED:
@@ -430,13 +535,26 @@ def run_smoke_retrain() -> dict:
 
     from sklearn.feature_extraction.text import TfidfVectorizer
     from sklearn.linear_model import LogisticRegression
+    from sklearn.metrics import confusion_matrix
     import joblib
 
     dataset_paths, bundle_profile = resolve_dataset_paths()
     print(f"Resolved dataset profile: {bundle_profile}")
     print(f"Dataset files: {dataset_paths}")
 
-    train_rows = downsample_rows(load_jsonl_dataset(dataset_paths["train"]), SMOKE_MAX_TRAIN)
+    raw_train_rows = load_jsonl_dataset(dataset_paths["train"])
+    train_rows, train_selection = select_smoke_train_rows(raw_train_rows, SMOKE_MAX_TRAIN)
+    expected_mlflow_ids = load_expected_mlflow_ids()
+    coverage = verify_smoke_mlflow_coverage(train_selection["mlflow_comment_ids"], expected_mlflow_ids)
+    dataset_evidence = {
+        **train_selection,
+        **coverage,
+        "bundle_sha256": BUNDLE_CHECKSUM or None,
+        "bundle_profile": bundle_profile,
+        "dataset_source": {name: str(path) for name, path in dataset_paths.items()},
+        "seed": SEED,
+    }
+    print(f"Dataset evidence: {json.dumps(dataset_evidence, ensure_ascii=False)}")
     val_rows = downsample_rows(load_jsonl_dataset(dataset_paths["validation"]), SMOKE_MAX_VAL)
     test_rows = downsample_rows(load_jsonl_dataset(dataset_paths["test"]), SMOKE_MAX_TEST)
 
@@ -482,6 +600,8 @@ def run_smoke_retrain() -> dict:
 
     val_metrics = evaluate_split("validation_toxicity", y_val, val_pred.tolist(), positive_name="toxic")
     test_metrics = evaluate_split("test_toxicity", y_test, test_pred.tolist(), positive_name="toxic")
+    val_tn, val_fp, val_fn, val_tp = confusion_matrix(y_val, val_pred, labels=[0, 1]).ravel().tolist()
+    test_tn, test_fp, test_fn, test_tp = confusion_matrix(y_test, test_pred, labels=[0, 1]).ravel().tolist()
 
     constructiveness_payload = None
     constructiveness_model = None
@@ -553,6 +673,7 @@ def run_smoke_retrain() -> dict:
     constructiveness_model_path = artifact_dir / "model_constructiveness_lr.joblib"
     vectorizer_path = artifact_dir / "vectorizer.joblib"
     metrics_path = artifact_dir / "metrics.json"
+    evidence_path = artifact_dir / "training_evidence.json"
     summary_path = artifact_dir / "run_summary.json"
     artifact_zip_path = WORKDIR / f"{RUN_NAME}.zip"
 
@@ -561,12 +682,24 @@ def run_smoke_retrain() -> dict:
         joblib.dump(constructiveness_model, constructiveness_model_path)
     joblib.dump(vectorizer, vectorizer_path)
 
+    finished_at = datetime.now(timezone.utc)
+    duration_seconds = time.perf_counter() - started_perf
+    dataset_evidence.update(
+        {
+            "validation_used": len(val_rows),
+            "test_used": len(test_rows),
+            "started_at": started_at.isoformat(),
+            "finished_at": finished_at.isoformat(),
+            "duration_seconds": round(duration_seconds, 3),
+        }
+    )
     metrics_payload = {
         "run_name": RUN_NAME,
         "mode": "smoke_retrain_tfidf_lr_multitask",
         "bundle_profile": bundle_profile,
         "tracking_uri": MLFLOW_TRACKING_URI if MLFLOW_ENABLED else None,
         "sizes": {"train": len(train_rows), "validation": len(val_rows), "test": len(test_rows)},
+        "dataset_evidence": dataset_evidence,
         "tasks": ["toxicity", "constructiveness"],
         "validation": val_metrics,
         "test": test_metrics,
@@ -580,8 +713,13 @@ def run_smoke_retrain() -> dict:
             },
         },
         "constructiveness": constructiveness_payload,
+        "confusion_matrix": {
+            "validation": {"tn": val_tn, "fp": val_fp, "fn": val_fn, "tp": val_tp},
+            "test": {"tn": test_tn, "fp": test_fp, "fn": test_fn, "tp": test_tp},
+        },
     }
     metrics_path.write_text(json.dumps(metrics_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    evidence_path.write_text(json.dumps(dataset_evidence, ensure_ascii=False, indent=2), encoding="utf-8")
 
     mlflow_logged = False
     if MLFLOW_ENABLED:
@@ -610,6 +748,7 @@ def run_smoke_retrain() -> dict:
                     mlflow.log_artifact(str(constructiveness_model_path))
                 mlflow.log_artifact(str(vectorizer_path))
                 mlflow.log_artifact(str(metrics_path))
+                mlflow.log_artifact(str(evidence_path))
             mlflow_logged = True
         except Exception as exc:
             print(f"[WARN] MLflow logging skipped: {type(exc).__name__}: {exc}")

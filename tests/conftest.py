@@ -53,6 +53,7 @@ def qa_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict:
     monkeypatch.setenv("VIETTOXIC_ADMIN_USERNAME", "admin")
     monkeypatch.setenv("VIETTOXIC_ADMIN_PASSWORD", "admin-password")
     monkeypatch.setenv("VIETTOXIC_ADMIN_SESSION_SECRET", "test-admin-session-secret")
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
 
     app_module.init_feedback_db()
 

@@ -7,10 +7,15 @@ import subprocess
 import threading
 import time
 import uuid
+import zipfile
 from pathlib import Path
 from typing import Any, Dict, Optional
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import Response
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
@@ -66,6 +71,7 @@ REAL_NOTEBOOK_SOURCE = Path(
         str(BASE_DIR / "kaggle" / "notebooks" / "mlflow_retrain" / "viettoxic_mlflow_retrain.py"),
     ).strip()
 )
+LOCAL_BACKEND_BASE_URL = os.getenv("KAGGLE_LOCAL_BACKEND_BASE_URL", "http://127.0.0.1:8000").strip().rstrip("/")
 
 _LOCK = threading.Lock()
 
@@ -95,6 +101,8 @@ class TriggerRequest(BaseModel):
     model_kind: Optional[str] = None
     training_mode: Optional[str] = None
     base_model: Optional[str] = None
+    bundle_url: Optional[str] = None
+    bundle_checksum: Optional[str] = None
     requested_at: Optional[str] = None
     notebook_url: Optional[str] = None
 
@@ -284,7 +292,9 @@ def _build_real_script_content(payload: TriggerRequest) -> str:
     source_text = notebook_source.read_text(encoding="utf-8-sig").replace("\ufeff", "").replace("ï»¿", "")
     env_overrides = {
         "VIETTOXIC_TEST_MODE": resolved_test_mode,
-        "VIETTOXIC_BUNDLE_URL": _resolve_bundle_url(payload.batch_id, payload.run_id),
+        "VIETTOXIC_BUNDLE_URL": (payload.bundle_url or "").strip() or _resolve_bundle_url(payload.batch_id, payload.run_id),
+        "VIETTOXIC_BUNDLE_CHECKSUM": (payload.bundle_checksum or "").strip(),
+        "VIETTOXIC_BUNDLE_DOWNLOAD_REQUIRED": "true" if (payload.bundle_url or "").strip() else "false",
         "VIETTOXIC_RUN_NAME": payload.run_id,
         "VIETTOXIC_IMPORT_API_URL": REAL_IMPORT_API_URL,
         "VIETTOXIC_IMPORT_API_TOKEN": REAL_IMPORT_API_TOKEN,
@@ -511,6 +521,31 @@ def _run_kaggle_push_with_retry(job_dir: Path) -> str:
     raise RuntimeError(f"Command failed after retries: {' '.join(cmd)}")
 
 
+def _training_zip_score(path: Path) -> Optional[int]:
+    if path.suffix.lower() != ".zip" or path.name.lower() == "mlflow_bundle.zip":
+        return None
+    try:
+        with zipfile.ZipFile(path, "r") as zf:
+            members = [name.lower() for name in zf.namelist() if not name.endswith("/")]
+    except (OSError, zipfile.BadZipFile):
+        return None
+
+    basenames = {Path(name).name for name in members}
+    has_metrics = "metrics.json" in basenames
+    has_lr_model = bool({"model_lr.joblib", "vectorizer.joblib"} & basenames)
+    has_phobert_model = "config.json" in basenames and bool(
+        {"model.safetensors", "pytorch_model.bin"} & basenames
+    )
+    has_model = has_lr_model or has_phobert_model
+    if has_metrics and has_model:
+        return 0
+    if path.name.lower().startswith("best_model") and has_model:
+        return 1
+    if has_model:
+        return 2
+    return None
+
+
 def _pick_artifact_file(output_dir: Path) -> Optional[Path]:
     if not output_dir.exists() or not output_dir.is_dir():
         return None
@@ -530,22 +565,25 @@ def _pick_artifact_file(output_dir: Path) -> Optional[Path]:
         if filtered:
             candidates = filtered
 
-    preferred = [
-        p
-        for p in candidates
-        if p.suffix.lower() == ".zip"
-        and (
-            p.name.lower().startswith("best_model")
-            or "model" in p.name.lower()
-            or "phobert" in p.name.lower()
-        )
-        and "results" not in p.name.lower()
+    scored_zips = [
+        (score, -path.stat().st_mtime, path)
+        for path in candidates
+        if (score := _training_zip_score(path)) is not None
     ]
-    if preferred:
-        candidates = preferred
+    if scored_zips:
+        scored_zips.sort(key=lambda item: (item[0], item[1], str(item[2])))
+        return scored_zips[0][2]
 
-    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    return candidates[0]
+    direct_models = [
+        path
+        for path in candidates
+        if path.suffix.lower() in {".joblib", ".bin", ".pt", ".tgz", ".gz"}
+        and ("model" in path.name.lower() or path.name.lower().startswith("best_"))
+    ]
+    if direct_models:
+        direct_models.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+        return direct_models[0]
+    return None
 
 
 def _resolve_artifact_uri(path: Path, job: Dict[str, Any]) -> str:
@@ -560,6 +598,21 @@ def _resolve_artifact_uri(path: Path, job: Dict[str, Any]) -> str:
         except Exception:
             pass
     return f"file://{path.resolve().as_posix()}"
+
+
+def _refresh_completed_artifact(job: Dict[str, Any]) -> None:
+    """Repair terminal jobs that were previously pointed at the input bundle."""
+    work_dir = Path(str(job.get("work_dir") or RUNTIME_DIR))
+    artifact_file = _pick_artifact_file(work_dir / "output")
+    if artifact_file is None:
+        return
+
+    artifact_uri = _resolve_artifact_uri(artifact_file, job)
+    artifact_checksum = _sha256_file(artifact_file)
+    if artifact_uri != job.get("artifact_uri") or artifact_checksum != job.get("artifact_checksum"):
+        job["artifact_uri"] = artifact_uri
+        job["artifact_checksum"] = artifact_checksum
+        job["error_message"] = None
 
 
 def _trigger_mock(payload: TriggerRequest) -> Dict[str, Any]:
@@ -815,6 +868,8 @@ def _download_real_output_artifact(job_id: str) -> None:
 
 def _status_real(job_id: str, job: Dict[str, Any], jobs: Dict[str, Any]) -> Dict[str, Any]:
     status = str(job.get("status") or "running").strip().lower()
+    if status == "completed":
+        _refresh_completed_artifact(job)
     kernel_ref = str(job.get("kernel_ref") or "").strip()
     push_error = str(job.get("push_error") or "").strip()
     if not push_error and "push_error" not in job:
@@ -885,7 +940,32 @@ def _status_real(job_id: str, job: Dict[str, Any], jobs: Dict[str, Any]) -> Dict
 
 @app.get("/health")
 def health() -> Dict[str, str]:
-    return {"status": "ok", "mode": _webhook_mode()}
+    return {"status": "ok", "mode": _webhook_mode(), "artifact_picker": "zip-content-v2"}
+
+
+@app.get("/api/mlflow/kaggle/bundle")
+def kaggle_bundle_proxy(run_id: str = Query(..., min_length=1), token: str = Query(..., min_length=16)) -> Response:
+    """Expose only the token-protected bundle route through the public webhook tunnel."""
+    backend_url = (
+        f"{LOCAL_BACKEND_BASE_URL}/api/mlflow/kaggle/bundle?"
+        + urlencode({"run_id": run_id, "token": token})
+    )
+    try:
+        request = Request(backend_url, method="GET")
+        with urlopen(request, timeout=60) as upstream:  # nosec B310 - fixed local backend origin
+            content = upstream.read()
+            media_type = upstream.headers.get_content_type() or "application/zip"
+            disposition = upstream.headers.get("Content-Disposition")
+    except HTTPError as exc:
+        detail = (exc.read() or b"").decode("utf-8", errors="replace")[:500]
+        raise HTTPException(status_code=exc.code, detail=f"Backend bundle rejected request: {detail}") from exc
+    except (URLError, TimeoutError, OSError) as exc:
+        raise HTTPException(status_code=502, detail=f"Local backend bundle route is unreachable: {exc}") from exc
+
+    headers = {"Cache-Control": "no-store"}
+    if disposition:
+        headers["Content-Disposition"] = disposition
+    return Response(content=content, media_type=media_type, headers=headers)
 
 
 @app.post("/kaggle/trigger")

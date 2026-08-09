@@ -1,6 +1,15 @@
 import { useEffect, useMemo, useState, type MouseEvent } from "react";
 import { Button } from "@/app/components/ui/button";
+import { Badge } from "@/app/components/ui/badge";
 import { Card } from "@/app/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/app/components/ui/dialog";
 import { Label } from "@/app/components/ui/label";
 import {
   Table,
@@ -56,13 +65,31 @@ interface SyntheticGenerateResponse {
   };
 }
 
-interface SyntheticExportResponse {
-  path: string;
-  count: number;
-}
-
 interface SyntheticGenerationPageProps {
   onBack: () => void;
+  adminToken: string;
+  onAdminUnauthorized: () => void;
+}
+
+interface SyntheticTransferSummary {
+  batch_id?: string | null;
+  eligible: number;
+  toxic: number;
+  clean: number;
+  constructive: number;
+  non_constructive: number;
+  constructiveness_masked: number;
+  already_transferred: number;
+  ids: number[];
+}
+
+interface SyntheticGeminiSuggestion {
+  id: number;
+  toxicity_label: 0 | 1;
+  constructiveness_label: 0 | 1 | null;
+  confidence: "low" | "medium" | "high";
+  reason: string;
+  action: "apply" | "review_more";
 }
 
 const RAW_API_BASE = import.meta.env.VITE_API_BASE_URL?.trim() ?? "";
@@ -119,7 +146,7 @@ const fetchApiWithFallback = async (path: string, init?: RequestInit): Promise<R
   throw new Error(`Cannot reach backend API for ${path}. ${(lastError as Error | null)?.message || ""}`.trim());
 };
 
-export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps) {
+export function SyntheticGenerationPage({ onBack, adminToken, onAdminUnauthorized }: SyntheticGenerationPageProps) {
   const { t } = useI18n();
   const [domain, setDomain] = useState<"education" | "news" | "politic">("education");
   const [style, setStyle] = useState<"formal" | "informal">("formal");
@@ -134,8 +161,6 @@ export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps
   const [editedConstructivenessMap, setEditedConstructivenessMap] = useState<Record<number, 0 | 1 | null>>({});
   const [stats, setStats] = useState<SyntheticStats | null>(null);
   const [batchIdFilter, setBatchIdFilter] = useState<string>("");
-  const [acceptedFilter, setAcceptedFilter] = useState<"all" | "accepted" | "rejected">("all");
-  const [viewMode, setViewMode] = useState<"queue" | "reviewed">("queue");
 
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(25);
@@ -145,12 +170,34 @@ export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps
   const [generateLoading, setGenerateLoading] = useState(false);
   const [saveLoading, setSaveLoading] = useState(false);
   const [deleteLoading, setDeleteLoading] = useState(false);
+  const [transferLoading, setTransferLoading] = useState(false);
+  const [transferDialogOpen, setTransferDialogOpen] = useState(false);
+  const [transferSummary, setTransferSummary] = useState<SyntheticTransferSummary | null>(null);
+  const [geminiSuggestions, setGeminiSuggestions] = useState<Record<number, SyntheticGeminiSuggestion>>({});
+  const [geminiReviewing, setGeminiReviewing] = useState(false);
+  const [geminiApplying, setGeminiApplying] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
+
+  const authorizedFetch = async (path: string, init?: RequestInit): Promise<Response> => {
+    const headers = new Headers(init?.headers);
+    headers.set("Authorization", `Bearer ${adminToken}`);
+    const response = await fetchApiWithFallback(path, { ...init, headers });
+    if (response.status === 401) {
+      onAdminUnauthorized();
+      throw new Error(t("synthetic.adminSessionExpired"));
+    }
+    return response;
+  };
 
   const acceptedCountCurrentPage = useMemo(() => {
     return rows.filter((row) => checkedMap[row.id] ?? row.is_accepted).length;
   }, [rows, checkedMap]);
+
+  const visibleGeminiSuggestions = useMemo(
+    () => rows.map((row) => geminiSuggestions[row.id]).filter(Boolean) as SyntheticGeminiSuggestion[],
+    [geminiSuggestions, rows],
+  );
 
   const constructivenessStats = useMemo(() => {
     const byConstructiveness = stats?.by_constructiveness || {};
@@ -169,14 +216,9 @@ export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps
         include_stats: "true",
       });
       if (batchIdFilter.trim()) params.set("batch_id", batchIdFilter.trim());
-      if (viewMode === "queue") {
-        params.set("reviewed", "false");
-      } else {
-        params.set("reviewed", "true");
-        if (acceptedFilter !== "all") params.set("accepted", acceptedFilter === "accepted" ? "true" : "false");
-      }
+      params.set("reviewed", "false");
 
-      const response = await fetchApiWithFallback(`/api/dataset/synthetic/preview?${params.toString()}`);
+      const response = await authorizedFetch(`/api/dataset/synthetic/preview?${params.toString()}`);
       const data = (await response.json()) as SyntheticPreviewResponse;
       if (!response.ok) {
         throw new Error(JSON.stringify(data));
@@ -211,14 +253,14 @@ export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps
 
   useEffect(() => {
     void fetchPreview(page, pageSize);
-  }, [page, pageSize, batchIdFilter, acceptedFilter, viewMode]);
+  }, [page, pageSize, batchIdFilter]);
 
   const handleGenerate = async () => {
     setGenerateLoading(true);
     setStatus(null);
     setError(null);
     try {
-      const response = await fetchApiWithFallback("/api/dataset/synthetic/generate", {
+      const response = await authorizedFetch("/api/dataset/synthetic/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ domain, style, label, constructiveness, count }),
@@ -235,8 +277,6 @@ export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps
         .join(" | ");
 
       setBatchIdFilter(data.batch_id);
-      setViewMode("queue");
-      setAcceptedFilter("all");
       setPage(1);
       setStatus(t("synthetic.generatedStatus", { generated: data.generated_count, requested: data.requested_count, batch: data.batch_id, bucket: bucketText }));
       await fetchPreview(1, pageSize);
@@ -311,32 +351,98 @@ export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps
     toggleChecked(rowId);
   };
 
+  const handleGeminiReview = async () => {
+    const ids = rows
+      .filter((row) => checkedMap[row.id] ?? row.is_accepted)
+      .map((row) => row.id);
+    if (!ids.length) {
+      setStatus(t("synthetic.selectRowsForGemini"));
+      return;
+    }
+
+    setGeminiReviewing(true);
+    setStatus(null);
+    setError(null);
+    try {
+      const response = await authorizedFetch("/api/dataset/synthetic/gemini-review", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids }),
+      });
+      const data = (await response.json()) as { suggestions?: SyntheticGeminiSuggestion[]; reviewed?: number };
+      if (!response.ok) throw new Error(JSON.stringify(data));
+      const next = { ...geminiSuggestions };
+      (data.suggestions || []).forEach((suggestion) => {
+        next[suggestion.id] = suggestion;
+      });
+      setGeminiSuggestions(next);
+      setStatus(t("synthetic.geminiReviewed", { count: data.reviewed || 0 }));
+    } catch (err) {
+      const message = err instanceof Error ? err.message : t("synthetic.geminiReviewFailed");
+      setError(message);
+    } finally {
+      setGeminiReviewing(false);
+    }
+  };
+
+  const handleApplyGeminiSuggestions = async (suggestions: SyntheticGeminiSuggestion[]) => {
+    const updates = suggestions.flatMap((suggestion) => {
+      const row = rows.find((item) => item.id === suggestion.id);
+      if (!row) return [];
+      return [{
+        id: row.id,
+        is_accepted: checkedMap[row.id] ?? row.is_accepted,
+        text: (editedTextMap[row.id] ?? row.text).trim(),
+        label: suggestion.toxicity_label,
+        constructiveness: suggestion.constructiveness_label,
+        review_method: "gemini_assisted" as const,
+        label_confidence: suggestion.confidence,
+      }];
+    });
+    if (!updates.length) return;
+
+    setGeminiApplying(true);
+    setStatus(null);
+    setError(null);
+    try {
+      const response = await authorizedFetch("/api/dataset/synthetic/review", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ updates }),
+      });
+      const data = (await response.json()) as { updated: number };
+      if (!response.ok) throw new Error(JSON.stringify(data));
+      const appliedIds = new Set(suggestions.map((item) => item.id));
+      setGeminiSuggestions((current) =>
+        Object.fromEntries(Object.entries(current).filter(([id]) => !appliedIds.has(Number(id)))),
+      );
+      setStatus(t("synthetic.geminiApplied", { count: data.updated }));
+      await fetchPreview(page, pageSize);
+      await handleOpenTransferDialog();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : t("synthetic.geminiApplyFailed");
+      setError(message);
+    } finally {
+      setGeminiApplying(false);
+    }
+  };
+
   const handleSaveReview = async () => {
     const updates = rows
       .map((row) => {
         const nextAccepted = checkedMap[row.id] ?? row.is_accepted;
         const nextText = (editedTextMap[row.id] ?? row.text).trim();
         const nextLabel = editedLabelMap[row.id] ?? (row.label === 1 ? 1 : 0);
-        const currentConstructiveness =
-          row.constructiveness === 1 ? 1 : row.constructiveness === 0 ? 0 : null;
         const nextConstructiveness =
           editedConstructivenessMap[row.id] === 1 ? 1 : editedConstructivenessMap[row.id] === 0 ? 0 : null;
-        const changed =
-          nextAccepted !== row.is_accepted ||
-          nextText !== row.text ||
-          nextLabel !== row.label ||
-          nextConstructiveness !== currentConstructiveness;
         return {
           id: row.id,
           is_accepted: nextAccepted,
           text: nextText,
           label: nextLabel,
           constructiveness: nextConstructiveness,
-          changed,
         };
-      })
-      .filter((item) => item.changed)
-      .map(({ id, is_accepted, text, label, constructiveness }) => ({ id, is_accepted, text, label, constructiveness }));
+      });
 
     if (!updates.length) {
       setStatus(t("synthetic.noChanges"));
@@ -347,7 +453,7 @@ export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps
     setStatus(null);
     setError(null);
     try {
-      const response = await fetchApiWithFallback("/api/dataset/synthetic/review", {
+      const response = await authorizedFetch("/api/dataset/synthetic/review", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ updates }),
@@ -358,34 +464,12 @@ export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps
       }
       setStatus(t("synthetic.savedReview", { count: data.updated }));
       await fetchPreview(page, pageSize);
+      await handleOpenTransferDialog();
     } catch (err) {
       const message = err instanceof Error ? err.message : t("synthetic.saveFailed");
       setError(message);
     } finally {
       setSaveLoading(false);
-    }
-  };
-
-  const handleExport = async () => {
-    setStatus(null);
-    setError(null);
-    try {
-      const response = await fetchApiWithFallback("/api/dataset/synthetic/export", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          batch_id: batchIdFilter.trim() || undefined,
-          accepted_only: true,
-        }),
-      });
-      const data = (await response.json()) as SyntheticExportResponse;
-      if (!response.ok) {
-        throw new Error(JSON.stringify(data));
-      }
-      setStatus(t("synthetic.exportDone", { count: data.count, path: data.path }));
-    } catch (err) {
-      const message = err instanceof Error ? err.message : t("synthetic.exportFailed");
-      setError(message);
     }
   };
 
@@ -408,7 +492,7 @@ export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps
     setStatus(null);
     setError(null);
     try {
-      const response = await fetchApiWithFallback("/api/dataset/synthetic/delete", {
+      const response = await authorizedFetch("/api/dataset/synthetic/delete", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ids: selectedIds }),
@@ -424,6 +508,64 @@ export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps
       setError(message);
     } finally {
       setDeleteLoading(false);
+    }
+  };
+
+  const handleOpenTransferDialog = async () => {
+    setTransferLoading(true);
+    setStatus(null);
+    setError(null);
+    try {
+      const params = new URLSearchParams();
+      if (batchIdFilter.trim()) params.set("batch_id", batchIdFilter.trim());
+      const query = params.toString();
+      const response = await authorizedFetch(
+        `/api/dataset/synthetic/training-preview-summary${query ? `?${query}` : ""}`,
+      );
+      const data = (await response.json()) as SyntheticTransferSummary;
+      if (!response.ok) {
+        throw new Error(JSON.stringify(data));
+      }
+      setTransferSummary(data);
+      setTransferDialogOpen(true);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : t("synthetic.transferSummaryFailed");
+      setError(message);
+    } finally {
+      setTransferLoading(false);
+    }
+  };
+
+  const handleConfirmTransfer = async () => {
+    if (!transferSummary?.ids.length) return;
+    setTransferLoading(true);
+    setError(null);
+    try {
+      const response = await authorizedFetch("/api/dataset/synthetic/transfer-to-training-preview", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids: transferSummary.ids }),
+      });
+      const data = (await response.json()) as { transferred: number; toxic: number; clean: number; skipped: number };
+      if (!response.ok) {
+        throw new Error(JSON.stringify(data));
+      }
+      setTransferDialogOpen(false);
+      setTransferSummary(null);
+      setStatus(
+        t("synthetic.transferDone", {
+          count: data.transferred,
+          toxic: data.toxic,
+          clean: data.clean,
+          skipped: data.skipped,
+        }),
+      );
+      await fetchPreview(page, pageSize);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : t("synthetic.transferFailed");
+      setError(message);
+    } finally {
+      setTransferLoading(false);
     }
   };
 
@@ -516,11 +658,20 @@ export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps
             <Button variant="outline" onClick={handleUnselectAll} disabled={!rows.length}>
               {t("synthetic.unselectAllPage")}
             </Button>
+            <Button variant="outline" onClick={handleGeminiReview} disabled={geminiReviewing || !hasAnySelected}>
+              {geminiReviewing ? t("synthetic.geminiReviewing") : t("synthetic.geminiReview")}
+            </Button>
+            <Button
+              variant="outline"
+              onClick={() => void handleApplyGeminiSuggestions(visibleGeminiSuggestions)}
+              disabled={geminiApplying || visibleGeminiSuggestions.length === 0}
+            >
+              {geminiApplying
+                ? t("synthetic.geminiApplying")
+                : t("synthetic.applyGeminiAll", { count: visibleGeminiSuggestions.length })}
+            </Button>
             <Button variant="outline" onClick={handleSaveReview} disabled={saveLoading || !rows.length}>
               {saveLoading ? t("synthetic.saving") : t("synthetic.saveReview")}
-            </Button>
-            <Button variant="outline" onClick={handleExport} disabled={viewMode !== "reviewed"}>
-              {t("synthetic.exportAccepted")}
             </Button>
             <Button variant="destructive" onClick={handleDeleteSelected} disabled={!hasAnySelected || deleteLoading}>
               {deleteLoading ? t("synthetic.deleting") : t("synthetic.deleteSelected")}
@@ -531,13 +682,11 @@ export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps
             {status && <span className="text-sm text-muted-foreground">{status}</span>}
           </div>
           {error && <p className="mt-3 text-sm text-destructive">{error}</p>}
-          <p className="mt-2 text-xs text-muted-foreground">
-            {viewMode === "queue" ? t("synthetic.queueHint") : t("synthetic.reviewedHint")}
-          </p>
+          <p className="mt-2 text-xs text-muted-foreground">{t("synthetic.queueOnlyHint")}</p>
         </Card>
 
         <Card className="bg-card p-6 shadow-lg">
-          <div className="grid grid-cols-1 md:grid-cols-5 gap-4 items-end">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 items-end">
             <div>
               <Label className="text-sm text-muted-foreground">{t("synthetic.batchId")}</Label>
               <input
@@ -549,24 +698,6 @@ export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps
                 }}
                 placeholder={t("synthetic.filterByBatch")}
               />
-            </div>
-            <div>
-              <Label className="text-sm text-muted-foreground">{t("synthetic.viewMode")}</Label>
-              <select
-                className="mt-2 w-full border rounded-lg px-3 py-2 text-sm"
-                value={viewMode}
-                onChange={(event) => {
-                  const nextMode = event.target.value as "queue" | "reviewed";
-                  setViewMode(nextMode);
-                  if (nextMode === "queue") {
-                    setAcceptedFilter("all");
-                  }
-                  setPage(1);
-                }}
-              >
-                <option value="queue">{t("synthetic.queueUnreviewed")}</option>
-                <option value="reviewed">{t("synthetic.dbReviewed")}</option>
-              </select>
             </div>
             <div>
               <Label className="text-sm text-muted-foreground">{t("synthetic.pageSize")}</Label>
@@ -585,24 +716,8 @@ export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps
                 ))}
               </select>
             </div>
-            <div>
-              <Label className="text-sm text-muted-foreground">{t("synthetic.acceptedFilter")}</Label>
-              <select
-                className="mt-2 w-full border rounded-lg px-3 py-2 text-sm"
-                value={acceptedFilter}
-                onChange={(event) => {
-                  setAcceptedFilter(event.target.value as "all" | "accepted" | "rejected");
-                  setPage(1);
-                }}
-                disabled={viewMode !== "reviewed"}
-              >
-                <option value="all">{t("synthetic.filterAll")}</option>
-                <option value="accepted">{t("synthetic.filterAccepted")}</option>
-                <option value="rejected">{t("synthetic.filterRejected")}</option>
-              </select>
-            </div>
             <div className="text-sm text-muted-foreground">
-              {t("synthetic.acceptedPage", { count: acceptedCountCurrentPage, total: rows.length })}
+              {t("synthetic.unreviewedPage", { selected: acceptedCountCurrentPage, total: rows.length })}
             </div>
           </div>
         </Card>
@@ -637,6 +752,7 @@ export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps
                 const nextConstructiveness =
                   editedConstructivenessMap[row.id] === 1 ? 1 : editedConstructivenessMap[row.id] === 0 ? 0 : null;
                 const selected = checkedMap[row.id] ?? row.is_accepted;
+                const suggestion = geminiSuggestions[row.id];
                 return (
                   <TableRow
                     key={row.id}
@@ -670,6 +786,16 @@ export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps
                         <Button variant="outline" size="sm" onClick={() => void handlePasteRowText(row.id)}>
                           {t("synthetic.paste")}
                         </Button>
+                        {suggestion && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            disabled={geminiApplying}
+                            onClick={() => void handleApplyGeminiSuggestions([suggestion])}
+                          >
+                            {t("synthetic.applyGemini")}
+                          </Button>
+                        )}
                       </div>
                     </TableCell>
                     <TableCell>
@@ -686,6 +812,21 @@ export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps
                         <option value={1}>{t("synthetic.toxic")}</option>
                         <option value={0}>{t("synthetic.clean")}</option>
                       </select>
+                      <div className="mt-2 flex flex-col gap-1">
+                        <Badge variant={nextLabel === 1 ? "destructive" : "secondary"}>
+                          {t("synthetic.currentLabel")}: {nextLabel === 1 ? "Toxic" : "Clean"}
+                        </Badge>
+                        {suggestion && (
+                          <>
+                            <Badge variant="outline">
+                              Gemini: {suggestion.toxicity_label === 1 ? "Toxic" : "Clean"} · {suggestion.confidence}
+                            </Badge>
+                            {suggestion.reason && (
+                              <span className="max-w-[220px] text-xs text-muted-foreground">{suggestion.reason}</span>
+                            )}
+                          </>
+                        )}
+                      </div>
                     </TableCell>
                     <TableCell>
                       <select
@@ -702,6 +843,15 @@ export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps
                         <option value={1}>{t("synthetic.constructive")}</option>
                         <option value={0}>{t("synthetic.nonConstructive")}</option>
                       </select>
+                      {suggestion && (
+                        <Badge variant="outline" className="mt-2">
+                          Gemini: {suggestion.constructiveness_label == null
+                            ? "Masked"
+                            : suggestion.constructiveness_label === 1
+                              ? "Constructive"
+                              : "Non-constructive"}
+                        </Badge>
+                      )}
                     </TableCell>
                     <TableCell>{row.domain}</TableCell>
                     <TableCell>{row.style}</TableCell>
@@ -737,6 +887,56 @@ export function SyntheticGenerationPage({ onBack }: SyntheticGenerationPageProps
             </Button>
           </div>
         </Card>
+
+        <Dialog open={transferDialogOpen} onOpenChange={setTransferDialogOpen}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>{t("synthetic.transferDialogTitle")}</DialogTitle>
+              <DialogDescription>{t("synthetic.transferDialogDescription")}</DialogDescription>
+            </DialogHeader>
+            {transferSummary && (
+              <div className="space-y-4">
+                <div className="grid grid-cols-3 gap-3 text-center">
+                  <div className="rounded-lg border p-3">
+                    <p className="text-xs text-muted-foreground">{t("synthetic.transferTotal")}</p>
+                    <p className="mt-1 text-2xl font-semibold">{transferSummary.eligible}</p>
+                  </div>
+                  <div className="rounded-lg border p-3">
+                    <p className="text-xs text-muted-foreground">Toxic</p>
+                    <p className="mt-1 text-2xl font-semibold text-destructive">{transferSummary.toxic}</p>
+                  </div>
+                  <div className="rounded-lg border p-3">
+                    <p className="text-xs text-muted-foreground">Clean</p>
+                    <p className="mt-1 text-2xl font-semibold text-text-success">{transferSummary.clean}</p>
+                  </div>
+                </div>
+                <div className="rounded-lg bg-muted p-3 text-sm text-muted-foreground">
+                  {t("synthetic.transferConstructiveness", {
+                    constructive: transferSummary.constructive,
+                    nonConstructive: transferSummary.non_constructive,
+                    masked: transferSummary.constructiveness_masked,
+                  })}
+                  {transferSummary.already_transferred > 0 && (
+                    <p className="mt-2">
+                      {t("synthetic.transferAlreadySent", { count: transferSummary.already_transferred })}
+                    </p>
+                  )}
+                </div>
+              </div>
+            )}
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setTransferDialogOpen(false)} disabled={transferLoading}>
+                {t("synthetic.cancel")}
+              </Button>
+              <Button
+                onClick={handleConfirmTransfer}
+                disabled={transferLoading || !transferSummary?.eligible}
+              >
+                {transferLoading ? t("synthetic.processing") : t("synthetic.adminConfirmTransfer")}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
       </div>
     </div>
   );

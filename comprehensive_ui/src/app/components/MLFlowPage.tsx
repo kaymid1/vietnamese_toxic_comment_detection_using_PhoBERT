@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent, type ComponentProps, type MouseEvent, type ReactNode } from "react";
 import { AnimatePresence, motion } from "motion/react";
-import { Check, EyeOff, Lock, MessageCircle, Plus, RotateCcw, Sparkles, ThumbsUp, Unlock, X } from "lucide-react";
+import { BarChart3, Check, EyeOff, GripHorizontal, History, Lock, MessageCircle, Plus, RotateCcw, Sparkles, ThumbsUp, Unlock } from "lucide-react";
+import { Bar, BarChart, CartesianGrid, Cell, Legend, Pie, PieChart, ResponsiveContainer, Tooltip as RechartTooltip, XAxis, YAxis } from "recharts";
 import { toast } from "sonner";
 import { Card } from "@/app/components/ui/card";
 import { Button } from "@/app/components/ui/button";
@@ -11,6 +12,23 @@ import { Progress } from "@/app/components/ui/progress";
 import { Checkbox } from "@/app/components/ui/checkbox";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/app/components/ui/tooltip";
 import { getModelLabel } from "@/app/modelCatalog";
+import {
+  DEFAULT_MLFLOW_GATE_THRESHOLDS,
+  MlflowBadge,
+  MlflowTooltipBody,
+  formatGeminiAction,
+  formatMlflowConfidence,
+  getConstructivenessPresentation,
+  getDataSourcePresentation,
+  getGateBucketPresentation,
+  getLockPresentation,
+  getReviewStatusPresentation,
+  getScorePresentation,
+  getToxicityPresentation,
+  getTrainingSelectionPresentation,
+  getVerificationStatusPresentation,
+  makeMlflowTooltip,
+} from "@/app/mlflowPresentation";
 import {
   Dialog,
   DialogContent,
@@ -36,47 +54,9 @@ interface MLFlowPageProps {
 
 const MLFLOW_URLS_DRAFT_KEY = "viettoxic:mlflow:urlsText";
 const MLFLOW_MODEL_DRAFT_KEY = "viettoxic:mlflow:selectedModel";
+const MLFLOW_ACTIVE_TAB_KEY = "viettoxic:mlflow:activeTab";
 const MLFLOW_CLEAR_ALL_CONFIRM_TOKEN = "DELETE_ALL_MLFLOW_DATA";
-
-const formatToxicityLabel = (label?: number | null) => {
-  if (label === 1) return "Độc hại";
-  if (label === 0) return "Sạch";
-  return "Chưa có nhãn";
-};
-
-const formatConstructivenessLabel = (label?: number | null) => {
-  if (label === 1) return "Có tính xây dựng";
-  if (label === 0) return "Không rõ/không đóng góp";
-  return "Đang ẩn";
-};
-
-const formatConfidenceLabel = (confidence?: string | null) => {
-  if (confidence === "high") return "Tin cậy cao";
-  if (confidence === "medium") return "Tin cậy vừa";
-  if (confidence === "low") return "Tin cậy thấp";
-  return "Chưa rõ độ tin cậy";
-};
-
-const formatGateBucketLabel = (bucket?: string | null) => {
-  if (bucket === "accepted") return "Đã duyệt";
-  if (bucket === "candidate") return "Cần xem lại";
-  if (bucket === "discarded") return "Đã loại";
-  return bucket || "-";
-};
-
-const formatReviewStatusLabel = (status?: string | null) => {
-  if (status === "auto") return "Tự động";
-  if (status === "manual") return "Admin chỉnh";
-  if (status === "gemini_assist") return "Gemini hỗ trợ";
-  if (status === "removed") return "Đã bỏ khỏi train";
-  return status || "-";
-};
-
-const formatGeminiActionLabel = (action?: string | null) => {
-  if (action === "apply") return "Có thể áp dụng";
-  if (action === "review_more") return "Cần xem thêm";
-  return action || "-";
-};
+const KAGGLE_TERMINAL_STATUSES = new Set(["completed", "failed", "dry_run", "placeholder"]);
 
 type IconButtonWithTooltipProps = ComponentProps<typeof Button> & {
   label: string;
@@ -95,7 +75,9 @@ function IconButtonWithTooltip({ label, tooltip, children, ...buttonProps }: Ico
           </Button>
         </span>
       </TooltipTrigger>
-      <TooltipContent>{tooltip || label}</TooltipContent>
+      <TooltipContent>
+        <MlflowTooltipBody text={tooltip || makeMlflowTooltip(label, "Bấm để thực hiện thao tác này.")} />
+      </TooltipContent>
     </Tooltip>
   );
 }
@@ -137,6 +119,7 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
     overview,
     candidates,
     trainingPreview,
+    trainingPlan,
     candidateTotal,
     candidatePage,
     candidatePageSize,
@@ -155,8 +138,10 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
     refreshOverview,
     refreshCandidates,
     refreshTrainingPreview,
+    refreshTrainingPlan,
     reviewTrainingPreview,
     geminiReviewTrainingPreview,
+    geminiReviewCandidates,
     refreshReviewHistory,
     refreshCrawlHistory,
     reviewCandidates,
@@ -167,9 +152,11 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
     triggerDO,
     refreshDOPreflight,
     refreshDOStatus,
+    geminiEvaluateKaggleRun,
     clearDOSession,
     refreshCompare,
     promote,
+    rollback,
   } = useMlflowStore({ adminToken, onUnauthorized: onAdminUnauthorized });
 
   const [urlsText, setUrlsText] = useState(() => {
@@ -182,8 +169,13 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
   });
   const [selectedCandidateIds, setSelectedCandidateIds] = useState<number[]>([]);
   const [selectedPreviewIds, setSelectedPreviewIds] = useState<number[]>([]);
+  const [candidateGeminiSuggestions, setCandidateGeminiSuggestions] = useState<Record<number, MlflowGeminiReviewSuggestion>>({});
+  const [candidateGeminiReviewing, setCandidateGeminiReviewing] = useState(false);
+  const [candidateGeminiApplying, setCandidateGeminiApplying] = useState(false);
   const [geminiSuggestions, setGeminiSuggestions] = useState<Record<number, MlflowGeminiReviewSuggestion>>({});
   const [geminiReviewing, setGeminiReviewing] = useState(false);
+  const [geminiApplying, setGeminiApplying] = useState(false);
+  const [crawlHistoryOpen, setCrawlHistoryOpen] = useState(false);
   const [importModelName, setImportModelName] = useState("");
   const [importModelZipFile, setImportModelZipFile] = useState<File | null>(null);
   const [statusText, setStatusText] = useState<string | null>(null);
@@ -195,12 +187,21 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
     timeout_count?: number;
     total_urls?: number;
   } | null>(null);
-  const [activeTab, setActiveTab] = useState("step1");
+  const [activeTab, setActiveTab] = useState(() => {
+    const stored = safeReadLocalStorageString(MLFLOW_ACTIVE_TAB_KEY, "step1");
+    return ["step1", "step4", "step5"].includes(stored) ? stored : "step1";
+  });
   const [selectedModelKind, setSelectedModelKind] = useState<"phobert" | "lr_smoke">("phobert");
   const [selectedTrainingMode, setSelectedTrainingMode] = useState<"retrain" | "finetune">("finetune");
   const [balanceStrategy, setBalanceStrategy] = useState<"balanced_50_50" | "all">("balanced_50_50");
   const [finetuneBaseModel, setFinetuneBaseModel] = useState("");
+  const [promotionDialogOpen, setPromotionDialogOpen] = useState(false);
+  const [trainingPreviewListHeight, setTrainingPreviewListHeight] = useState(320);
+  const [kaggleTriggerPending, setKaggleTriggerPending] = useState(false);
+  const [geminiEvaluating, setGeminiEvaluating] = useState(false);
   const prevDoStatusRef = useRef<string>("idle");
+  const kaggleTriggerPendingRef = useRef(false);
+  const trainingPreviewResizeRef = useRef<{ pointerId: number; startY: number; startHeight: number } | null>(null);
 
   useEffect(() => {
     void refreshOverview();
@@ -208,7 +209,6 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
     void refreshThresholdStatus(activeBatchId);
     void refreshTrainingPreview(1, "all_batches");
     void refreshReviewHistory(undefined, historyDecision, 1, "all_batches");
-    void refreshCrawlHistory(1);
     void refreshCompare();
     void refreshDOPreflight();
   }, []);
@@ -229,6 +229,10 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
   }, [historyDecision]);
 
   useEffect(() => {
+    void refreshTrainingPlan(balanceStrategy, "all_batches");
+  }, [balanceStrategy, refreshTrainingPlan, trainingPreview?.items]);
+
+  useEffect(() => {
     safeWriteLocalStorageString(MLFLOW_URLS_DRAFT_KEY, urlsText);
   }, [urlsText]);
 
@@ -238,8 +242,20 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
   }, [selectedModel]);
 
   useEffect(() => {
+    safeWriteLocalStorageString(MLFLOW_ACTIVE_TAB_KEY, activeTab);
+  }, [activeTab]);
+
+  useEffect(() => {
     const availableIds = new Set(candidates.map((item) => item.id));
     setSelectedCandidateIds((prev) => prev.filter((id) => availableIds.has(id)));
+    setCandidateGeminiSuggestions((prev) => {
+      const next: Record<number, MlflowGeminiReviewSuggestion> = {};
+      for (const [key, value] of Object.entries(prev)) {
+        const id = Number(key);
+        if (availableIds.has(id)) next[id] = value;
+      }
+      return next;
+    });
   }, [candidates]);
 
   useEffect(() => {
@@ -265,13 +281,35 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
   );
 
   const thresholdProgress = useMemo(() => {
-    if (!thresholdStatus) return 0;
+    if (!thresholdStatus || !trainingPlan) return 0;
     const max = Math.max(1, thresholdStatus.target_max_test_stage || 10);
-    return Math.min(100, (thresholdStatus.accepted_count / max) * 100);
-  }, [thresholdStatus]);
-  const bundleAcceptedCount = thresholdStatus?.accepted_count ?? 0;
+    return Math.min(100, (trainingPlan.summary.mlflow_added / max) * 100);
+  }, [thresholdStatus, trainingPlan]);
+  const bundleIncludedCount = trainingPlan?.summary.mlflow_added ?? 0;
   const bundleTargetCount = Math.max(1, thresholdStatus?.target_max_test_stage ?? 10);
-  const bundleReady = Boolean(thresholdStatus?.is_ready);
+  const bundleReady = Boolean(trainingPlan && bundleIncludedCount >= bundleTargetCount);
+  const availableGeminiSuggestions = Object.values(geminiSuggestions);
+  const availableCandidateGeminiSuggestions = Object.values(candidateGeminiSuggestions);
+  const visibleTrainingPreviewItems = trainingPreview?.items || [];
+  const toxicityDistribution = useMemo(
+    () => [
+      { name: "Độc hại", value: trainingPreview?.counts.selected_toxic ?? 0, color: "#ef4444" },
+      { name: "Sạch", value: trainingPreview?.counts.selected_clean ?? 0, color: "#22c55e" },
+    ],
+    [trainingPreview?.counts.selected_clean, trainingPreview?.counts.selected_toxic],
+  );
+  const constructivenessDistribution = useMemo(
+    () => [
+      { name: "Có tính xây dựng", value: trainingPreview?.constructiveness.constructive ?? 0, color: "#2563eb" },
+      { name: "Không xây dựng", value: trainingPreview?.constructiveness.non_constructive ?? 0, color: "#f59e0b" },
+      { name: "Ẩn/chưa có nhãn", value: trainingPreview?.constructiveness.masked ?? 0, color: "#94a3b8" },
+    ],
+    [
+      trainingPreview?.constructiveness.constructive,
+      trainingPreview?.constructiveness.masked,
+      trainingPreview?.constructiveness.non_constructive,
+    ],
+  );
 
   const ingestStageMeta = useMemo(() => {
     if (ingestStage === "crawl") return { label: "Crawl", variant: "default" as const };
@@ -279,8 +317,8 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
     if (ingestStage === "finalize") return { label: "Finalize", variant: "default" as const };
     if (ingestStage === "completed") return { label: "Completed", variant: "secondary" as const };
     if (ingestStage === "error") return { label: "Error", variant: "destructive" as const };
-    return { label: loading ? "Running" : "Idle", variant: loading ? ("default" as const) : ("secondary" as const) };
-  }, [ingestStage, loading]);
+    return { label: "Idle", variant: "secondary" as const };
+  }, [ingestStage]);
 
   const inferDomainFromUrl = (url: string) => {
     try {
@@ -336,7 +374,7 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
   };
 
   const handleSelectAllPreviewRows = () => {
-    setSelectedPreviewIds((trainingPreview?.items || []).map((item) => item.id));
+    setSelectedPreviewIds(visibleTrainingPreviewItems.map((item) => item.id));
   };
 
   const handleUnselectAllPreviewRows = () => {
@@ -349,6 +387,40 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
       return;
     }
     toggleCandidate(id);
+  };
+
+  const handlePreviewRowToggle = (event: MouseEvent<HTMLDivElement>, id: number) => {
+    const target = event.target as HTMLElement;
+    if (target.closest("button, input, textarea, select, option, a")) {
+      return;
+    }
+    togglePreviewSelection(id);
+  };
+
+  const clampTrainingPreviewHeight = (height: number) => Math.min(960, Math.max(240, height));
+
+  const handleTrainingPreviewResizeStart: NonNullable<ComponentProps<"div">["onPointerDown"]> = (event) => {
+    event.preventDefault();
+    trainingPreviewResizeRef.current = {
+      pointerId: event.pointerId,
+      startY: event.clientY,
+      startHeight: trainingPreviewListHeight,
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+
+  const handleTrainingPreviewResizeMove: NonNullable<ComponentProps<"div">["onPointerMove"]> = (event) => {
+    const resize = trainingPreviewResizeRef.current;
+    if (!resize || resize.pointerId !== event.pointerId) return;
+    setTrainingPreviewListHeight(clampTrainingPreviewHeight(resize.startHeight + event.clientY - resize.startY));
+  };
+
+  const handleTrainingPreviewResizeEnd: NonNullable<ComponentProps<"div">["onPointerUp"]> = (event) => {
+    if (trainingPreviewResizeRef.current?.pointerId !== event.pointerId) return;
+    trainingPreviewResizeRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
   };
 
   const handleIngest = async () => {
@@ -446,6 +518,62 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
     }
   };
 
+  const handleGeminiReviewCandidates = async () => {
+    if (selectedCandidateIds.length === 0) {
+      toast.warning("Chọn ít nhất 1 dòng Manual Verify để Gemini review.");
+      return;
+    }
+    setCandidateGeminiReviewing(true);
+    try {
+      setCandidateGeminiSuggestions((prev) => {
+        const next = { ...prev };
+        selectedCandidateIds.forEach((id) => delete next[id]);
+        return next;
+      });
+      const payload = await geminiReviewCandidates(selectedCandidateIds);
+      const next = Object.fromEntries(payload.suggestions.map((item) => [item.id, item]));
+      setCandidateGeminiSuggestions((prev) => ({ ...prev, ...next }));
+      toast.success(`Gemini đã review ${payload.reviewed}/${payload.requested} dòng Manual Verify.`);
+    } catch (error) {
+      const detail = error instanceof Error && error.message ? error.message : "Gemini review thất bại.";
+      toast.error(detail);
+    } finally {
+      setCandidateGeminiReviewing(false);
+    }
+  };
+
+  const buildCandidateGeminiReviewUpdate = (suggestion: MlflowGeminiReviewSuggestion) => ({
+    id: suggestion.id,
+    action: suggestion.toxicity_label === 1 ? ("include_toxic" as const) : ("include_clean" as const),
+    decision: "accept" as const,
+    pseudo_label: suggestion.toxicity_label,
+    ...(suggestion.constructiveness_label === 0 || suggestion.constructiveness_label === 1
+      ? { constructiveness_label: suggestion.constructiveness_label }
+      : { clear_constructiveness: true }),
+    label_source: "gemini_assist",
+    label_confidence: suggestion.confidence,
+    reviewed_by_gemini: true,
+  });
+
+  const handleApplyCandidateGeminiSuggestions = async (suggestions: MlflowGeminiReviewSuggestion[]) => {
+    if (suggestions.length === 0) return;
+    setCandidateGeminiApplying(true);
+    try {
+      await reviewCandidates(suggestions.map(buildCandidateGeminiReviewUpdate));
+      const appliedIds = new Set(suggestions.map((item) => item.id));
+      setCandidateGeminiSuggestions((prev) =>
+        Object.fromEntries(Object.entries(prev).filter(([id]) => !appliedIds.has(Number(id)))),
+      );
+      setSelectedCandidateIds((prev) => prev.filter((id) => !appliedIds.has(id)));
+      await refreshTrainingPreview(1, "all_batches");
+      toast.success(`Đã áp dụng và chuyển ${suggestions.length} mẫu sang Training Preview.`);
+    } catch {
+      toast.error("Áp dụng gợi ý Gemini trong Manual Verify thất bại.");
+    } finally {
+      setCandidateGeminiApplying(false);
+    }
+  };
+
   const handlePreviewSelection = async (id: number, selected: boolean, isLocked: boolean) => {
     if (!selected && isLocked) {
       toast.error("Mẫu đang lock, hãy unlock trước khi bỏ khỏi training.");
@@ -476,6 +604,22 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
     }
   };
 
+  const handlePreviewToxicity = async (id: number, label: 0 | 1) => {
+    try {
+      await reviewTrainingPreview([
+        {
+          id,
+          pseudo_label: label,
+          label_source: "manual_override",
+          label_confidence: "high",
+        },
+      ]);
+      toast.success(label === 1 ? "Đã sửa nhãn thành Độc hại." : "Đã sửa nhãn thành Sạch.");
+    } catch {
+      toast.error("Cập nhật nhãn độc hại thất bại.");
+    }
+  };
+
   const handleGeminiReviewPreview = async () => {
     if (selectedPreviewIds.length === 0) {
       toast.warning("Chọn ít nhất 1 dòng preview để Gemini review.");
@@ -483,6 +627,11 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
     }
     setGeminiReviewing(true);
     try {
+      setGeminiSuggestions((prev) => {
+        const next = { ...prev };
+        selectedPreviewIds.forEach((id) => delete next[id]);
+        return next;
+      });
       const payload = await geminiReviewTrainingPreview(selectedPreviewIds);
       const next = Object.fromEntries(payload.suggestions.map((item) => [item.id, item]));
       setGeminiSuggestions((prev) => ({ ...prev, ...next }));
@@ -495,28 +644,40 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
     }
   };
 
-  const handleApplyGeminiSuggestion = async (suggestion: MlflowGeminiReviewSuggestion) => {
+  const buildGeminiReviewUpdate = (suggestion: MlflowGeminiReviewSuggestion) => ({
+    id: suggestion.id,
+    pseudo_label: suggestion.toxicity_label,
+    ...(suggestion.constructiveness_label === 0 || suggestion.constructiveness_label === 1
+      ? { constructiveness_label: suggestion.constructiveness_label }
+      : { clear_constructiveness: true }),
+    label_source: "gemini_assist",
+    label_confidence: suggestion.confidence,
+    reviewed_by_gemini: true,
+  });
+
+  const clearAppliedGeminiSuggestions = (suggestions: MlflowGeminiReviewSuggestion[]) => {
+    const appliedIds = new Set(suggestions.map((suggestion) => suggestion.id));
+    setGeminiSuggestions((prev) => Object.fromEntries(Object.entries(prev).filter(([id]) => !appliedIds.has(Number(id)))));
+  };
+
+  const handleApplyGeminiSuggestions = async (suggestions: MlflowGeminiReviewSuggestion[]) => {
+    if (suggestions.length === 0) return;
+    setGeminiApplying(true);
     try {
-      await reviewTrainingPreview([
-        {
-          id: suggestion.id,
-          pseudo_label: suggestion.toxicity_label,
-          ...(suggestion.constructiveness_label === 0 || suggestion.constructiveness_label === 1
-            ? { constructiveness_label: suggestion.constructiveness_label }
-            : { clear_constructiveness: true }),
-          label_source: "gemini_assist",
-          label_confidence: suggestion.confidence,
-        },
-      ]);
-      setGeminiSuggestions((prev) => {
-        const next = { ...prev };
-        delete next[suggestion.id];
-        return next;
-      });
-      toast.success("Đã áp dụng gợi ý Gemini.");
+      await reviewTrainingPreview(suggestions.map(buildGeminiReviewUpdate));
+      clearAppliedGeminiSuggestions(suggestions);
+      toast.success(`Đã áp dụng ${suggestions.length} gợi ý Gemini.`);
     } catch {
       toast.error("Áp dụng gợi ý Gemini thất bại.");
+    } finally {
+      setGeminiApplying(false);
     }
+  };
+
+  const handleToggleCrawlHistory = () => {
+    const nextOpen = !crawlHistoryOpen;
+    setCrawlHistoryOpen(nextOpen);
+    if (nextOpen) void refreshCrawlHistory(1);
   };
   const handlePreviewLock = async (id: number, lockState: boolean) => {
     try {
@@ -631,6 +792,14 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
   };
 
   const handleTriggerDO = async () => {
+    if (kaggleTriggerPendingRef.current) return;
+    const currentRunId = typeof doStatus?.run_id === "string" ? doStatus.run_id : "";
+    const currentStatus = typeof doStatus?.status === "string" ? doStatus.status.toLowerCase() : "";
+    if (currentRunId && !KAGGLE_TERMINAL_STATUSES.has(currentStatus)) {
+      toast.message(`Kaggle run ${currentRunId} đang hoạt động; không tạo thêm run mới.`);
+      return;
+    }
+
     const resolvedBaseModel =
       selectedTrainingMode === "retrain" ? selectedModel.trim() : finetuneBaseModel.trim() || selectedModel.trim();
     if (selectedTrainingMode === "retrain" && !resolvedBaseModel) {
@@ -639,11 +808,15 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
       return;
     }
 
+    kaggleTriggerPendingRef.current = true;
+    setKaggleTriggerPending(true);
     try {
       const payload = await triggerDO({
         modelKind: selectedModelKind,
         trainingMode: selectedTrainingMode,
         baseModel: selectedModelKind === "lr_smoke" ? undefined : resolvedBaseModel || undefined,
+        balanceStrategy,
+        bundleScope: "all_batches",
       });
       const trainingLabel = selectedModelKind === "lr_smoke" ? "LR SMOKE" : selectedTrainingMode === "finetune" ? "FINETUNE" : "RETRAIN";
       setStatusText(`Đã trigger Kaggle run ${payload.run_id} (${payload.status}) - ${trainingLabel}.`);
@@ -652,6 +825,9 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
       const detail = error instanceof Error && error.message ? error.message : "Không rõ nguyên nhân.";
       setStatusText(`Trigger Kaggle pipeline thất bại: ${detail}`);
       toast.error(`Trigger Kaggle pipeline thất bại: ${detail}`);
+    } finally {
+      kaggleTriggerPendingRef.current = false;
+      setKaggleTriggerPending(false);
     }
   };
 
@@ -670,17 +846,59 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
     }
   };
 
+  const handleGeminiEvaluate = async (force = false) => {
+    const runId = typeof doStatus?.run_id === "string" ? doStatus.run_id : "";
+    if (!runId) return;
+    setGeminiEvaluating(true);
+    try {
+      const payload = await geminiEvaluateKaggleRun(runId, force);
+      setStatusText(payload.status === "cached" ? "Đã tải nhận định Gemini đã lưu." : "Gemini đã đánh giá kết quả train mới.");
+      toast.success(payload.status === "cached" ? "Đã tải nhận định Gemini." : "Gemini Evaluate hoàn tất.");
+    } catch (error) {
+      const detail = error instanceof Error && error.message ? error.message : "Gemini Evaluate thất bại.";
+      setStatusText(detail);
+      toast.error(detail);
+    } finally {
+      setGeminiEvaluating(false);
+    }
+  };
+
   const handlePromote = async () => {
-    const candidateModel = comparePayload?.candidate?.model;
-    if (!candidateModel) {
+    const sourceRunId = comparePayload?.candidate?.source_run_id;
+    if (!sourceRunId) {
       setStatusText("Chưa có candidate model để promote.");
       return;
     }
     try {
-      const payload = await promote(candidateModel);
+      const payload = await promote(
+        sourceRunId,
+        comparePayload?.candidate?.artifact_checksum,
+        comparePayload?.current?.model,
+      );
       setStatusText(payload.message || payload.status);
-    } catch {
+      setPromotionDialogOpen(false);
+      await onModelsChanged?.();
+      await refreshCompare(sourceRunId);
+      toast.success(payload.message || "Promotion hoàn tất.");
+    } catch (error) {
       setStatusText("Promote thất bại.");
+      toast.error(error instanceof Error ? error.message : "Promote thất bại.");
+    }
+  };
+
+  const handleRollback = async () => {
+    const modelFamily = comparePayload?.model_family;
+    if (!modelFamily) return;
+    try {
+      const payload = await rollback(modelFamily, comparePayload?.current?.model);
+      setStatusText(payload.message || payload.status);
+      await onModelsChanged?.();
+      if (comparePayload?.candidate?.source_run_id) {
+        await refreshCompare(comparePayload.candidate.source_run_id);
+      }
+      toast.success(payload.message || "Rollback hoàn tất.");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Rollback thất bại.");
     }
   };
 
@@ -707,6 +925,9 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
       ? (doStatus.stages as string[])
       : defaultDoStages;
   const doStatusValue = (doStatus?.status as string | undefined) || "idle";
+  const doHasActiveRun = Boolean(
+    doStatus?.run_id && !KAGGLE_TERMINAL_STATUSES.has(doStatusValue.toLowerCase()),
+  );
   const doCurrentStage = (doStatus?.current_stage as string | undefined) || "";
   const doLogs = Array.isArray(doStatus?.logs) ? (doStatus?.logs as string[]) : [];
   const doRunId = (doStatus?.run_id as string | undefined) || "-";
@@ -728,6 +949,66 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
   const doChecksum = (doStatus?.artifact_checksum as string | undefined) || "";
   const doArtifactDownloadUrl = doStatus?.artifact_download_url || "";
   const doMetrics = doStatus?.metrics || null;
+  const doPreviousRun = doStatus?.previous_run || null;
+  const doPreviousMetrics = doPreviousRun?.metrics || null;
+  const doEvidence = doMetrics?.dataset_evidence || null;
+  const doPreviousEvidence = doPreviousMetrics?.dataset_evidence || null;
+  const doEvidenceDurationSeconds = Number(doEvidence?.duration_seconds);
+  const doHasEvidenceDuration = Number.isFinite(doEvidenceDurationSeconds) && doEvidenceDurationSeconds >= 0;
+  const doBundleEvidenceVerified = Boolean(
+    doEvidence?.bundle_sha256 && doStatus?.bundle_checksum && doEvidence.bundle_sha256 === doStatus.bundle_checksum,
+  );
+  const doMetricChartData = ["accuracy", "macro_f1", "f1_toxic", "precision", "recall"].map((metric) => ({
+    metric,
+    validation: doMetrics?.splits?.validation?.[metric] ?? null,
+    test: doMetrics?.splits?.test?.[metric] ?? null,
+  }));
+  const doTestConfusion = doMetrics?.confusion_matrix?.test || null;
+  const doRunComparisonData = [
+    { metric: "accuracy", label: "Accuracy", current: doMetrics?.accuracy ?? null, previous: doPreviousMetrics?.accuracy ?? null },
+    { metric: "macro_f1", label: "Macro F1", current: doMetrics?.macro_f1 ?? null, previous: doPreviousMetrics?.macro_f1 ?? null },
+    { metric: "f1_toxic", label: "F1 Toxic", current: doMetrics?.f1_toxic ?? null, previous: doPreviousMetrics?.f1_toxic ?? null },
+    { metric: "precision", label: "Precision", current: doMetrics?.precision ?? null, previous: doPreviousMetrics?.precision ?? null },
+    { metric: "recall", label: "Recall", current: doMetrics?.recall ?? null, previous: doPreviousMetrics?.recall ?? null },
+  ].map((item) => ({
+    ...item,
+    delta:
+      typeof item.current === "number" && typeof item.previous === "number"
+        ? item.current - item.previous
+        : null,
+  }));
+  const productionComparisonData = [
+    { metric: "accuracy", label: "Accuracy" },
+    { metric: "macro_f1", label: "Macro F1" },
+    { metric: "f1_toxic", label: "F1 Toxic" },
+    { metric: "precision", label: "Precision" },
+    { metric: "recall", label: "Recall" },
+  ].map((item) => ({
+    ...item,
+    current: comparePayload?.current?.metrics?.[item.metric] ?? null,
+    candidate: comparePayload?.candidate?.metrics?.[item.metric] ?? null,
+    delta: comparePayload?.deltas?.[item.metric] ?? null,
+  }));
+  const doPreviousTestSize = Number(doPreviousMetrics?.sizes?.test);
+  const doCurrentTestSize = Number(doMetrics?.sizes?.test);
+  const doComparableTestSet =
+    Number.isFinite(doPreviousTestSize) &&
+    Number.isFinite(doCurrentTestSize) &&
+    doPreviousTestSize === doCurrentTestSize;
+  const doF1Comparison = doRunComparisonData.filter((item) => item.metric === "f1_toxic" || item.metric === "macro_f1");
+  const doF1Deltas = doF1Comparison.map((item) => item.delta).filter((value): value is number => typeof value === "number");
+  const doComparisonSummary =
+    doF1Deltas.length !== 2
+      ? "CHƯA ĐỦ DỮ LIỆU"
+      : doF1Deltas.every((value) => Math.abs(value) < 1e-9)
+        ? "KHÔNG ĐỔI"
+        : doF1Deltas.every((value) => value > 0)
+        ? "HAI F1 CÙNG TĂNG"
+        : doF1Deltas.every((value) => value >= 0)
+          ? "F1 KHÔNG GIẢM"
+        : doF1Deltas.every((value) => value < 0)
+          ? "HAI F1 CÙNG GIẢM"
+          : "CÓ TRADE-OFF";
   const doErrorMessage = (doStatus?.error_message as string | undefined) || "";
   const doRunMode = ((doStatus?.run_mode as string | undefined) || "unknown").toLowerCase();
   const doStatusSource = ((doStatus?.status_source as string | undefined) || "local_db").toLowerCase();
@@ -757,6 +1038,16 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
   const hasDoTelemetrySample = doTelemetryLastSampleAt.length > 0;
   const formatMetric = (value: number | null | undefined) =>
     typeof value === "number" && Number.isFinite(value) ? value.toFixed(3) : "-";
+  const formatMetricDelta = (value: number | null | undefined) =>
+    typeof value === "number" && Number.isFinite(value) ? `${value >= 0 ? "+" : ""}${value.toFixed(3)}` : "-";
+  const metricDeltaClass = (value: number | null | undefined) =>
+    typeof value !== "number" || !Number.isFinite(value)
+      ? "text-muted-foreground"
+      : value > 0
+        ? "text-emerald-600 dark:text-emerald-400"
+        : value < 0
+          ? "text-rose-600 dark:text-rose-400"
+          : "text-muted-foreground";
   const handleDownloadKaggleArtifact = () => {
     if (!doArtifactDownloadUrl) return;
     void downloadAdminFile(doArtifactDownloadUrl, doArtifactUri.split("/").pop() || "kaggle_exported_model.zip");
@@ -770,6 +1061,7 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
       toast.message("Kaggle pipeline đang chạy.");
     } else if (doStatusValue === "completed") {
       toast.success("Kaggle pipeline hoàn tất.");
+      if (doRunId) void refreshCompare(doRunId);
     } else if (doStatusValue === "failed") {
       if (doIsRestricted) {
         toast.error("GPU bị restricted. Hãy chuyển CPU hoặc mở ticket tăng tier.");
@@ -779,7 +1071,7 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
     }
 
     prevDoStatusRef.current = doStatusValue;
-  }, [doIsRestricted, doStatusValue]);
+  }, [doIsRestricted, doRunId, doStatusValue, refreshCompare]);
 
   const doCompletedIndex = doStages.findIndex((s) => s === doCurrentStage);
   const doHasStageProgress = ["running", "failed", "completed", "dry_run"].includes(doStatusValue);
@@ -828,7 +1120,7 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
         </Card>
       )}
 
-      {(ingestStage !== "idle" || loading) && (
+      {ingestStage !== "idle" && (
         <Card className="p-4 border-border/70 bg-muted/30 space-y-2">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <p className="text-sm font-medium">Tiến trình ingest pipeline</p>
@@ -897,11 +1189,15 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
                   void refreshTrainingPreview(1, "all_batches");
                   void refreshThresholdStatus(activeBatchId);
                   void refreshReviewHistory(undefined, historyDecision, 1, "all_batches");
-                  void refreshCrawlHistory(1);
+                  if (crawlHistoryOpen) void refreshCrawlHistory(1);
                   void refreshCompare();
                 }}
               >
                 Refresh
+              </Button>
+              <Button variant={crawlHistoryOpen ? "secondary" : "outline"} onClick={handleToggleCrawlHistory}>
+                <History className="h-4 w-4" />
+                History
               </Button>
               <Button variant="destructive" onClick={handleClearAllMlflow}>
                 Clear all MLFlow
@@ -922,85 +1218,89 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
                 </div>
               </Card>
             )}
-          </Card>
-
-          <div className="grid gap-4 md:grid-cols-3">
-            <Card className="p-4 space-y-1 border-border/70 transition-colors hover:border-border">
-              <p className="text-sm text-muted-foreground">Crawl mới</p>
-              <p className="text-3xl font-semibold">{overview?.pipeline_counts?.crawled ?? 0}</p>
-              <p className="text-xs text-muted-foreground">segments crawled</p>
-            </Card>
-            <Card className="p-4 space-y-1 border-border/70 transition-colors hover:border-border">
-              <p className="text-sm text-muted-foreground">Infer + Pseudo-label</p>
-              <p className="text-3xl font-semibold">{overview?.pipeline_counts?.inferred ?? 0}</p>
-              <p className="text-xs text-muted-foreground">
-                model: {getModelLabel(overview?.model_name || selectedModel) || "-"}
-              </p>
-            </Card>
-            <Card className="p-4 space-y-1 border-border/70 transition-colors hover:border-border">
-              <p className="text-sm text-muted-foreground">Gate 0.8 / 0.2</p>
-              <p className="text-sm">
-                Accepted: <b>{overview?.pipeline_counts?.accepted ?? 0}</b>
-              </p>
-              <p className="text-sm">
-                Candidates: <b>{overview?.pipeline_counts?.candidate ?? 0}</b>
-              </p>
-              <p className="text-sm">
-                Discarded (auto + manual reject): <b>{overview?.pipeline_counts?.discarded ?? 0}</b>
-              </p>
-            </Card>
-          </div>
-
-          <Card className="p-4 space-y-3">
-            <div className="flex items-center justify-between gap-2">
-              <h3 className="font-medium">Lịch sử URL đã crawl (DB persisted)</h3>
-              <div className="flex items-center gap-2">
-                <span className="text-xs text-muted-foreground">
-                  Total: <b>{crawlHistoryTotal}</b> · page <b>{crawlHistoryPage}</b>
-                </span>
-                <Button size="sm" variant="outline" onClick={() => refreshCrawlHistory(crawlHistoryPage)}>
-                  Refresh history
-                </Button>
-              </div>
-            </div>
-            <div className="space-y-1.5 max-h-72 overflow-auto pr-1">
-              {crawlHistory.map((item) => (
-                <div key={`${item.batch_id}:${item.url_hash}`} className="rounded-md border p-2">
-                  <p className="text-sm truncate">{item.url}</p>
-                  <p className="text-xs text-muted-foreground">
-                    batch={item.batch_id} · segments={item.segment_count} · accepted={item.accepted_count} · candidate={item.candidate_count} · discarded={item.discarded_count}
-                  </p>
+            {crawlHistoryOpen && (
+              <div className="space-y-2 rounded-md border border-border/70 bg-muted/20 p-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <p className="text-sm font-medium">Lịch sử URL đã crawl</p>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-muted-foreground">
+                      {crawlHistoryTotal} URL · trang {crawlHistoryPage}
+                    </span>
+                    <Button size="sm" variant="ghost" onClick={() => refreshCrawlHistory(crawlHistoryPage)}>
+                      <RotateCcw className="h-4 w-4" />
+                      Tải lại
+                    </Button>
+                  </div>
                 </div>
-              ))}
-              {crawlHistory.length === 0 && (
-                <p className="rounded-md border border-dashed p-4 text-sm text-muted-foreground">
-                  Chưa có lịch sử crawl.
-                </p>
-              )}
+                <div className="max-h-56 space-y-1.5 overflow-auto pr-1">
+                  {crawlHistory.map((item) => (
+                    <div key={`${item.batch_id}:${item.url_hash}`} className="rounded-md border bg-background p-2">
+                      <p className="break-all text-sm">{item.url}</p>
+                      <p className="text-xs text-muted-foreground">
+                        batch={item.batch_id} · segments={item.segment_count} · accepted={item.accepted_count} · candidate={item.candidate_count} · discarded={item.discarded_count}
+                      </p>
+                    </div>
+                  ))}
+                  {crawlHistory.length === 0 && <p className="text-sm text-muted-foreground">Chưa có lịch sử crawl.</p>}
+                </div>
+              </div>
+            )}
+          </Card>
+
+          <Card className="border-border/70 p-3">
+            <div className="grid gap-3 divide-y md:grid-cols-[0.8fr_1.2fr_2fr] md:divide-x md:divide-y-0">
+              <div className="flex items-center justify-between gap-3 md:pr-3">
+                <div>
+                  <p className="text-xs text-muted-foreground">Crawl mới</p>
+                  <p className="text-xs text-muted-foreground">segments</p>
+                </div>
+                <p className="text-2xl font-semibold">{overview?.pipeline_counts?.crawled ?? 0}</p>
+              </div>
+              <div className="flex items-center justify-between gap-3 pt-3 md:px-3 md:pt-0">
+                <div className="min-w-0">
+                  <p className="text-xs text-muted-foreground">Infer + Pseudo-label</p>
+                  <p className="truncate text-xs text-muted-foreground">{getModelLabel(overview?.model_name || selectedModel) || "-"}</p>
+                </div>
+                <p className="text-2xl font-semibold">{overview?.pipeline_counts?.inferred ?? 0}</p>
+              </div>
+              <div className="flex flex-wrap items-center gap-2 pt-3 md:pl-3 md:pt-0">
+                <span className="mr-auto text-xs text-muted-foreground">Gate 0.8 / 0.2</span>
+                <Badge variant="secondary">Accepted {overview?.pipeline_counts?.accepted ?? 0}</Badge>
+                <Badge variant="outline">Candidate {overview?.pipeline_counts?.candidate ?? 0}</Badge>
+                <Badge variant="outline">Discarded {overview?.pipeline_counts?.discarded ?? 0}</Badge>
+              </div>
             </div>
           </Card>
 
-          <Card className="p-4 border-border/80 bg-gradient-to-br from-background to-muted/30 space-y-4">
-            <div className="flex flex-wrap items-start justify-between gap-3">
-              <div>
-                <p className="text-xs uppercase tracking-wide text-muted-foreground">Dataset Bundle</p>
-                <h3 className="text-lg font-semibold">Bundle readiness</h3>
+          <Card className="border-border/80 bg-gradient-to-r from-background to-muted/25 p-3">
+            <div className="grid gap-3 md:grid-cols-[auto_minmax(12rem,1fr)_auto] md:items-center">
+              <div className="flex items-center gap-3">
+                <div>
+                  <p className="text-xs uppercase tracking-wide text-muted-foreground">Dataset Bundle</p>
+                  <p className="font-medium">Snapshot sẽ được xuất</p>
+                </div>
+                <Badge variant={bundleReady ? "secondary" : "outline"}>
+                  {!trainingPlan ? "Đang tính" : bundleReady ? "Ready" : "Not ready"}
+                </Badge>
               </div>
-              <Badge variant={bundleReady ? "secondary" : "outline"}>{bundleReady ? "Ready for retrain" : "Not ready"}</Badge>
-            </div>
-            <div className="grid gap-4 md:grid-cols-[1fr_auto] md:items-end">
-              <div className="space-y-2">
-                <p className="text-3xl font-semibold">
-                  {bundleAcceptedCount} <span className="text-base text-muted-foreground">/ {bundleTargetCount}</span>
-                </p>
-                <Progress value={thresholdProgress} className="h-2" />
-                <p className="text-xs text-muted-foreground">accepted count / target (all batches)</p>
+              <div className="space-y-1">
+                <div className="flex items-center justify-between gap-3 text-xs text-muted-foreground">
+                  <span>MLflow thực tế thêm vào bundle</span>
+                  <span className="font-medium text-foreground">{bundleIncludedCount} / {bundleTargetCount}</span>
+                </div>
+                <Progress value={thresholdProgress} className="h-1.5" />
+                <div className="flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
+                  <span>Đủ điều kiện: <b className="text-foreground">{trainingPlan?.summary.eligible_mlflow ?? "-"}</b></span>
+                  <span>Sau cân bằng: <b className="text-foreground">{trainingPlan?.summary.after_balance ?? "-"}</b></span>
+                  <span>Trùng loại: <b className="text-foreground">{trainingPlan?.summary.duplicates_skipped ?? "-"}</b></span>
+                  <span>Tổng train: <b className="text-foreground">{trainingPlan?.summary.final_train ?? "-"}</b></span>
+                </div>
               </div>
               <div className="flex flex-wrap gap-2 md:justify-end">
-                <Button onClick={handleExportBundle}>Download bundle</Button>
+                <Button size="sm" onClick={handleExportBundle} disabled={!trainingPlan}>Download bundle</Button>
                 <Dialog>
                   <DialogTrigger asChild>
-                    <Button variant="outline">Advanced bundle tools</Button>
+                    <Button size="sm" variant="outline">Advanced</Button>
                   </DialogTrigger>
                   <DialogContent className="sm:max-w-2xl">
                     <DialogHeader>
@@ -1080,15 +1380,6 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
                     </div>
                   </DialogContent>
                 </Dialog>
-                <Button
-                  variant="outline"
-                  onClick={() => {
-                    void refreshThresholdStatus(activeBatchId);
-                    void refreshCandidates(undefined, candidatePage, "all_batches");
-                  }}
-                >
-                  Refresh
-                </Button>
               </div>
             </div>
           </Card>
@@ -1096,30 +1387,38 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
           <Card className="p-4 space-y-3">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div>
-                <h3 className="font-medium">Training preview</h3>
+                <h3 className="font-medium">Training Preview</h3>
                 <p className="text-xs text-muted-foreground">
-                  Dữ liệu đã duyệt để train, cân bằng độc hại/sạch; nhãn tính xây dựng sẽ ẩn khi độ tin cậy thấp.
+                  Danh sách chỉ hiển thị comment accepted đã qua gate; candidate chưa xác minh chỉ hiển thị trong Manual Verify.
+                  Mẫu accepted phải được chọn cho training và có nhãn Độc hại hoặc Sạch hợp lệ mới đủ điều kiện vào accepted export set;
+                  balanced export có thể lấy ít hơn. Checkbox đầu hàng chỉ chọn tạm thời
+                  cho thao tác trên màn hình.
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  Nhãn tính xây dựng hiển thị khi DB có giá trị 0/1; NULL nghĩa là ẩn hoặc chưa có nhãn, không mặc định là độ tin cậy thấp.
+                  Màu Điểm độc hại dùng gate mặc định 0.20/0.80 vì Preview API chưa trả threshold theo từng batch.
                 </p>
               </div>
               <div className="flex flex-wrap gap-2">
-                <IconButtonWithTooltip
-                  label="Chọn tất cả mẫu đang hiển thị"
-                  size="icon"
+                <Badge variant="outline" className="h-9 px-3">
+                  {selectedPreviewIds.length} đã chọn
+                </Badge>
+                <Button
+                  size="sm"
                   variant="outline"
                   onClick={handleSelectAllPreviewRows}
-                  disabled={!trainingPreview?.items.length}
+                  disabled={visibleTrainingPreviewItems.length === 0}
                 >
-                  <Check className="h-4 w-4" />
-                </IconButtonWithTooltip>
-                <IconButtonWithTooltip
-                  label="Bỏ chọn các mẫu đang chọn"
-                  size="icon"
+                  Chọn tất cả
+                </Button>
+                <Button
+                  size="sm"
                   variant="outline"
                   onClick={handleUnselectAllPreviewRows}
                   disabled={selectedPreviewIds.length === 0}
                 >
-                  <X className="h-4 w-4" />
-                </IconButtonWithTooltip>
+                  Bỏ chọn
+                </Button>
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <span className="inline-flex">
@@ -1128,16 +1427,98 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
                         variant="outline"
                         onClick={handleGeminiReviewPreview}
                         disabled={geminiReviewing || selectedPreviewIds.length === 0}
-                        aria-label="Gửi các mẫu đang chọn cho Gemini review"
-                        title="Gửi các mẫu đang chọn cho Gemini review"
+                        aria-label="Gửi các hàng đang chọn tạm thời cho Gemini review"
+                        title="Gửi các hàng đang chọn tạm thời cho Gemini review"
                       >
                         <Sparkles className="h-4 w-4" />
-                        {geminiReviewing ? "Đang review..." : "Gemini review"}
+                        {geminiReviewing ? "Đang review..." : `Gemini review (${selectedPreviewIds.length})`}
                       </Button>
                     </span>
                   </TooltipTrigger>
-                  <TooltipContent>Gửi các mẫu đang chọn cho Gemini review</TooltipContent>
+                  <TooltipContent>
+                    <MlflowTooltipBody
+                      text={makeMlflowTooltip(
+                        "Gửi Gemini review",
+                        "Gửi các mẫu đang chọn tạm thời cho trợ lý review. Việc này không tự thay đổi danh sách training.",
+                      )}
+                    />
+                  </TooltipContent>
                 </Tooltip>
+                {availableGeminiSuggestions.length > 0 && (
+                  <Button
+                    size="sm"
+                    onClick={() => void handleApplyGeminiSuggestions(availableGeminiSuggestions)}
+                    disabled={geminiApplying || geminiReviewing}
+                  >
+                    <Check className="h-4 w-4" />
+                    {geminiApplying ? "Đang áp dụng..." : `Áp dụng Gemini (${availableGeminiSuggestions.length})`}
+                  </Button>
+                )}
+                <Dialog>
+                  <DialogTrigger asChild>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={(trainingPreview?.counts.selected ?? 0) === 0}
+                      onClick={() => void refreshTrainingPreview(trainingPreview?.page || 1, "all_batches")}
+                    >
+                      <BarChart3 className="h-4 w-4" />
+                      Biểu đồ phân bố
+                    </Button>
+                  </DialogTrigger>
+                  <DialogContent className="max-w-4xl">
+                    <DialogHeader>
+                      <DialogTitle>Phân bố dữ liệu Training Preview</DialogTitle>
+                      <DialogDescription>
+                        Thống kê trên toàn bộ comment hiện còn được chọn cho training, không chỉ các hàng đang hiển thị.
+                      </DialogDescription>
+                    </DialogHeader>
+                    <div className="grid gap-6 md:grid-cols-2">
+                      <div className="rounded-md border p-3">
+                        <h4 className="text-center text-sm font-medium">Độc hại / Sạch</h4>
+                        <ResponsiveContainer width="100%" height={280}>
+                          <PieChart>
+                            <Pie
+                              data={toxicityDistribution}
+                              dataKey="value"
+                              nameKey="name"
+                              cx="50%"
+                              cy="46%"
+                              outerRadius={82}
+                              labelLine={false}
+                              label={({ percent }) => `${((percent || 0) * 100).toFixed(0)}%`}
+                            >
+                              {toxicityDistribution.map((entry) => <Cell key={entry.name} fill={entry.color} />)}
+                            </Pie>
+                            <RechartTooltip />
+                            <Legend />
+                          </PieChart>
+                        </ResponsiveContainer>
+                      </div>
+                      <div className="rounded-md border p-3">
+                        <h4 className="text-center text-sm font-medium">Tính xây dựng</h4>
+                        <ResponsiveContainer width="100%" height={280}>
+                          <PieChart>
+                            <Pie
+                              data={constructivenessDistribution}
+                              dataKey="value"
+                              nameKey="name"
+                              cx="50%"
+                              cy="46%"
+                              outerRadius={82}
+                              labelLine={false}
+                              label={({ percent }) => `${((percent || 0) * 100).toFixed(0)}%`}
+                            >
+                              {constructivenessDistribution.map((entry) => <Cell key={entry.name} fill={entry.color} />)}
+                            </Pie>
+                            <RechartTooltip />
+                            <Legend />
+                          </PieChart>
+                        </ResponsiveContainer>
+                      </div>
+                    </div>
+                  </DialogContent>
+                </Dialog>
                 <IconButtonWithTooltip
                   label="Tải lại preview"
                   size="icon"
@@ -1150,7 +1531,7 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
             </div>
             <div className="grid gap-2 md:grid-cols-4">
               <div className="rounded-md border p-3">
-                <p className="text-xs text-muted-foreground">Đang chọn</p>
+                <p className="text-xs text-muted-foreground">Đã chọn cho training (đủ điều kiện)</p>
                 <p className="text-xl font-semibold">{trainingPreview?.counts.selected ?? 0}</p>
               </div>
               <div className="rounded-md border p-3">
@@ -1168,13 +1549,22 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
                 <p className="text-xl font-semibold">
                   {trainingPreview?.constructiveness.included ?? 0} có nhãn
                 </p>
-                <p className="text-xs text-muted-foreground">{trainingPreview?.constructiveness.masked ?? 0} đang ẩn</p>
+                <p className="text-xs text-muted-foreground">{trainingPreview?.constructiveness.masked ?? 0} ẩn hoặc chưa có nhãn</p>
               </div>
             </div>
-            <div className="space-y-1.5 max-h-80 overflow-auto pr-1">
+            <div
+              className="space-y-1.5 overflow-auto pr-1"
+              style={{ height: trainingPreviewListHeight }}
+              aria-label="Danh sách Training Preview có thể thay đổi chiều cao"
+            >
               <AnimatePresence initial={false}>
-                {(trainingPreview?.items || []).slice(0, 20).map((item, index) => {
+                {visibleTrainingPreviewItems.map((item, index) => {
                   const suggestion = geminiSuggestions[item.id];
+                  const exportEligible =
+                    item.gate_bucket === "accepted" && (item.pseudo_label === 0 || item.pseudo_label === 1);
+                  const trainingSelection = getTrainingSelectionPresentation(item.selected_for_training, exportEligible);
+                  const lockPresentation = getLockPresentation(item.is_locked);
+                  const finetuneStatus = trainingPlan?.row_statuses[String(item.id)];
                   return (
                     <motion.div
                       key={`preview-${item.id}`}
@@ -1182,31 +1572,55 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
                       animate={{ opacity: 1, y: 0 }}
                       exit={{ opacity: 0, y: -8 }}
                       transition={{ duration: 0.18, delay: Math.min(index * 0.015, 0.12) }}
-                      className="rounded-md border border-border/70 p-2.5"
+                      className="cursor-pointer rounded-md border border-border/70 p-2.5 transition-colors hover:border-primary/35 hover:bg-muted/30"
+                      onClick={(event) => handlePreviewRowToggle(event, item.id)}
                     >
                       <div className="flex flex-wrap items-start justify-between gap-2">
                         <Checkbox
                           checked={selectedPreviewIds.includes(item.id)}
                           onCheckedChange={() => togglePreviewSelection(item.id)}
-                          aria-label="Chọn mẫu để thao tác hàng loạt"
+                          aria-label="Chọn tạm thời hàng này để thao tác; không thay đổi selection training trong DB"
                         />
                         <div className="min-w-0 flex-1 space-y-2">
-                          <p className="text-sm leading-relaxed line-clamp-2">{item.text}</p>
+                          <p className="whitespace-pre-wrap break-words text-sm leading-relaxed">{item.text}</p>
                           <div className="flex flex-wrap gap-1 text-xs">
-                            <Badge variant={item.pseudo_label === 1 ? "destructive" : "secondary"}>
-                              {formatToxicityLabel(item.pseudo_label)}
+                            <MlflowBadge presentation={getToxicityPresentation(item.pseudo_label)} />
+                            <MlflowBadge
+                              presentation={getScorePresentation(item.score, DEFAULT_MLFLOW_GATE_THRESHOLDS)}
+                            />
+                            <MlflowBadge presentation={getConstructivenessPresentation(item.constructiveness_label)} />
+                            <MlflowBadge presentation={lockPresentation} />
+                            <MlflowBadge presentation={getReviewStatusPresentation(item.training_review_status)} prefix="Review" />
+                            <MlflowBadge presentation={getDataSourcePresentation(item.source_type)} prefix="Nguồn" />
+                            {item.label_source === "gemini_assist" && <Badge variant="secondary">Gemini assisted</Badge>}
+                            <Badge variant={finetuneStatus?.will_finetune ? "secondary" : "outline"}>
+                              {!finetuneStatus
+                                ? "Đang tính trạng thái"
+                                : finetuneStatus.will_finetune
+                                  ? "Sẽ finetune"
+                                  : "Không finetune"}
                             </Badge>
-                            <Badge variant="outline">Điểm độc hại {item.score?.toFixed(3) ?? "-"}</Badge>
-                            <Badge variant="outline">{formatConstructivenessLabel(item.constructiveness_label)}</Badge>
-                            <Badge variant={item.is_locked ? "default" : "outline"}>
-                              {item.is_locked ? "Đã khóa" : "Chưa khóa"}
-                            </Badge>
-                            <Badge variant="outline">Review: {formatReviewStatusLabel(item.training_review_status)}</Badge>
                           </div>
+                          {finetuneStatus?.reason && <p className="text-xs text-muted-foreground">{finetuneStatus.reason}</p>}
                         </div>
                         <div className="flex flex-wrap items-center gap-1">
+                          <Button
+                            size="sm"
+                            variant={item.pseudo_label === 1 ? "destructive" : "outline"}
+                            onClick={() => void handlePreviewToxicity(item.id, 1)}
+                          >
+                            Độc hại
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant={item.pseudo_label === 0 ? "secondary" : "outline"}
+                            onClick={() => void handlePreviewToxicity(item.id, 0)}
+                          >
+                            Sạch
+                          </Button>
                           <IconButtonWithTooltip
-                            label={item.selected_for_training ? "Đã đưa vào train" : "Thêm vào train"}
+                            label={trainingSelection.label}
+                            tooltip={trainingSelection.tooltip}
                             size="icon"
                             variant={item.selected_for_training ? "default" : "outline"}
                             disabled={Boolean(item.is_locked) && Boolean(item.selected_for_training)}
@@ -1216,6 +1630,7 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
                           </IconButtonWithTooltip>
                           <IconButtonWithTooltip
                             label={item.is_locked ? "Mở khóa mẫu" : "Khóa mẫu"}
+                            tooltip={lockPresentation.tooltip}
                             size="icon"
                             variant="outline"
                             onClick={() => handlePreviewLock(item.id, !Boolean(item.is_locked))}
@@ -1225,6 +1640,7 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
                           <div className="ml-1 flex items-center gap-1 rounded-md border bg-muted/20 p-1" aria-label="Tính xây dựng">
                             <IconButtonWithTooltip
                               label="Có tính xây dựng"
+                              tooltip={getConstructivenessPresentation(1).tooltip}
                               size="icon"
                               variant={item.constructiveness_label === 1 ? "default" : "ghost"}
                               onClick={() => handlePreviewConstructiveness(item.id, 1)}
@@ -1233,6 +1649,7 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
                             </IconButtonWithTooltip>
                             <IconButtonWithTooltip
                               label="Không rõ hoặc không đóng góp"
+                              tooltip={getConstructivenessPresentation(0).tooltip}
                               size="icon"
                               variant={item.constructiveness_label === 0 ? "default" : "ghost"}
                               onClick={() => handlePreviewConstructiveness(item.id, 0)}
@@ -1240,7 +1657,8 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
                               <MessageCircle className="h-4 w-4" />
                             </IconButtonWithTooltip>
                             <IconButtonWithTooltip
-                              label="Ẩn nhãn tính xây dựng"
+                              label="Ẩn hoặc xóa nhãn tính xây dựng"
+                              tooltip={getConstructivenessPresentation(null).tooltip}
                               size="icon"
                               variant={item.constructiveness_label == null ? "default" : "ghost"}
                               onClick={() => handlePreviewConstructiveness(item.id, null)}
@@ -1254,14 +1672,15 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
                         <div className="mt-2 rounded-md border border-primary/25 bg-primary/5 p-2 text-xs">
                           <div className="flex flex-wrap items-center gap-1.5">
                             <Badge variant="outline">Gemini</Badge>
-                            <Badge variant="secondary">Đề xuất: {formatToxicityLabel(suggestion.toxicity_label)}</Badge>
-                            <Badge variant="outline">{formatConstructivenessLabel(suggestion.constructiveness_label)}</Badge>
-                            <Badge variant="outline">{formatConfidenceLabel(suggestion.confidence)}</Badge>
-                            <Badge variant="outline">{formatGeminiActionLabel(suggestion.action)}</Badge>
+                            <MlflowBadge presentation={getToxicityPresentation(suggestion.toxicity_label)} prefix="Đề xuất" />
+                            <MlflowBadge presentation={getConstructivenessPresentation(suggestion.constructiveness_label)} />
+                            <Badge variant="outline">{formatMlflowConfidence(suggestion.confidence)}</Badge>
+                            <Badge variant="outline">{formatGeminiAction(suggestion.action)}</Badge>
                             <Button
                               size="sm"
                               variant="outline"
-                              onClick={() => void handleApplyGeminiSuggestion(suggestion)}
+                              onClick={() => void handleApplyGeminiSuggestions([suggestion])}
+                              disabled={geminiApplying}
                             >
                               <Sparkles className="h-4 w-4" />
                               Áp dụng đề xuất
@@ -1273,13 +1692,16 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
                       <details className="mt-2 text-xs text-muted-foreground">
                         <summary className="cursor-pointer select-none">Chi tiết kỹ thuật</summary>
                         <div className="mt-1 flex flex-wrap gap-1">
-                          <Badge variant="outline">bucket: {formatGateBucketLabel(item.gate_bucket)}</Badge>
-                          <Badge variant="outline">toxicity: {item.pseudo_label ?? "-"}</Badge>
-                          <Badge variant="outline">score: {item.score?.toFixed(3) ?? "-"}</Badge>
-                          <Badge variant="outline">constructiveness: {item.constructiveness_label ?? "masked"}</Badge>
-                          <Badge variant="outline">cscore: {item.constructiveness_score?.toFixed(3) ?? "-"}</Badge>
-                          <Badge variant="outline">lock: {item.is_locked ? "on" : "off"}</Badge>
-                          <Badge variant="outline">review: {item.training_review_status ?? "-"}</Badge>
+                          <MlflowBadge presentation={getGateBucketPresentation(item.gate_bucket)} prefix="Bucket" />
+                          <MlflowBadge presentation={getVerificationStatusPresentation(item.verification_status)} prefix="Verification" />
+                          <Badge variant="outline">pseudo_label={item.pseudo_label ?? "NULL"}</Badge>
+                          <MlflowBadge presentation={getScorePresentation(item.score, DEFAULT_MLFLOW_GATE_THRESHOLDS)} />
+                          <Badge variant="outline">constructiveness_label={item.constructiveness_label ?? "NULL"}</Badge>
+                          <Badge variant="outline">constructiveness_score={item.constructiveness_score?.toFixed(3) ?? "NULL"}</Badge>
+                          <Badge variant="outline">is_locked={item.is_locked ? 1 : 0}</Badge>
+                          <Badge variant="outline">training_review_status={item.training_review_status ?? "NULL"}</Badge>
+                          <Badge variant="outline">source_type={item.source_type ?? "crawl"}</Badge>
+                          {item.source_row_id != null && <Badge variant="outline">source_row_id={item.source_row_id}</Badge>}
                         </div>
                       </details>
                     </motion.div>
@@ -1292,25 +1714,51 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
                 </p>
               )}
             </div>
+            <div
+              role="separator"
+              aria-label="Kéo để thay đổi chiều cao danh sách Training Preview"
+              aria-orientation="horizontal"
+              aria-valuemin={240}
+              aria-valuemax={960}
+              aria-valuenow={trainingPreviewListHeight}
+              tabIndex={0}
+              className="group flex h-7 touch-none cursor-row-resize select-none items-center justify-center rounded-md border border-dashed text-muted-foreground transition-colors hover:border-primary/40 hover:bg-muted/40 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              onPointerDown={handleTrainingPreviewResizeStart}
+              onPointerMove={handleTrainingPreviewResizeMove}
+              onPointerUp={handleTrainingPreviewResizeEnd}
+              onPointerCancel={handleTrainingPreviewResizeEnd}
+              onKeyDown={(event) => {
+                if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+                event.preventDefault();
+                setTrainingPreviewListHeight((height) =>
+                  clampTrainingPreviewHeight(height + (event.key === "ArrowDown" ? 48 : -48)),
+                );
+              }}
+            >
+              <GripHorizontal className="h-4 w-4" />
+              <span className="ml-2 text-xs">Kéo để xem thêm hoặc thu gọn danh sách</span>
+            </div>
           </Card>
 
           <Card className="p-4 space-y-3">
             <div className="flex items-center justify-between gap-2">
-              <h3 className="font-medium">Manual verify (DB persisted pool)</h3>
+              <h3 className="font-medium">Manual Verify (DB persisted pool)</h3>
               <div className="text-sm text-muted-foreground">
                 {candidateTotal} items · page {candidatePage} · size {candidatePageSize}
               </div>
             </div>
             <p className="text-xs text-muted-foreground">
-              Chọn Toxic/Clean/Remove để cập nhật trực tiếp trong DB trước khi export/retrain.
+              Danh sách chỉ hiển thị candidate/unverified chưa qua gate; comment accepted trong Training Preview không xuất hiện lại ở đây.
+              Checkbox chỉ chọn hàng tạm thời để thao tác;
+              Toxic, Clean và Remove mới cập nhật trực tiếp trạng thái DB trước export/retrain.
             </p>
 
             <div className="flex flex-wrap gap-2">
               <Button size="sm" variant="outline" onClick={handleSelectAllCandidates} disabled={candidates.length === 0}>
-                Select all
+                Chọn tạm thời tất cả
               </Button>
               <Button size="sm" variant="outline" onClick={handleUnselectAllCandidates} disabled={selectedCandidateIds.length === 0}>
-                Unselect all
+                Bỏ chọn tạm thời
               </Button>
               <Button size="sm" variant="outline" onClick={() => void handleBulkLock(true)} disabled={selectedCandidateIds.length === 0}>
                 Lock selected
@@ -1318,31 +1766,78 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
               <Button size="sm" variant="outline" onClick={() => void handleBulkLock(false)} disabled={selectedCandidateIds.length === 0}>
                 Unlock selected
               </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => void handleGeminiReviewCandidates()}
+                disabled={candidateGeminiReviewing || selectedCandidateIds.length === 0}
+              >
+                <Sparkles className="mr-1 h-4 w-4" />
+                {candidateGeminiReviewing ? "Đang review..." : `Gemini review (${selectedCandidateIds.length})`}
+              </Button>
+              {availableCandidateGeminiSuggestions.length > 0 && (
+                <Button
+                  size="sm"
+                  onClick={() => void handleApplyCandidateGeminiSuggestions(availableCandidateGeminiSuggestions)}
+                  disabled={candidateGeminiApplying || candidateGeminiReviewing}
+                >
+                  {candidateGeminiApplying
+                    ? "Đang áp dụng..."
+                    : `Áp dụng Gemini (${availableCandidateGeminiSuggestions.length})`}
+                </Button>
+              )}
             </div>
 
             <div className="space-y-1.5 max-h-[34rem] overflow-auto pr-1">
-              {candidates.map((item) => (
-                <div
-                  key={item.id}
-                  className="flex cursor-pointer items-start gap-2 rounded-md border border-border/70 p-2.5 transition-colors hover:border-primary/35 hover:bg-muted/30"
-                  onClick={(event) => handleCandidateRowToggle(event, item.id)}
-                >
-                  <Checkbox checked={selectedCandidateIds.includes(item.id)} onCheckedChange={() => toggleCandidate(item.id)} />
-                  <div className="min-w-0 flex-1 space-y-1">
-                    <p className="text-sm leading-relaxed line-clamp-2">{item.text}</p>
-                    <div className="flex flex-wrap gap-1.5 text-xs text-muted-foreground">
-                      <Badge variant="outline">domain={resolveDomainTag(item)}</Badge>
-                      <Badge variant="outline">score={item.score?.toFixed(3) ?? "-"}</Badge>
-                      <Badge variant="outline">pseudo={item.pseudo_label ?? "-"}</Badge>
-                      <Badge variant="outline">construct={item.constructiveness_label ?? "masked"}</Badge>
-                      <Badge variant="outline">lock={item.is_locked ? "on" : "off"}</Badge>
-                      <Badge variant="outline">source={item.label_source ?? "-"}</Badge>
-                      <Badge variant="outline">conf={item.label_confidence ?? "-"}</Badge>
+              {candidates.map((item) => {
+                const suggestion = candidateGeminiSuggestions[item.id];
+                return (
+                  <div
+                    key={item.id}
+                    className="flex cursor-pointer items-start gap-2 rounded-md border border-border/70 p-2.5 transition-colors hover:border-primary/35 hover:bg-muted/30"
+                    onClick={(event) => handleCandidateRowToggle(event, item.id)}
+                  >
+                    <Checkbox
+                      checked={selectedCandidateIds.includes(item.id)}
+                      onCheckedChange={() => toggleCandidate(item.id)}
+                      aria-label="Chọn tạm thời hàng này để thao tác Manual Verify"
+                    />
+                    <div className="min-w-0 flex-1 space-y-1">
+                      <p className="whitespace-pre-wrap break-words text-sm leading-relaxed">{item.text}</p>
+                      <div className="flex flex-wrap gap-1.5 text-xs text-muted-foreground">
+                        <Badge variant="outline">domain={resolveDomainTag(item)}</Badge>
+                        <MlflowBadge presentation={getScorePresentation(item.score, DEFAULT_MLFLOW_GATE_THRESHOLDS)} />
+                        <MlflowBadge presentation={getToxicityPresentation(item.pseudo_label)} />
+                        <MlflowBadge presentation={getConstructivenessPresentation(item.constructiveness_label)} />
+                        <MlflowBadge presentation={getLockPresentation(item.is_locked)} />
+                        <MlflowBadge presentation={getVerificationStatusPresentation(item.verification_status)} />
+                        <Badge variant="outline">source={item.label_source ?? "-"}</Badge>
+                        <Badge variant="outline">conf={item.label_confidence ?? "-"}</Badge>
+                      </div>
+                      <p className="text-xs text-muted-foreground break-all">{item.url}</p>
+                      {suggestion && (
+                        <div className="mt-2 space-y-2 rounded-md border border-primary/25 bg-primary/5 p-2 text-xs">
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <Badge variant="outline">Gemini</Badge>
+                            <MlflowBadge presentation={getToxicityPresentation(suggestion.toxicity_label)} />
+                            <MlflowBadge presentation={getConstructivenessPresentation(suggestion.constructiveness_label)} />
+                            <Badge variant="outline">{formatMlflowConfidence(suggestion.confidence)}</Badge>
+                            <Badge variant="outline">{formatGeminiAction(suggestion.action)}</Badge>
+                          </div>
+                          {suggestion.reason && <p className="text-muted-foreground">{suggestion.reason}</p>}
+                          <Button
+                            size="sm"
+                            onClick={() => void handleApplyCandidateGeminiSuggestions([suggestion])}
+                            disabled={candidateGeminiApplying}
+                          >
+                            Áp dụng dòng này
+                          </Button>
+                        </div>
+                      )}
                     </div>
-                    <p className="text-xs text-muted-foreground break-all">{item.url}</p>
                   </div>
-                </div>
-              ))}
+                );
+              })}
               {candidates.length === 0 && (
                 <p className="rounded-md border border-dashed p-4 text-sm text-muted-foreground">
                   Không có item để verify trong DB hiện tại.
@@ -1396,13 +1891,13 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
             <div className="space-y-1.5 max-h-72 overflow-auto pr-1">
               {reviewHistory.map((item) => (
                 <div key={`history-${item.id}`} className="rounded-md border border-border/70 p-2.5 transition-colors hover:border-border hover:bg-muted/20">
-                  <p className="text-sm line-clamp-2">{item.text}</p>
+                  <p className="whitespace-pre-wrap break-words text-sm leading-relaxed">{item.text}</p>
                   <div className="mt-1 flex flex-wrap gap-1.5 text-xs text-muted-foreground">
-                    <Badge variant="outline">{item.verification_status}</Badge>
-                    <Badge variant="outline">bucket={item.gate_bucket}</Badge>
+                    <MlflowBadge presentation={getVerificationStatusPresentation(item.verification_status)} />
+                    <MlflowBadge presentation={getGateBucketPresentation(item.gate_bucket)} />
                     <Badge variant="outline">domain={resolveDomainTag(item)}</Badge>
-                    <Badge variant="outline">score={item.score?.toFixed(3) ?? "-"}</Badge>
-                    <Badge variant="outline">pseudo={item.pseudo_label ?? "-"}</Badge>
+                    <MlflowBadge presentation={getScorePresentation(item.score, DEFAULT_MLFLOW_GATE_THRESHOLDS)} />
+                    <MlflowBadge presentation={getToxicityPresentation(item.pseudo_label)} />
                     <Badge variant="outline">source={item.label_source ?? "-"}</Badge>
                     <Badge variant="outline">conf={item.label_confidence ?? "-"}</Badge>
                   </div>
@@ -1415,212 +1910,6 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
               )}
             </div>
           </Card>
-        </TabsContent>
-
-        <TabsContent value="step2" className="space-y-4">
-          <Card className="p-6 text-center space-y-4">
-            <h3 className="text-xl font-semibold">Dataset toàn bộ DB (all batches)</h3>
-            <p className="text-4xl font-bold">
-              {thresholdStatus?.accepted_count ?? 0} / {thresholdStatus?.target_max_test_stage ?? 10}
-            </p>
-            <Progress value={thresholdProgress} />
-            <p className="text-sm text-muted-foreground">
-              {thresholdStatus?.is_ready ? "Đủ điều kiện retrain" : "Chưa đủ điều kiện retrain"}
-            </p>
-            <div className="flex justify-center gap-2">
-              <Button onClick={handleExportBundle}>Tải dataset xuống</Button>
-              <Button
-                variant="outline"
-                onClick={() => {
-                  void refreshThresholdStatus(activeBatchId);
-                  void refreshCandidates(undefined, candidatePage, "all_batches");
-                }}
-              >
-                Refresh
-              </Button>
-            </div>
-          </Card>
-
-          <Card className="p-4 space-y-3">
-            <div className="flex items-center justify-between gap-2">
-              <h3 className="font-medium">Manual verify (DB persisted pool)</h3>
-              <div className="text-sm text-muted-foreground">
-                {candidateTotal} items · page {candidatePage} · size {candidatePageSize}
-              </div>
-            </div>
-            <p className="text-xs text-muted-foreground">
-              Chọn Toxic/Clean/Remove để cập nhật trực tiếp trong DB trước khi export/retrain.
-            </p>
-
-            <div className="flex flex-wrap gap-2">
-              <Button size="sm" variant="outline" onClick={handleSelectAllCandidates} disabled={candidates.length === 0}>
-                Select all
-              </Button>
-              <Button size="sm" variant="outline" onClick={handleUnselectAllCandidates} disabled={selectedCandidateIds.length === 0}>
-                Unselect all
-              </Button>
-              <Button size="sm" variant="outline" onClick={() => void handleBulkLock(true)} disabled={selectedCandidateIds.length === 0}>
-                Lock selected
-              </Button>
-              <Button size="sm" variant="outline" onClick={() => void handleBulkLock(false)} disabled={selectedCandidateIds.length === 0}>
-                Unlock selected
-              </Button>
-            </div>
-
-            <div className="space-y-1.5 max-h-[34rem] overflow-auto pr-1">
-              {candidates.map((item) => (
-                <div
-                  key={item.id}
-                  className="flex cursor-pointer items-start gap-2 rounded-md border p-2 hover:bg-muted/40"
-                  onClick={(event) => handleCandidateRowToggle(event, item.id)}
-                >
-                  <Checkbox checked={selectedCandidateIds.includes(item.id)} onCheckedChange={() => toggleCandidate(item.id)} />
-                  <div className="min-w-0 flex-1">
-                    <p className="text-sm line-clamp-2">{item.text}</p>
-                    <p className="text-xs text-muted-foreground">
-                      domain={resolveDomainTag(item)} · score={item.score?.toFixed(3) ?? "-"} · pseudo={item.pseudo_label ?? "-"} · lock={item.is_locked ? "on" : "off"} · source={item.label_source ?? "-"} · conf={item.label_confidence ?? "-"} · {item.url}
-                    </p>
-                  </div>
-                </div>
-              ))}
-              {candidates.length === 0 && (
-                <p className="rounded-md border border-dashed p-4 text-sm text-muted-foreground">
-                  Không có item để verify trong DB hiện tại.
-                </p>
-              )}
-            </div>
-
-            <div className="flex flex-wrap gap-2">
-              <Button disabled={selectedCandidateIds.length === 0} onClick={() => void handleBulkReview("include_toxic")}>
-                Toxic
-              </Button>
-              <Button disabled={selectedCandidateIds.length === 0} variant="secondary" onClick={() => void handleBulkReview("include_clean")}>
-                Clean
-              </Button>
-              <Button
-                disabled={selectedCandidateIds.length === 0}
-                variant="destructive"
-                onClick={() => void handleBulkReview("drop")}
-              >
-                Remove
-              </Button>
-              <Button size="icon" variant="outline" onClick={() => refreshCandidates(undefined, candidatePage, "all_batches")}>
-                <RotateCcw />
-              </Button>
-            </div>
-          </Card>
-
-          <Card className="p-4 space-y-3">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <h3 className="font-medium">Review history (persisted in DB)</h3>
-              <div className="flex items-center gap-2 text-sm">
-                <span className="text-muted-foreground">Filter</span>
-                <select
-                  className="rounded-md border bg-background px-3 py-2 text-sm"
-                  value={historyDecision}
-                  onChange={(e) => setHistoryDecision(e.target.value as "all" | "accepted" | "rejected" | "discarded")}
-                >
-                  <option value="all">All</option>
-                  <option value="accepted">Accepted</option>
-                  <option value="rejected">Rejected</option>
-                  <option value="discarded">Discarded</option>
-                </select>
-                <Button size="sm" variant="outline" onClick={() => refreshReviewHistory(undefined, historyDecision, reviewHistoryPage, "all_batches")}>
-                  Refresh history
-                </Button>
-              </div>
-            </div>
-            <p className="text-xs text-muted-foreground">
-              Total: <b>{reviewHistoryTotal}</b> · page <b>{reviewHistoryPage}</b>
-            </p>
-            <div className="space-y-1.5 max-h-72 overflow-auto pr-1">
-              {reviewHistory.map((item) => (
-                <div key={`history-${item.id}`} className="rounded-md border p-2">
-                  <p className="text-sm line-clamp-2">{item.text}</p>
-                  <p className="text-xs text-muted-foreground">
-                    {item.verification_status} · bucket={item.gate_bucket} · domain={resolveDomainTag(item)} · score={item.score?.toFixed(3) ?? "-"} · pseudo={item.pseudo_label ?? "-"} · source={item.label_source ?? "-"} · conf={item.label_confidence ?? "-"}
-                  </p>
-                </div>
-              ))}
-              {reviewHistory.length === 0 && (
-                <p className="rounded-md border border-dashed p-4 text-sm text-muted-foreground">
-                  Chưa có history cho filter hiện tại.
-                </p>
-              )}
-            </div>
-          </Card>
-
-          <details className="rounded-lg border p-4">
-            <summary className="cursor-pointer text-sm font-medium">Advanced manual train/import tools</summary>
-            <div className="mt-4 grid gap-4">
-              <Card className="p-4 space-y-3">
-                <div className="flex items-center justify-between">
-                  <h3 className="font-medium">Manual dataset export</h3>
-                  <Button onClick={handleExportBundle}>Download</Button>
-                </div>
-                <p className="text-sm text-muted-foreground">Bundle mặc định gồm accepted + candidate. Bạn có thể bật thêm unused/discarded nếu cần phân tích sâu.</p>
-                <div className="rounded-md border p-3 space-y-3 bg-muted/20">
-                  <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <p className="text-sm font-medium">Bao gồm unused/discarded vào bundle</p>
-                      <p className="text-xs text-muted-foreground">OFF: chỉ accepted + candidate · ON: thêm discarded theo phạm vi chọn.</p>
-                    </div>
-                    <label className="inline-flex items-center gap-2 text-sm">
-                      <input
-                        type="checkbox"
-                        checked={includeUnusedInExport}
-                        onChange={(e) => setIncludeUnusedInExport(e.target.checked)}
-                      />
-                      Include unused
-                    </label>
-                  </div>
-                  {includeUnusedInExport && (
-                    <div>
-                      <label className="text-xs text-muted-foreground">Phạm vi discarded</label>
-                      <select
-                        className="mt-1 w-full rounded-md border bg-background px-3 py-2 text-sm"
-                        value={unusedScope}
-                        onChange={(e) => setUnusedScope(e.target.value as MlflowUnusedScope)}
-                      >
-                        <option value="all">Tất cả discarded</option>
-                        <option value="auto_discarded">Auto discarded (theo ngưỡng)</option>
-                        <option value="manual_rejected">Manual rejected (do người review)</option>
-                      </select>
-                    </div>
-                  )}
-                </div>
-                {lastBundlePath && <p className="text-xs break-all">Bundle: {lastBundlePath}</p>}
-              </Card>
-
-              <Card className="p-4 space-y-3">
-                <h3 className="font-medium">Manual model import</h3>
-                <div className="grid md:grid-cols-2 gap-3">
-                  <Input
-                    placeholder="my_phobert_v3"
-                    value={importModelName}
-                    onChange={(e: ChangeEvent<HTMLInputElement>) => setImportModelName(e.target.value)}
-                  />
-                  <Input
-                    type="file"
-                    accept=".zip,application/zip"
-                    onChange={(e: ChangeEvent<HTMLInputElement>) => {
-                      const file = e.target.files?.[0] || null;
-                      setImportModelZipFile(file);
-                    }}
-                  />
-                </div>
-                <p className="text-xs text-muted-foreground">
-                  ZIP sẽ được giải nén vào models/options/phobert/&lt;model_name&gt; và tự refresh danh sách model.
-                </p>
-                <div className="flex gap-2">
-                  <Button onClick={handleImportModelZip}>Import ZIP model</Button>
-                  <Button variant="outline" onClick={() => refreshCompare()}>
-                    Refresh compare source
-                  </Button>
-                </div>
-              </Card>
-            </div>
-          </details>
         </TabsContent>
 
         <TabsContent value="step4" className="space-y-4">
@@ -1639,12 +1928,6 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
                   }}
                 >
                   Clear session
-                </Button>
-                <Button
-                  onClick={handleTriggerDO}
-                  disabled={doPreflight?.ready === false}
-                >
-                  Kích hoạt Kaggle Pipeline
                 </Button>
                 <Button
                   variant="secondary"
@@ -1672,9 +1955,12 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
                 <Button
                   type="button"
                   variant={selectedModelKind === "lr_smoke" ? "default" : "outline"}
-                  onClick={() => setSelectedModelKind("lr_smoke")}
+                  onClick={() => {
+                    setSelectedModelKind("lr_smoke");
+                    setSelectedTrainingMode("retrain");
+                  }}
                 >
-                  LR smoke
+                  TF-IDF + LR (fast)
                 </Button>
               </div>
 
@@ -1691,6 +1977,7 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
                   type="button"
                   variant={selectedTrainingMode === "finetune" ? "default" : "outline"}
                   onClick={() => setSelectedTrainingMode("finetune")}
+                  disabled={selectedModelKind === "lr_smoke"}
                 >
                   Finetune
                 </Button>
@@ -1737,9 +2024,59 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
                 </div>
               )}
 
+              <div className="space-y-2 rounded-md border bg-background p-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <p className="text-sm font-medium">Dataset snapshot sẽ dùng cho run</p>
+                    <p className="text-xs text-muted-foreground">Scope: toàn bộ batch · policy: {balanceStrategy === "balanced_50_50" ? "Balanced 50/50" : "Use all approved"}</p>
+                  </div>
+                  <Badge variant="outline">Tạo bundle mới khi bấm chạy</Badge>
+                </div>
+                <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-5">
+                  <div className="rounded-md border p-2">
+                    <p className="text-xs text-muted-foreground">Gold train</p>
+                    <p className="text-lg font-semibold">{trainingPlan?.summary.gold_train ?? "-"}</p>
+                  </div>
+                  <div className="rounded-md border p-2">
+                    <p className="text-xs text-muted-foreground">MLflow đủ điều kiện</p>
+                    <p className="text-lg font-semibold">{trainingPlan?.summary.eligible_mlflow ?? "-"}</p>
+                  </div>
+                  <div className="rounded-md border p-2">
+                    <p className="text-xs text-muted-foreground">Sau cân bằng</p>
+                    <p className="text-lg font-semibold">{trainingPlan?.summary.after_balance ?? "-"}</p>
+                  </div>
+                  <div className="rounded-md border p-2">
+                    <p className="text-xs text-muted-foreground">Trùng bị loại</p>
+                    <p className="text-lg font-semibold">{trainingPlan?.summary.duplicates_skipped ?? "-"}</p>
+                  </div>
+                  <div className="rounded-md border p-2">
+                    <p className="text-xs text-muted-foreground">Tổng train cuối</p>
+                    <p className="text-lg font-semibold">{trainingPlan?.summary.final_train ?? "-"}</p>
+                  </div>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Thêm mới thực tế: <b>{trainingPlan?.summary.mlflow_added ?? "-"}</b> · Validation/Test giữ nguyên gold: {trainingPlan?.summary.gold_validation ?? "-"}/{trainingPlan?.summary.gold_test ?? "-"}.
+                </p>
+              </div>
+
               <p className="text-xs text-muted-foreground">
                 Retrain phù hợp khi refresh dataset lớn; Finetune phù hợp khi thêm ít data/pseudo mới để giảm tài nguyên.
               </p>
+              <div className="flex flex-wrap items-center justify-between gap-2 border-t pt-3">
+                <p className="text-xs text-muted-foreground">Run sẽ lưu bundle path, checksum và thống kê dataset để truy vết.</p>
+                <Button
+                  onClick={handleTriggerDO}
+                  disabled={
+                    kaggleTriggerPending || loading || doHasActiveRun || doPreflight?.ready === false || !trainingPlan
+                  }
+                >
+                  {kaggleTriggerPending
+                    ? "Đang tạo bundle & kích hoạt..."
+                    : doHasActiveRun
+                      ? "Kaggle đang chạy"
+                      : "Tạo bundle & kích hoạt Kaggle"}
+                </Button>
+              </div>
             </div>
 
             <div className="grid gap-3 md:grid-cols-4">
@@ -1767,7 +2104,17 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
               </div>
               <div className="rounded-md border p-3">
                 <p className="text-xs text-muted-foreground">Train duration (thực tế)</p>
-                <p className="text-sm font-medium">{hasDoTrainDuration ? `${doTrainDuration.toFixed(2)} phút` : "-"}</p>
+                <p className="text-sm font-medium">
+                  {doHasEvidenceDuration ? `${doEvidenceDurationSeconds.toFixed(2)} giây` : hasDoTrainDuration ? `${doTrainDuration.toFixed(2)} phút` : "-"}
+                </p>
+              </div>
+              <div className="rounded-md border p-3 md:col-span-2">
+                <p className="text-xs text-muted-foreground">Bundle snapshot</p>
+                <p className="break-all text-xs font-medium">{doStatus?.bundle_path || "-"}</p>
+              </div>
+              <div className="rounded-md border p-3 md:col-span-2">
+                <p className="text-xs text-muted-foreground">Bundle SHA-256</p>
+                <p className="break-all text-xs font-medium">{doStatus?.bundle_checksum || "-"}</p>
               </div>
             </div>
 
@@ -1799,8 +2146,223 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
                     <p className="text-xl font-semibold">{formatMetric(doMetrics?.recall)}</p>
                   </div>
                 </div>
+                {doPreviousMetrics && doPreviousRun ? (
+                  <div className="space-y-3 rounded-md border bg-background p-3">
+                    <div className="flex flex-wrap items-start justify-between gap-2">
+                      <div>
+                        <p className="text-sm font-medium">So sánh với lần train hoàn tất trước</p>
+                        <p className="text-xs text-muted-foreground">
+                          Hiện tại <b>{doRunId}</b> so với <b>{doPreviousRun.run_id}</b> · {formatIsoTs(doPreviousRun.created_at)}
+                        </p>
+                      </div>
+                      <Badge variant={doF1Deltas.length === 2 && doF1Deltas.every((value) => value >= 0) ? "secondary" : "outline"}>
+                        {doComparisonSummary}
+                      </Badge>
+                    </div>
+
+                    <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-5">
+                      {doRunComparisonData.map((item) => {
+                        const arrow = typeof item.delta !== "number" ? "" : item.delta > 0 ? "↑" : item.delta < 0 ? "↓" : "→";
+                        return (
+                          <div key={item.metric} className="rounded-md border p-3">
+                            <p className="text-xs text-muted-foreground">{item.label}</p>
+                            <div className="mt-1 flex items-end justify-between gap-2">
+                              <p className="text-lg font-semibold">{formatMetric(item.current)}</p>
+                              <p className={`text-sm font-semibold ${metricDeltaClass(item.delta)}`}>
+                                {arrow} {formatMetricDelta(item.delta)}
+                              </p>
+                            </div>
+                            <p className="mt-1 text-[11px] text-muted-foreground">Lần trước: {formatMetric(item.previous)}</p>
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_260px]">
+                      <div className="h-64 rounded-md border p-3">
+                        <p className="mb-2 text-sm font-medium">Metric test: hiện tại và lần trước</p>
+                        <ResponsiveContainer width="100%" height="88%">
+                          <BarChart data={doRunComparisonData} margin={{ top: 8, right: 8, left: -20, bottom: 0 }}>
+                            <CartesianGrid strokeDasharray="3 3" opacity={0.3} />
+                            <XAxis dataKey="label" tick={{ fontSize: 11 }} />
+                            <YAxis domain={[0, 1]} tick={{ fontSize: 11 }} />
+                            <RechartTooltip formatter={(value) => formatMetric(Number(value))} />
+                            <Legend />
+                            <Bar dataKey="previous" name="Lần trước" fill="#94a3b8" radius={[3, 3, 0, 0]} />
+                            <Bar dataKey="current" name="Hiện tại" fill="#2563eb" radius={[3, 3, 0, 0]} />
+                          </BarChart>
+                        </ResponsiveContainer>
+                      </div>
+                      <div className="space-y-2 rounded-md border p-3">
+                        <p className="text-sm font-medium">Thay đổi dữ liệu train</p>
+                        <div className="rounded border p-2">
+                          <p className="text-xs text-muted-foreground">Train thực dùng</p>
+                          <p className="font-semibold">
+                            {doPreviousEvidence?.used_train ?? "-"} → {doEvidence?.used_train ?? "-"}
+                          </p>
+                        </div>
+                        <div className="rounded border p-2">
+                          <p className="text-xs text-muted-foreground">Mẫu MLflow mới</p>
+                          <p className="font-semibold">
+                            {doPreviousEvidence?.included_mlflow_count ?? "-"} → {doEvidence?.included_mlflow_count ?? "-"}
+                          </p>
+                        </div>
+                        <div className={`rounded border p-2 text-xs ${doComparableTestSet ? "bg-emerald-500/10" : "bg-amber-500/10"}`}>
+                          Test set: {Number.isFinite(doPreviousTestSize) ? doPreviousTestSize : "-"} → {Number.isFinite(doCurrentTestSize) ? doCurrentTestSize : "-"}
+                          <br />
+                          {doComparableTestSet ? "Cùng kích thước test; có thể đối chiếu trực tiếp hơn." : "Test set khác kích thước; chỉ nên xem như tham khảo."}
+                        </div>
+                      </div>
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      Delta chỉ thể hiện chênh lệch số học. Precision và recall có thể đánh đổi lẫn nhau; phần này không tự động đồng nghĩa với promotion/deployment.
+                    </p>
+                  </div>
+                ) : (
+                  doMetrics && (
+                    <p className="rounded-md border border-dashed p-3 text-xs text-muted-foreground">
+                      Chưa có lần train hoàn tất trước đó cùng loại model để so sánh.
+                    </p>
+                  )
+                )}
+                {doEvidence && (
+                  <div className="space-y-3 rounded-md border bg-background p-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div>
+                        <p className="text-sm font-medium">Bằng chứng dataset đã train</p>
+                        <p className="text-xs text-muted-foreground">Đối chiếu bundle snapshot với dữ liệu LR Smoke thực sự sử dụng.</p>
+                      </div>
+                      <Badge variant={doEvidence.included_all_expected_mlflow && doBundleEvidenceVerified ? "secondary" : "destructive"}>
+                        {doEvidence.included_all_expected_mlflow && doBundleEvidenceVerified ? "PROVENANCE VERIFIED" : "PROVENANCE MISMATCH"}
+                      </Badge>
+                    </div>
+                    <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+                      <div className="rounded-md border p-2">
+                        <p className="text-xs text-muted-foreground">Bundle train</p>
+                        <p className="text-lg font-semibold">{doEvidence.raw_train ?? "-"}</p>
+                      </div>
+                      <div className="rounded-md border p-2">
+                        <p className="text-xs text-muted-foreground">LR train thực dùng</p>
+                        <p className="text-lg font-semibold">{doEvidence.used_train ?? "-"}</p>
+                      </div>
+                      <div className="rounded-md border p-2">
+                        <p className="text-xs text-muted-foreground">Gold thực dùng</p>
+                        <p className="text-lg font-semibold">{doEvidence.used_gold ?? "-"}</p>
+                      </div>
+                      <div className="rounded-md border p-2">
+                        <p className="text-xs text-muted-foreground">MLflow mới đã dùng</p>
+                        <p className="text-lg font-semibold">
+                          {doEvidence.included_mlflow_count ?? "-"}/{doEvidence.expected_mlflow_count ?? "-"}
+                        </p>
+                      </div>
+                    </div>
+                    <p className="break-all text-xs text-muted-foreground">
+                      MLflow IDs: {doEvidence.included_mlflow_ids?.join(", ") || "-"}
+                    </p>
+                    <p className="break-all text-xs text-muted-foreground">
+                      IDs SHA-256: {doEvidence.included_mlflow_ids_sha256 || "-"}
+                    </p>
+                  </div>
+                )}
+                {doMetrics && (
+                  <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_280px]">
+                    <div className="h-64 rounded-md border bg-background p-3">
+                      <p className="mb-2 text-sm font-medium">Validation và test metrics</p>
+                      <ResponsiveContainer width="100%" height="88%">
+                        <BarChart data={doMetricChartData} margin={{ top: 8, right: 8, left: -20, bottom: 0 }}>
+                          <CartesianGrid strokeDasharray="3 3" opacity={0.3} />
+                          <XAxis dataKey="metric" tick={{ fontSize: 11 }} />
+                          <YAxis domain={[0, 1]} tick={{ fontSize: 11 }} />
+                          <RechartTooltip />
+                          <Legend />
+                          <Bar dataKey="validation" name="Validation" fill="#2563eb" radius={[3, 3, 0, 0]} />
+                          <Bar dataKey="test" name="Test" fill="#16a34a" radius={[3, 3, 0, 0]} />
+                        </BarChart>
+                      </ResponsiveContainer>
+                    </div>
+                    <div className="rounded-md border bg-background p-3">
+                      <p className="mb-3 text-sm font-medium">Test confusion matrix</p>
+                      {doTestConfusion ? (
+                        <div className="grid grid-cols-[auto_1fr_1fr] gap-1 text-center text-xs">
+                          <span />
+                          <span className="p-2 text-muted-foreground">Dự đoán Clean</span>
+                          <span className="p-2 text-muted-foreground">Dự đoán Toxic</span>
+                          <span className="flex items-center p-2 text-left text-muted-foreground">Thật Clean</span>
+                          <span className="rounded bg-emerald-500/15 p-3 text-lg font-semibold">{doTestConfusion.tn ?? "-"}</span>
+                          <span className="rounded bg-amber-500/15 p-3 text-lg font-semibold">{doTestConfusion.fp ?? "-"}</span>
+                          <span className="flex items-center p-2 text-left text-muted-foreground">Thật Toxic</span>
+                          <span className="rounded bg-amber-500/15 p-3 text-lg font-semibold">{doTestConfusion.fn ?? "-"}</span>
+                          <span className="rounded bg-emerald-500/15 p-3 text-lg font-semibold">{doTestConfusion.tp ?? "-"}</span>
+                        </div>
+                      ) : (
+                        <p className="text-xs text-muted-foreground">Artifact chưa có confusion matrix.</p>
+                      )}
+                    </div>
+                  </div>
+                )}
                 <p className="text-xs break-all text-muted-foreground">run={doRunId} · checksum={doChecksum || "-"}</p>
                 {!doMetrics && <p className="text-xs text-amber-700 dark:text-amber-300">Artifact hoàn tất nhưng chưa tìm thấy metrics.json trong ZIP.</p>}
+                {doHasRealArtifact && (
+                  <div className="rounded-md border bg-background p-3 space-y-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <Sparkles className="h-4 w-4 text-violet-600" />
+                        <div>
+                          <p className="text-sm font-medium">Gemini Evaluate</p>
+                          <p className="text-xs text-muted-foreground">Nhận định hỗ trợ admin; không thay thế production gate.</p>
+                        </div>
+                      </div>
+                      <div className="flex gap-2">
+                        <Button variant="outline" size="sm" onClick={() => void handleGeminiEvaluate(false)} disabled={geminiEvaluating}>
+                          {geminiEvaluating ? "Đang đánh giá..." : doStatus?.gemini_evaluation ? "Xem lại" : "Đánh giá kết quả"}
+                        </Button>
+                        {doStatus?.gemini_evaluation && (
+                          <Button variant="ghost" size="sm" onClick={() => void handleGeminiEvaluate(true)} disabled={geminiEvaluating}>
+                            Đánh giá lại
+                          </Button>
+                        )}
+                      </div>
+                    </div>
+                    {doStatus?.gemini_evaluation && (
+                      <div className="space-y-2 text-sm">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <Badge variant={doStatus.gemini_evaluation.evaluation.verdict === "promote" ? "default" : doStatus.gemini_evaluation.evaluation.verdict === "hold" ? "destructive" : "secondary"}>
+                            {doStatus.gemini_evaluation.evaluation.verdict === "promote" ? "ĐỀ XUẤT PROMOTE" : doStatus.gemini_evaluation.evaluation.verdict === "hold" ? "NÊN GIỮ LẠI" : "CẦN ADMIN XEM"}
+                          </Badge>
+                          <span className="text-xs text-muted-foreground">
+                            Gemini: {doStatus.gemini_evaluation.model || "-"} · so với run {doStatus.gemini_evaluation.previous_run_id || "trước đó chưa có"}
+                          </span>
+                        </div>
+                        <p className="whitespace-pre-wrap break-words leading-relaxed">{doStatus.gemini_evaluation.evaluation.summary}</p>
+                        {doStatus.gemini_evaluation.evaluation.recommendation && (
+                          <p className="rounded bg-muted/60 p-2 text-xs whitespace-pre-wrap break-words">
+                            <span className="font-semibold">Khuyến nghị: </span>{doStatus.gemini_evaluation.evaluation.recommendation}
+                          </p>
+                        )}
+                        <div className="grid gap-2 md:grid-cols-2">
+                          {doStatus.gemini_evaluation.evaluation.strengths.length > 0 && (
+                            <div className="rounded border border-emerald-500/30 bg-emerald-500/5 p-2 text-xs">
+                              <p className="mb-1 font-semibold text-emerald-700 dark:text-emerald-300">Điểm tích cực</p>
+                              <ul className="list-disc space-y-1 pl-4">{doStatus.gemini_evaluation.evaluation.strengths.map((item, index) => <li key={`${index}-${item}`}>{item}</li>)}</ul>
+                            </div>
+                          )}
+                          {doStatus.gemini_evaluation.evaluation.risks.length > 0 && (
+                            <div className="rounded border border-amber-500/30 bg-amber-500/5 p-2 text-xs">
+                              <p className="mb-1 font-semibold text-amber-700 dark:text-amber-300">Rủi ro / cần kiểm tra</p>
+                              <ul className="list-disc space-y-1 pl-4">{doStatus.gemini_evaluation.evaluation.risks.map((item, index) => <li key={`${index}-${item}`}>{item}</li>)}</ul>
+                            </div>
+                          )}
+                        </div>
+                        {doStatus.gemini_evaluation.evaluation.metric_observations.length > 0 && (
+                          <p className="text-xs text-muted-foreground">
+                            <span className="font-semibold text-foreground">Quan sát metric: </span>
+                            {doStatus.gemini_evaluation.evaluation.metric_observations.join(" · ")}
+                          </p>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
               </Card>
             )}
 
@@ -1935,43 +2497,39 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
         <TabsContent value="step5" className="space-y-4">
           <div className="grid gap-4 md:grid-cols-2">
             <Card className="p-4 space-y-3">
-              <h3 className="font-medium">Metrics comparison</h3>
-              <div className="text-sm space-y-1">
-                <p>
-                  <b>Current:</b> {comparePayload?.current?.model || "-"}
-                </p>
-                <p>
-                  f1_toxic: {(comparePayload?.current?.metrics?.f1_toxic as number | null | undefined)?.toFixed?.(3) ?? "-"}
-                </p>
-                <p>
-                  macro_f1: {(comparePayload?.current?.metrics?.macro_f1 as number | null | undefined)?.toFixed?.(3) ?? "-"}
-                </p>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h3 className="font-medium">So sánh với production cùng model family</h3>
+                <Badge variant="outline">{comparePayload?.model_family || "chưa có family"}</Badge>
               </div>
-              <div className="text-sm space-y-1">
-                <p>
-                  <b>Candidate:</b> {comparePayload?.candidate?.model || "-"}
-                </p>
-                <p>
-                  f1_toxic: {(comparePayload?.candidate?.metrics?.f1_toxic as number | null | undefined)?.toFixed?.(3) ?? "-"}
-                </p>
-                <p>
-                  macro_f1: {(comparePayload?.candidate?.metrics?.macro_f1 as number | null | undefined)?.toFixed?.(3) ?? "-"}
-                </p>
-                <p>
-                  accuracy: {(comparePayload?.candidate?.metrics?.accuracy as number | null | undefined)?.toFixed?.(3) ?? "-"}
-                </p>
-                <p>
-                  precision: {(comparePayload?.candidate?.metrics?.precision as number | null | undefined)?.toFixed?.(3) ?? "-"}
-                </p>
-                <p>
-                  recall: {(comparePayload?.candidate?.metrics?.recall as number | null | undefined)?.toFixed?.(3) ?? "-"}
-                </p>
-                <p className="text-xs text-muted-foreground">
-                  source run: {comparePayload?.candidate?.source_run_id || "-"}
-                </p>
+              <div className="grid gap-2 text-sm sm:grid-cols-2">
+                <div className="rounded-md border p-3">
+                  <p className="text-xs text-muted-foreground">Production hiện tại</p>
+                  <p className="break-all font-semibold">{comparePayload?.current?.model || "-"}</p>
+                </div>
+                <div className="rounded-md border p-3">
+                  <p className="text-xs text-muted-foreground">Candidate</p>
+                  <p className="break-all font-semibold">{comparePayload?.candidate?.model || "-"}</p>
+                  <p className="break-all text-[11px] text-muted-foreground">run={comparePayload?.candidate?.source_run_id || "-"}</p>
+                  <p className="break-all text-[11px] text-muted-foreground">feedback snapshot={comparePayload?.candidate?.feedback_snapshot_sha256 || "-"}</p>
+                </div>
+              </div>
+              <div className="space-y-2">
+                {productionComparisonData.map((item) => (
+                  <div key={item.metric} className="grid grid-cols-[1fr_auto_auto_auto] items-center gap-3 rounded-md border px-3 py-2 text-sm">
+                    <span>{item.label}</span>
+                    <span className="text-muted-foreground">{formatMetric(item.current)}</span>
+                    <span className="font-medium">{formatMetric(item.candidate)}</span>
+                    <span className={`font-semibold ${metricDeltaClass(item.delta)}`}>{formatMetricDelta(item.delta)}</span>
+                  </div>
+                ))}
+              </div>
+              <div className={`rounded-md border p-3 text-xs ${comparePayload?.test_comparability_verified ? "bg-emerald-500/10" : "bg-amber-500/10"}`}>
+                {comparePayload?.test_comparability_verified
+                  ? "Đã xác minh cùng semantic test-set fingerprint."
+                  : "Chưa xác minh được test-set fingerprint; promotion bị khóa."}
               </div>
               <div className="flex flex-wrap gap-2">
-                <Button variant="outline" onClick={() => refreshCompare()}>
+                <Button variant="outline" onClick={() => refreshCompare(comparePayload?.candidate?.source_run_id || doRunId || undefined)}>
                   Refresh compare
                 </Button>
                 <Button
@@ -1985,17 +2543,57 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
             </Card>
 
             <Card className="p-4 space-y-3">
-              <h3 className="font-medium">Gate conditions</h3>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h3 className="font-medium">Production gate</h3>
+                <Badge variant={comparePayload?.promotion_enabled ? "default" : "secondary"}>
+                  {comparePayload?.promotion_enabled ? "READY" : "BLOCKED"}
+                </Badge>
+              </div>
               <div className="space-y-2">
                 {(comparePayload?.gate_checks || []).map((check) => (
-                  <div key={check.name} className="flex justify-between rounded-md border p-2 text-sm">
-                    <span>{check.name}</span>
+                  <div key={check.name} className="flex items-start justify-between gap-3 rounded-md border p-2 text-sm">
+                    <span>
+                      {check.name}
+                      {check.detail && <span className="mt-0.5 block text-[11px] text-muted-foreground">{check.detail}</span>}
+                    </span>
                     <Badge variant={check.passed ? "default" : "secondary"}>{check.passed ? "PASS" : "WAIT"}</Badge>
                   </div>
                 ))}
               </div>
-              <Button onClick={handlePromote}>Promote to Production</Button>
-              <p className="text-xs text-muted-foreground">Promote dùng gate check hiện có; pipeline DO trả thêm artifact URI/checksum để kiểm tra trước khi promote.</p>
+              <div className="flex flex-wrap gap-2">
+                <Dialog open={promotionDialogOpen} onOpenChange={setPromotionDialogOpen}>
+                  <DialogTrigger asChild>
+                    <Button disabled={!comparePayload?.promotion_enabled}>Promote to {comparePayload?.model_family || "family"} Production</Button>
+                  </DialogTrigger>
+                  <DialogContent>
+                    <DialogHeader>
+                      <DialogTitle>Xác nhận promotion</DialogTitle>
+                      <DialogDescription>
+                        Production pointer của <b>{comparePayload?.model_family}</b> sẽ chuyển từ <b>{comparePayload?.current?.model || "-"}</b> sang <b>{comparePayload?.candidate?.model || "-"}</b>.
+                      </DialogDescription>
+                    </DialogHeader>
+                    <div className="space-y-2 text-xs">
+                      <p className="break-all">Run: {comparePayload?.candidate?.source_run_id || "-"}</p>
+                      <p className="break-all">SHA-256: {comparePayload?.candidate?.artifact_checksum || "-"}</p>
+                    </div>
+                    <div className="flex justify-end gap-2">
+                      <Button variant="outline" onClick={() => setPromotionDialogOpen(false)}>Hủy</Button>
+                      <Button onClick={handlePromote}>Xác nhận promote</Button>
+                    </div>
+                  </DialogContent>
+                </Dialog>
+                <Button
+                  variant="outline"
+                  onClick={handleRollback}
+                  disabled={!comparePayload?.current?.rollback_available}
+                >
+                  <RotateCcw className="h-4 w-4" />
+                  Rollback
+                </Button>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Promotion cài artifact theo version bất biến và chỉ đổi production slot của đúng model family. Rollback không xóa artifact.
+              </p>
             </Card>
           </div>
         </TabsContent>

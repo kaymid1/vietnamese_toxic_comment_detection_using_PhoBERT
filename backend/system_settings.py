@@ -26,11 +26,25 @@ class SettingDefinition:
 
 
 GROUPS: tuple[tuple[str, str], ...] = (
-    ("kaggle_account", "Kaggle Account"),
+    ("kaggle_account", "Tài khoản Kaggle"),
     ("kaggle_kernel", "Kaggle Kernel"),
     ("kaggle_webhook", "Kaggle Webhook"),
-    ("gemini", "Gemini"),
+    ("mlflow_automation", "Tự động hóa MLflow"),
+    ("gemini", "Cấu hình Gemini"),
+    ("ai_instructions", "AI Instructions"),
     ("video_asr", "Video/ASR"),
+)
+
+DEFAULT_GEMINI_REVIEW_INSTRUCTION = (
+    "Bạn là reviewer dữ liệu tiếng Việt cho bài toán toxic-content detection. "
+    "Ưu tiên chất lượng nhãn training; chỉ đánh giá từ nội dung và ngữ cảnh được cung cấp. "
+    "Khi không đủ chắc chắn, yêu cầu review thêm thay vì suy đoán."
+)
+DEFAULT_GEMINI_EVALUATE_INSTRUCTION = (
+    "Bạn là trợ lý đánh giá thí nghiệm MLOps tiếng Việt. Phân tích khách quan candidate mới "
+    "so với production và run trước từ các số liệu được cung cấp. Nêu cải thiện, đánh đổi, "
+    "rủi ro và khuyến nghị rõ ràng. Không bịa số liệu, không khẳng định deployment thành công, "
+    "và không thay thế production gate hay quyết định cuối cùng của admin."
 )
 
 
@@ -61,6 +75,7 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
     SettingDefinition("KAGGLE_WEBHOOK_URL", "Trigger webhook URL", "kaggle_webhook", "Kaggle Webhook", "string", required=True),
     SettingDefinition("KAGGLE_STATUS_WEBHOOK_URL", "Status webhook URL", "kaggle_webhook", "Kaggle Webhook", "string"),
     SettingDefinition("KAGGLE_REAL_BUNDLE_URL", "Real run bundle URL", "kaggle_webhook", "Kaggle Webhook", "string"),
+    SettingDefinition("KAGGLE_BUNDLE_PUBLIC_BASE_URL", "Backend public URL for run bundles", "kaggle_webhook", "Kaggle Webhook", "string"),
     SettingDefinition(
         "KAGGLE_REAL_BUNDLE_URL_TEMPLATE",
         "Real run bundle URL template",
@@ -112,11 +127,99 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         default="5",
         min_value=1,
     ),
+    SettingDefinition(
+        "MLFLOW_AUTOMATION_ENABLED",
+        "Global automation switch",
+        "mlflow_automation",
+        "MLflow Automation",
+        "bool",
+        default="false",
+    ),
+    SettingDefinition(
+        "MLFLOW_AUTOMATION_TFIDF_LR_MODE",
+        "TF-IDF/LR mode",
+        "mlflow_automation",
+        "MLflow Automation",
+        "enum",
+        default="disabled",
+        options=("disabled", "train_only", "full_auto"),
+    ),
+    SettingDefinition(
+        "MLFLOW_AUTOMATION_PHOBERT_MODE",
+        "PhoBERT mode",
+        "mlflow_automation",
+        "MLflow Automation",
+        "enum",
+        default="disabled",
+        options=("disabled", "train_only", "full_auto"),
+    ),
+    SettingDefinition(
+        "MLFLOW_AUTOMATION_MIN_NEW_ROWS",
+        "Minimum new eligible rows",
+        "mlflow_automation",
+        "MLflow Automation",
+        "int",
+        default="50",
+        min_value=1,
+    ),
+    SettingDefinition(
+        "MLFLOW_AUTOMATION_COOLDOWN_MINUTES",
+        "Cooldown minutes",
+        "mlflow_automation",
+        "MLflow Automation",
+        "int",
+        default="1440",
+        min_value=0,
+    ),
+    SettingDefinition(
+        "MLFLOW_AUTOMATION_DRY_RUN",
+        "Automation dry run",
+        "mlflow_automation",
+        "MLflow Automation",
+        "bool",
+        default="true",
+    ),
+    SettingDefinition(
+        "MLFLOW_AUTOMATION_POLL_SECONDS",
+        "Status poll seconds",
+        "mlflow_automation",
+        "MLflow Automation",
+        "int",
+        default="30",
+        min_value=10,
+    ),
+    SettingDefinition(
+        "MLFLOW_AUTOMATION_MAX_POLL_MINUTES",
+        "Maximum watcher minutes",
+        "mlflow_automation",
+        "MLflow Automation",
+        "int",
+        default="180",
+        min_value=1,
+    ),
     SettingDefinition("GEMINI_API_KEY", "API key", "gemini", "Gemini", "string", required=True, secret=True),
     SettingDefinition("GEMINI_MODEL", "Primary model", "gemini", "Gemini", "string", default="gemini-1.5-flash-latest", required=True),
     SettingDefinition("GEMINI_FALLBACK_MODELS", "Fallback models", "gemini", "Gemini", "string", multiline=True),
     SettingDefinition("GEMINI_API_VERSION", "API version", "gemini", "Gemini", "string", default="v1beta"),
     SettingDefinition("GEMINI_MAX_TOKENS", "Max tokens", "gemini", "Gemini", "int", default="1024", min_value=1),
+    SettingDefinition(
+        "GEMINI_REVIEW_INSTRUCTION",
+        "Gemini Review instruction",
+        "ai_instructions",
+        "AI Instructions",
+        "string",
+        default=DEFAULT_GEMINI_REVIEW_INSTRUCTION,
+        multiline=True,
+    ),
+    SettingDefinition(
+        "GEMINI_EVALUATE_INSTRUCTION",
+        "Gemini Evaluate instruction",
+        "ai_instructions",
+        "AI Instructions",
+        "string",
+        default=DEFAULT_GEMINI_EVALUATE_INSTRUCTION,
+        multiline=True,
+    ),
     SettingDefinition("VIDEO_LONG_SECONDS", "Long video seconds", "video_asr", "Video/ASR", "int", default="180", min_value=0),
     SettingDefinition(
         "VIDEO_TRANSCRIPT_LIMIT_SECONDS",
@@ -132,6 +235,47 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
 
 
 DEFINITIONS_BY_KEY: Dict[str, SettingDefinition] = {definition.key: definition for definition in SETTING_DEFINITIONS}
+
+
+SETTING_VI_METADATA: Dict[str, tuple[str, str]] = {
+    "KAGGLE_USERNAME": ("Tên người dùng", "Tài khoản Kaggle dùng để xác thực khi chạy notebook thật."),
+    "KAGGLE_KEY": ("API key", "Khóa bí mật của Kaggle. Chỉ dùng cho backend; giao diện luôn che giá trị."),
+    "KAGGLE_NOTEBOOK_URL": ("Đường dẫn notebook", "URL notebook Kaggle mà webhook sẽ kích hoạt."),
+    "KAGGLE_KERNEL_OWNER": ("Chủ sở hữu kernel", "Tên tài khoản Kaggle sở hữu kernel/notebook."),
+    "KAGGLE_KERNEL_SLUG": ("Kernel slug", "Định danh ngắn của Kaggle kernel, thường là phần cuối URL notebook."),
+    "KAGGLE_KERNEL_TITLE": ("Tên hiển thị kernel", "Tên hiển thị khi tạo hoặc đồng bộ metadata của Kaggle kernel."),
+    "KAGGLE_KERNEL_ACCELERATOR": ("Bộ tăng tốc", "Loại accelerator Kaggle yêu cầu, ví dụ NvidiaTeslaT4."),
+    "KAGGLE_KERNEL_PRIVATE": ("Kernel riêng tư", "Bật để không công khai notebook và artifact trên Kaggle."),
+    "KAGGLE_KERNEL_DATASET_SOURCES": ("Nguồn dataset", "Danh sách dataset Kaggle gắn thêm cho kernel, mỗi dòng một nguồn."),
+    "KAGGLE_WEBHOOK_URL": ("URL kích hoạt", "Dịch vụ nhận yêu cầu tạo Kaggle run từ backend."),
+    "KAGGLE_STATUS_WEBHOOK_URL": ("URL trạng thái", "Dịch vụ để backend hỏi tiến độ, artifact URI và checksum của Kaggle run."),
+    "KAGGLE_REAL_BUNDLE_URL": ("Bundle URL cố định", "URL bundle dùng cho real-run legacy; ưu tiên bundle snapshot theo từng run."),
+    "KAGGLE_BUNDLE_PUBLIC_BASE_URL": ("Public URL bundle", "URL public để Kaggle tải bundle snapshot. Bắt buộc với real automation."),
+    "KAGGLE_REAL_BUNDLE_URL_TEMPLATE": ("Mẫu URL bundle", "Mẫu tạo URL bundle real-run khi dùng biến run id."),
+    "KAGGLE_WEBHOOK_TIMEOUT_SEC": ("Timeout webhook (giây)", "Thời gian backend chờ webhook phản hồi trước khi coi trigger thất bại."),
+    "KAGGLE_WEBHOOK_MODE": ("Chế độ webhook", "mock chỉ mô phỏng; real gọi webhook Kaggle thật."),
+    "KAGGLE_REAL_TEST_MODE": ("Chế độ test real", "Profile real-run được webhook dùng khi tạo thử nghiệm."),
+    "KAGGLE_PUSH_RETRY_ATTEMPTS": ("Số lần thử lại", "Số lần retry khi đẩy/cập nhật Kaggle kernel gặp lỗi tạm thời."),
+    "KAGGLE_PUSH_RETRY_DELAY_SEC": ("Chờ giữa các lần retry", "Số giây chờ giữa hai lần retry Kaggle."),
+    "MLFLOW_AUTOMATION_ENABLED": ("Công tắc tự động hóa toàn cục", "Tắt là chặn mọi cycle tự động của cả TF-IDF và PhoBERT."),
+    "MLFLOW_AUTOMATION_TFIDF_LR_MODE": ("Chế độ TF-IDF/LR", "disabled: không chạy; train_only: train rồi chờ admin; full_auto: đạt gate thì tự promote."),
+    "MLFLOW_AUTOMATION_PHOBERT_MODE": ("Chế độ PhoBERT", "disabled: không chạy; train_only: train rồi chờ admin; full_auto: đạt gate thì tự promote."),
+    "MLFLOW_AUTOMATION_MIN_NEW_ROWS": ("Tối thiểu mẫu mới", "Số dòng eligible mới cần có kể từ cycle gần nhất trước khi cho phép train."),
+    "MLFLOW_AUTOMATION_COOLDOWN_MINUTES": ("Thời gian chờ (phút)", "Khoảng cách tối thiểu giữa hai automation cycle của cùng model family."),
+    "MLFLOW_AUTOMATION_DRY_RUN": ("Chạy thử không gọi cloud", "Tạo và kiểm tra bundle nhưng không kích hoạt Kaggle cloud thật."),
+    "MLFLOW_AUTOMATION_POLL_SECONDS": ("Chu kỳ hỏi trạng thái", "Số giây giữa các lần worker tự hỏi trạng thái Kaggle."),
+    "MLFLOW_AUTOMATION_MAX_POLL_MINUTES": ("Giới hạn theo dõi (phút)", "Thời gian tối đa worker nội bộ theo dõi một run trước khi cần refresh lại."),
+    "GEMINI_API_KEY": ("Gemini API key", "Khóa bí mật để gọi Gemini Review và Gemini Evaluate."),
+    "GEMINI_MODEL": ("Model chính", "Model Gemini được dùng trước; fallback chỉ dùng khi model chính lỗi/quá tải."),
+    "GEMINI_FALLBACK_MODELS": ("Model dự phòng", "Danh sách model Gemini fallback, phân tách bằng dấu phẩy."),
+    "GEMINI_API_VERSION": ("Phiên bản API", "Phiên bản Google Generative Language API dùng để gọi model."),
+    "GEMINI_MAX_TOKENS": ("Giới hạn token", "Số token đầu ra tối đa cho mỗi câu trả lời Gemini."),
+    "GEMINI_REVIEW_INSTRUCTION": ("Instruction Gemini Review", "Prompt chỉ dẫn Gemini đánh giá nhãn comment; được hiển thị để giải trình với hội đồng."),
+    "GEMINI_EVALUATE_INSTRUCTION": ("Instruction Gemini Evaluate", "Prompt chỉ dẫn Gemini nhận định candidate train mới so với run trước/production; không tự thay gate."),
+    "VIDEO_LONG_SECONDS": ("Ngưỡng video dài", "Số giây để phân loại video là dài trong luồng xử lý video."),
+    "VIDEO_TRANSCRIPT_LIMIT_SECONDS": ("Giới hạn transcript", "Số giây audio/video tối đa được đưa vào transcript."),
+    "ASR_TRIM_SECONDS": ("Cắt ASR (giây)", "Số giây audio tối đa gửi qua ASR để giới hạn chi phí và thời gian."),
+}
 
 
 def ensure_system_settings_table(conn: sqlite3.Connection) -> None:
@@ -242,6 +386,10 @@ def list_system_settings(db_path: Path) -> Dict[str, Any]:
 
     grouped: Dict[str, List[Dict[str, Any]]] = {group_id: [] for group_id, _ in GROUPS}
     for definition in SETTING_DEFINITIONS:
+        vietnamese_label, vietnamese_description = SETTING_VI_METADATA.get(
+            definition.key,
+            (definition.label, f"Cấu hình runtime cho {definition.key}."),
+        )
         has_override = definition.key in values
         raw_value = values.get(definition.key)
         if raw_value is None:
@@ -249,7 +397,8 @@ def list_system_settings(db_path: Path) -> Dict[str, Any]:
         has_value = raw_value is not None and str(raw_value).strip() != ""
         setting: Dict[str, Any] = {
             "key": definition.key,
-            "label": definition.label,
+            "label": vietnamese_label,
+            "description": vietnamese_description,
             "type": definition.value_type,
             "required": definition.required,
             "secret": definition.secret,

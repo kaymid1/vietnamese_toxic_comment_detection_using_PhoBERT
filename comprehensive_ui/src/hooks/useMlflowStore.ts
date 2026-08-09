@@ -163,6 +163,8 @@ export interface MlflowCandidate {
   is_locked?: number | null;
   label_source?: string | null;
   label_confidence?: string | null;
+  source_type?: "crawl" | "synthetic" | string | null;
+  source_row_id?: number | null;
   gate_bucket: string;
   verification_status: string;
   reviewed_at?: string | null;
@@ -192,7 +194,34 @@ export interface MlflowTrainingPreview {
   constructiveness: {
     included: number;
     masked: number;
+    constructive: number;
+    non_constructive: number;
   };
+}
+
+export interface MlflowTrainingRowStatus {
+  will_finetune: boolean;
+  reason_code: string;
+  reason: string;
+}
+
+export interface MlflowTrainingPlan {
+  scope: "batch" | "all_batches";
+  batch_id?: string | null;
+  balance_strategy: "balanced_50_50" | "all";
+  summary: {
+    gold_train: number;
+    eligible_mlflow: number;
+    after_balance: number;
+    duplicates_skipped: number;
+    empty_skipped: number;
+    mlflow_added: number;
+    final_train: number;
+    gold_validation: number;
+    gold_test: number;
+  };
+  balance: Record<string, unknown>;
+  row_statuses: Record<string, MlflowTrainingRowStatus>;
 }
 
 export interface MlflowGeminiReviewSuggestion {
@@ -250,23 +279,44 @@ export type MlflowUnusedScope = "all" | "auto_discarded" | "manual_rejected";
 export type MlflowExportScope = "all_batches" | "batch";
 
 export interface MlflowComparePayload {
+  model_family?: "tfidf_lr" | "phobert";
   current?: {
     model?: string | null;
+    model_family?: string;
+    run_id?: string | null;
     metrics?: Record<string, number | null>;
+    artifact_checksum?: string | null;
+    test_fingerprint?: string | null;
+    test_size?: number | null;
+    previous_model?: string | null;
+    rollback_available?: boolean;
     created_at?: string | null;
   };
   candidate?: {
     model?: string | null;
+    model_family?: string;
     artifact_path?: string | null;
+    artifact_checksum?: string | null;
+    artifact_actual_checksum?: string | null;
+    artifact_verified?: boolean;
+    artifact_contract?: string | null;
     notes?: string | null;
     metrics?: Record<string, number | null>;
     source_run_id?: string | null;
+    bundle_checksum?: string | null;
+    included_mlflow_ids_sha256?: string | null;
+    feedback_snapshot_sha256?: string | null;
+    test_fingerprint?: string | null;
+    test_size?: number | null;
     raw_metrics?: MlflowKaggleMetrics | null;
     created_at?: string | null;
   };
-  gate_checks?: Array<{ name: string; delta: number | null; passed: boolean }>;
+  deltas?: Record<string, number | null>;
+  test_comparability_verified?: boolean;
+  gate_checks?: Array<{ name: string; delta: number | null; passed: boolean; detail?: string | null }>;
   promotion_enabled?: boolean;
   promotion_mode?: string;
+  message?: string;
 }
 
 export interface MlflowKaggleMetrics {
@@ -278,6 +328,27 @@ export interface MlflowKaggleMetrics {
   source_member?: string | null;
   run_name?: string | null;
   mode?: string | null;
+  sizes?: Record<string, number>;
+  dataset_evidence?: {
+    raw_train?: number;
+    raw_gold?: number;
+    raw_mlflow?: number;
+    used_train?: number;
+    used_gold?: number;
+    used_mlflow?: number;
+    expected_mlflow_count?: number;
+    included_mlflow_count?: number;
+    included_all_expected_mlflow?: boolean;
+    included_mlflow_ids?: number[];
+    included_mlflow_ids_sha256?: string;
+    gold_downsampled?: number;
+    bundle_sha256?: string | null;
+    duration_seconds?: number;
+    started_at?: string;
+    finished_at?: string;
+    seed?: number;
+  } | null;
+  confusion_matrix?: Record<string, { tn?: number; fp?: number; fn?: number; tp?: number }> | null;
   splits?: Record<string, Record<string, number>>;
 }
 
@@ -299,7 +370,21 @@ export interface MlflowKaggleStatus {
   artifact_kind?: string;
   artifact_download_url?: string | null;
   artifact_checksum?: string | null;
+  bundle_path?: string | null;
+  bundle_url?: string | null;
+  bundle_checksum?: string | null;
+  training_plan?: Record<string, unknown> | null;
   metrics?: MlflowKaggleMetrics | null;
+  previous_run?: {
+    run_id: string;
+    created_at?: string | null;
+    updated_at?: string | null;
+    artifact_checksum?: string | null;
+    model_kind?: string;
+    training_mode?: string;
+    metrics?: MlflowKaggleMetrics | null;
+  } | null;
+  gemini_evaluation?: MlflowGeminiEvaluationResponse | null;
   error_message?: string | null;
   run_mode?: string;
   status_source?: string;
@@ -307,6 +392,25 @@ export interface MlflowKaggleStatus {
   created_at?: string | null;
   updated_at?: string | null;
   job_id?: string | null;
+}
+
+export interface MlflowGeminiEvaluation {
+  summary: string;
+  verdict: "promote" | "review" | "hold";
+  recommendation: string;
+  strengths: string[];
+  risks: string[];
+  metric_observations: string[];
+}
+
+export interface MlflowGeminiEvaluationResponse {
+  status: "evaluated" | "cached";
+  run_id: string;
+  model_family: "tfidf_lr" | "phobert";
+  previous_run_id?: string | null;
+  evaluation: MlflowGeminiEvaluation;
+  model?: string | null;
+  created_at?: string | null;
 }
 
 export interface MlflowDeletedRows {
@@ -346,6 +450,8 @@ export interface MlflowDOTriggerOptions {
   cpuProfile?: string;
   gpuProfile?: string;
   dryRun?: boolean;
+  balanceStrategy?: "balanced_50_50" | "all";
+  bundleScope?: "all_batches" | "batch";
 }
 
 export interface MlflowImportModelZipResponse {
@@ -360,6 +466,17 @@ export interface MlflowImportModelZipResponse {
 const DO_TERMINAL_STATUSES = new Set(["completed", "failed", "dry_run", "placeholder"]);
 const DO_POLL_INTERVAL_MS = 4000;
 const DO_MAX_POLL_ATTEMPTS = 21600;
+const DO_RUN_STORAGE_KEY = "viettoxic:mlflow:kaggleRunId";
+
+const readPersistedDORunId = () => {
+  if (typeof window === "undefined") return null;
+  try {
+    const value = window.localStorage.getItem(DO_RUN_STORAGE_KEY)?.trim() || "";
+    return /^kaggle_[a-zA-Z0-9_-]+$/.test(value) ? value : null;
+  } catch {
+    return null;
+  }
+};
 
 export function useMlflowStore(options: UseMlflowStoreOptions = {}) {
   const { adminToken, onUnauthorized } = options;
@@ -375,6 +492,7 @@ export function useMlflowStore(options: UseMlflowStoreOptions = {}) {
   const [batches, setBatches] = useState<MlflowBatchSummary[]>([]);
   const [reviewHistory, setReviewHistory] = useState<MlflowCandidate[]>([]);
   const [trainingPreview, setTrainingPreview] = useState<MlflowTrainingPreview | null>(null);
+  const [trainingPlan, setTrainingPlan] = useState<MlflowTrainingPlan | null>(null);
   const [reviewHistoryTotal, setReviewHistoryTotal] = useState(0);
   const [reviewHistoryPage, setReviewHistoryPage] = useState(1);
   const [crawlHistory, setCrawlHistory] = useState<MlflowCrawlHistoryItem[]>([]);
@@ -384,7 +502,7 @@ export function useMlflowStore(options: UseMlflowStoreOptions = {}) {
   const [comparePayload, setComparePayload] = useState<MlflowComparePayload | null>(null);
   const [lastBundlePath, setLastBundlePath] = useState<string | null>(null);
   const [requiredZipContents, setRequiredZipContents] = useState<string[]>([]);
-  const [doRunId, setDoRunId] = useState<string | null>(null);
+  const [doRunId, setDoRunId] = useState<string | null>(readPersistedDORunId);
   const [doStatus, setDoStatus] = useState<MlflowKaggleStatus | null>(null);
   const [doPreflight, setDoPreflight] = useState<MlflowDOPreflight | null>(null);
   const [hasNoBatch, setHasNoBatch] = useState(false);
@@ -543,7 +661,7 @@ export function useMlflowStore(options: UseMlflowStoreOptions = {}) {
       return run(async () => {
         const query = new URLSearchParams({
           page: String(page),
-          page_size: "50",
+          page_size: "300",
           scope,
         });
         if (scope === "batch" && activeBatchId) {
@@ -554,6 +672,24 @@ export function useMlflowStore(options: UseMlflowStoreOptions = {}) {
           await authorizedFetch(buildApiUrl(`/api/mlflow/training-preview?${query.toString()}`)),
         );
         setTrainingPreview(payload);
+        return payload;
+      });
+    },
+    [activeBatchId, authorizedFetch, run],
+  );
+
+  const refreshTrainingPlan = useCallback(
+    async (balanceStrategy: "balanced_50_50" | "all" = "balanced_50_50", scope: "batch" | "all_batches" = "all_batches") => {
+      return run(async () => {
+        const query = new URLSearchParams({ balance_strategy: balanceStrategy, scope });
+        if (scope === "batch" && activeBatchId) {
+          query.set("batch_id", activeBatchId);
+          query.set("strict_batch", "true");
+        }
+        const payload = await parseJsonResponse<MlflowTrainingPlan>(
+          await authorizedFetch(buildApiUrl(`/api/mlflow/training-plan?${query.toString()}`)),
+        );
+        setTrainingPlan(payload);
         return payload;
       });
     },
@@ -571,6 +707,7 @@ export function useMlflowStore(options: UseMlflowStoreOptions = {}) {
         lock_state?: boolean;
         label_source?: string;
         label_confidence?: string;
+        reviewed_by_gemini?: boolean;
       }>,
     ) => {
       return run(async () => {
@@ -593,6 +730,21 @@ export function useMlflowStore(options: UseMlflowStoreOptions = {}) {
       return run(async () => {
         return parseJsonResponse<MlflowGeminiReviewResponse>(
           await authorizedFetch(buildApiUrl("/api/mlflow/training-preview/gemini-review"), {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ids }),
+          }),
+        );
+      });
+    },
+    [authorizedFetch, run],
+  );
+
+  const geminiReviewCandidates = useCallback(
+    async (ids: number[]) => {
+      return run(async () => {
+        return parseJsonResponse<MlflowGeminiReviewResponse>(
+          await authorizedFetch(buildApiUrl("/api/mlflow/candidates/gemini-review"), {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ ids }),
@@ -818,6 +970,23 @@ export function useMlflowStore(options: UseMlflowStoreOptions = {}) {
     [authorizedFetch, doRunId, run],
   );
 
+  const geminiEvaluateKaggleRun = useCallback(
+    async (runId: string, force = false) => {
+      return run(async () => {
+        const payload = await parseJsonResponse<MlflowGeminiEvaluationResponse>(
+          await authorizedFetch(buildApiUrl("/api/mlflow/kaggle/evaluate"), {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ run_id: runId, force }),
+          }),
+        );
+        await refreshDOStatus(runId);
+        return payload;
+      });
+    },
+    [authorizedFetch, refreshDOStatus, run],
+  );
+
   const stopDOPolling = useCallback(() => {
     if (doPollTimerRef.current) {
       clearInterval(doPollTimerRef.current);
@@ -828,6 +997,13 @@ export function useMlflowStore(options: UseMlflowStoreOptions = {}) {
 
   const clearDOSession = useCallback(() => {
     stopDOPolling();
+    if (typeof window !== "undefined") {
+      try {
+        window.localStorage.removeItem(DO_RUN_STORAGE_KEY);
+      } catch {
+        // Storage can be unavailable in private/restricted browser contexts.
+      }
+    }
     setDoRunId(null);
     setDoStatus(null);
   }, [stopDOPolling]);
@@ -867,6 +1043,38 @@ export function useMlflowStore(options: UseMlflowStoreOptions = {}) {
     };
   }, [stopDOPolling]);
 
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      if (doRunId) {
+        window.localStorage.setItem(DO_RUN_STORAGE_KEY, doRunId);
+      } else {
+        window.localStorage.removeItem(DO_RUN_STORAGE_KEY);
+      }
+    } catch {
+      // Storage can be unavailable in private/restricted browser contexts.
+    }
+  }, [doRunId]);
+
+  useEffect(() => {
+    if (!adminToken || !doRunId) return;
+    let cancelled = false;
+    void refreshDOStatus(doRunId)
+      .then((payload) => {
+        if (cancelled) return;
+        const status = typeof payload?.status === "string" ? payload.status : "";
+        if (!DO_TERMINAL_STATUSES.has(status)) {
+          startDOPolling(doRunId);
+        }
+      })
+      .catch(() => {
+        // A temporary API failure must not clear the persisted session.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [adminToken, doRunId, refreshDOStatus, startDOPolling]);
+
   const triggerDO = useCallback(
     async (options?: MlflowDOTriggerOptions) => {
       return run(async () => {
@@ -882,6 +1090,8 @@ export function useMlflowStore(options: UseMlflowStoreOptions = {}) {
           model_kind: modelKind,
           training_mode: trainingMode,
           training_scope: "light_only",
+          balance_strategy: options?.balanceStrategy || "balanced_50_50",
+          bundle_scope: options?.bundleScope || "all_batches",
         };
         if (baseModel) {
           payloadBody.base_model = baseModel;
@@ -894,6 +1104,9 @@ export function useMlflowStore(options: UseMlflowStoreOptions = {}) {
           dry_run: boolean;
           training_mode?: "retrain" | "finetune";
           base_model?: string | null;
+          bundle_path?: string | null;
+          bundle_checksum?: string | null;
+          training_plan?: Record<string, unknown> | null;
         }>(
           await authorizedFetch(buildApiUrl("/api/mlflow/kaggle/trigger"), {
             method: "POST",
@@ -920,10 +1133,11 @@ export function useMlflowStore(options: UseMlflowStoreOptions = {}) {
     [activeBatchId, authorizedFetch, doPreflight, refreshDOStatus, run, startDOPolling],
   );
 
-  const refreshCompare = useCallback(async () => {
+  const refreshCompare = useCallback(async (runId?: string) => {
     return run(async () => {
+      const query = runId ? `?run_id=${encodeURIComponent(runId)}` : "";
       const payload = await parseJsonResponse<MlflowComparePayload>(
-        await authorizedFetch(buildApiUrl("/api/mlflow/compare/latest")),
+        await authorizedFetch(buildApiUrl(`/api/mlflow/compare/latest${query}`)),
       );
       setComparePayload(payload);
       return payload;
@@ -931,13 +1145,35 @@ export function useMlflowStore(options: UseMlflowStoreOptions = {}) {
   }, [authorizedFetch, run]);
 
   const promote = useCallback(
-    async (candidateModel: string) => {
+    async (runId: string, artifactChecksum?: string | null, expectedCurrentVersion?: string | null) => {
       return run(async () => {
-        return parseJsonResponse<{ status: string; message?: string }>(
+        return parseJsonResponse<{ status: string; message?: string; candidate_model?: string; previous_model?: string }>(
           await authorizedFetch(buildApiUrl("/api/mlflow/promote"), {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ candidate_model: candidateModel }),
+            body: JSON.stringify({
+              run_id: runId,
+              artifact_checksum: artifactChecksum || undefined,
+              expected_current_version: expectedCurrentVersion || undefined,
+            }),
+          }),
+        );
+      });
+    },
+    [authorizedFetch, run],
+  );
+
+  const rollback = useCallback(
+    async (modelFamily: "tfidf_lr" | "phobert", expectedCurrentVersion?: string | null) => {
+      return run(async () => {
+        return parseJsonResponse<{ status: string; message?: string; active_model?: string; previous_model?: string }>(
+          await authorizedFetch(buildApiUrl("/api/mlflow/rollback"), {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              model_family: modelFamily,
+              expected_current_version: expectedCurrentVersion || undefined,
+            }),
           }),
         );
       });
@@ -952,7 +1188,12 @@ export function useMlflowStore(options: UseMlflowStoreOptions = {}) {
         action?: "include_toxic" | "include_clean" | "drop";
         decision?: "accept" | "reject";
         pseudo_label?: 0 | 1;
+        constructiveness_label?: 0 | 1;
+        clear_constructiveness?: boolean;
         lock_state?: boolean;
+        label_source?: string;
+        label_confidence?: string;
+        reviewed_by_gemini?: boolean;
       }>,
     ) => {
       return run(async () => {
@@ -1162,6 +1403,7 @@ export function useMlflowStore(options: UseMlflowStoreOptions = {}) {
     overview,
     candidates,
     trainingPreview,
+    trainingPlan,
     candidateTotal,
     candidatePage,
     candidatePageSize,
@@ -1184,8 +1426,10 @@ export function useMlflowStore(options: UseMlflowStoreOptions = {}) {
     refreshBatches,
     refreshCandidates,
     refreshTrainingPreview,
+    refreshTrainingPlan,
     reviewTrainingPreview,
     geminiReviewTrainingPreview,
+    geminiReviewCandidates,
     refreshReviewHistory,
     refreshCrawlHistory,
     reviewCandidates,
@@ -1198,9 +1442,11 @@ export function useMlflowStore(options: UseMlflowStoreOptions = {}) {
     triggerDO,
     refreshDOPreflight,
     refreshDOStatus,
+    geminiEvaluateKaggleRun,
     clearDOSession,
     refreshCompare,
     promote,
+    rollback,
     setError,
   };
 }

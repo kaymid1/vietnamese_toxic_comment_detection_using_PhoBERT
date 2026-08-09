@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Eye, EyeOff, RotateCcw, Save } from "lucide-react";
+import { CircleHelp, Eye, EyeOff, RotateCcw, Save } from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "@/app/components/ui/badge";
 import { Button } from "@/app/components/ui/button";
@@ -8,11 +8,13 @@ import { Input } from "@/app/components/ui/input";
 import { Switch } from "@/app/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/app/components/ui/tabs";
 import { Textarea } from "@/app/components/ui/textarea";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/app/components/ui/tooltip";
 import { fetchApiWithFallback } from "../../hooks/useMlflowStore";
 
 interface SystemSettingItem {
   key: string;
   label: string;
+  description?: string;
   type: "string" | "int" | "bool" | "enum";
   required: boolean;
   secret: boolean;
@@ -83,6 +85,7 @@ export function SystemSettingsPage({ adminToken, onAdminUnauthorized }: SystemSe
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const activeGroup = groups.find((group) => group.id === activeTab) || groups[0];
 
   const authHeaders = useMemo(
     () => ({
@@ -169,7 +172,7 @@ export function SystemSettingsPage({ adminToken, onAdminUnauthorized }: SystemSe
       settings[setting.key] = drafts[setting.key] ?? "";
     }
     if (Object.keys(settings).length === 0) {
-      toast.info("No changes to save.");
+      toast.info("Chưa có thay đổi để lưu.");
       return;
     }
 
@@ -204,7 +207,7 @@ export function SystemSettingsPage({ adminToken, onAdminUnauthorized }: SystemSe
         Object.keys(settings).forEach((key) => next.delete(key));
         return next;
       });
-      toast.success("System settings saved.");
+      toast.success("Đã lưu cấu hình hệ thống.");
     } catch (err) {
       if (err instanceof Error && err.message === "UNAUTHORIZED") {
         onAdminUnauthorized();
@@ -241,7 +244,7 @@ export function SystemSettingsPage({ adminToken, onAdminUnauthorized }: SystemSe
         copy.delete(key);
         return copy;
       });
-      toast.success("Setting reset to env/default fallback.");
+      toast.success("Đã trả cấu hình về env/default.");
     } catch (err) {
       if (err instanceof Error && err.message === "UNAUTHORIZED") {
         onAdminUnauthorized();
@@ -306,19 +309,30 @@ export function SystemSettingsPage({ adminToken, onAdminUnauthorized }: SystemSe
     <div className="dashboard-page mx-auto max-w-6xl space-y-5">
       <div>
         <p className="text-xs uppercase tracking-wider text-muted-foreground">Admin / Runtime Config</p>
-        <h2 className="mt-1 text-2xl font-semibold text-foreground">System Setting</h2>
+        <h2 className="mt-1 text-2xl font-semibold text-foreground">Cấu hình hệ thống</h2>
       </div>
 
       {error && <Card className="border-destructive/40 bg-destructive/5 p-4 text-sm text-destructive">{error}</Card>}
 
       <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-4">
-        <TabsList className="flex h-auto flex-wrap justify-start gap-2">
+        <TabsList className="flex h-auto flex-wrap justify-start gap-2 rounded-lg border bg-muted/40 p-1.5">
           {groups.map((group) => (
-            <TabsTrigger key={group.id} value={group.id}>
+            <TabsTrigger
+              key={group.id}
+              value={group.id}
+              className="border border-transparent px-3 py-2 data-[state=active]:border-primary/30 data-[state=active]:bg-background data-[state=active]:font-semibold data-[state=active]:shadow-sm"
+            >
               {group.label}
             </TabsTrigger>
           ))}
         </TabsList>
+
+        {activeGroup && (
+          <div className="flex items-center gap-2 rounded-md border border-primary/20 bg-primary/5 px-3 py-2 text-sm">
+            <span className="text-muted-foreground">Đang cấu hình:</span>
+            <span className="font-semibold text-foreground">{activeGroup.label}</span>
+          </div>
+        )}
 
         {groups.map((group) => (
           <TabsContent key={group.id} value={group.id} className="space-y-4">
@@ -326,14 +340,22 @@ export function SystemSettingsPage({ adminToken, onAdminUnauthorized }: SystemSe
               <div>
                 <h3 className="text-lg font-semibold text-foreground">{group.label}</h3>
                 <p className="text-sm text-muted-foreground">
-                  Runtime values override `.env.local`; empty DB values fall back to env/default.
+                  Giá trị trong DB ưu tiên hơn `.env.local`; để trống sẽ dùng env/default.
                 </p>
               </div>
               <Button type="button" onClick={() => saveGroup(group)} disabled={loading || saving}>
                 <Save className="mr-2 h-4 w-4" />
-                Save tab
+                Lưu panel này
               </Button>
             </div>
+
+            {group.id === "mlflow_automation" && (
+              <Card className="border-amber-500/40 bg-amber-500/10 p-4 text-sm text-muted-foreground">
+                Chỉ bật công tắc toàn cục khi Kaggle bundle endpoint đã public và kiểm tra preflight đạt. `train_only`
+                tạo candidate để admin duyệt; `full_auto` chỉ promote candidate do automation tạo và đã qua production gate.
+                Dữ liệu mới vẫn phải vượt ngưỡng số dòng và cooldown bên dưới.
+              </Card>
+            )}
 
             <div className="grid gap-3">
               {group.settings.map((setting) => (
@@ -342,11 +364,37 @@ export function SystemSettingsPage({ adminToken, onAdminUnauthorized }: SystemSe
                     <div className="space-y-2">
                       <div className="flex flex-wrap items-center gap-2">
                         <span className="font-medium text-foreground">{setting.label}</span>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <button
+                              type="button"
+                              className="inline-flex rounded-sm text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+                              aria-label={`Giải thích ${setting.key}`}
+                            >
+                              <CircleHelp className="h-4 w-4" />
+                            </button>
+                          </TooltipTrigger>
+                          <TooltipContent side="right" sideOffset={8}>
+                            {setting.description || `Cấu hình runtime cho ${setting.key}.`}
+                          </TooltipContent>
+                        </Tooltip>
                         {setting.required && <Badge variant="outline">required</Badge>}
                         {setting.secret && <Badge variant="secondary">secret</Badge>}
                         <Badge variant={sourceVariant(setting.source)}>{setting.source}</Badge>
                       </div>
-                      <p className="break-all font-mono text-xs text-muted-foreground">{setting.key}</p>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <button
+                            type="button"
+                            className="break-all rounded-sm font-mono text-left text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline focus-visible:ring-2 focus-visible:ring-ring"
+                          >
+                            {setting.key}
+                          </button>
+                        </TooltipTrigger>
+                        <TooltipContent side="right" sideOffset={8}>
+                          {setting.description || `Cấu hình runtime cho ${setting.key}.`}
+                        </TooltipContent>
+                      </Tooltip>
                     </div>
 
                     <div className="space-y-2">

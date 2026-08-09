@@ -54,7 +54,9 @@ export function Navigation({
 
   const datasetNavItems = [
     { name: t("nav.datasetOverview"), id: "dataset", icon: Database },
-    { name: t("nav.datasetSynthetic"), id: "dataset_synthetic", icon: Sparkles },
+    ...(adminAuthenticated
+      ? [{ name: t("nav.datasetSynthetic"), id: "dataset_synthetic", icon: Sparkles }]
+      : []),
   ];
 
   const adminNavItems = [

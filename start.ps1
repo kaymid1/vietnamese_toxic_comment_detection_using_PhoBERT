@@ -2,7 +2,7 @@
 param(
   [int]$BackendPort = 8000,
   [int]$FrontendPort = 5173,
-  [int]$WebhookPort = 9000,
+  [int]$WebhookPort = 9001,
   [string]$WebhookNgrokDomain = "living-rare-ram.ngrok-free.app",
   [switch]$StartFrontendNgrok,
   [switch]$SkipWebhookSettingsSync,
@@ -68,21 +68,31 @@ function Stop-ProcessRows {
   }
 }
 
-function Stop-ListenersOnPort {
-  param([int]$Port)
-  try {
-    $listeners = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
-    if (-not $listeners) { return }
-    $pids = $listeners | Select-Object -ExpandProperty OwningProcess -Unique
-    foreach ($ownerPid in $pids) {
-      try {
-        Write-Host ("[INFO] Reclaiming port {0} from PID={1}" -f $Port, $ownerPid)
-        Stop-Process -Id $ownerPid -Force -ErrorAction SilentlyContinue
-      } catch {
+function Assert-PortsAreFree {
+  param(
+    [int[]]$Ports,
+    [int]$TimeoutSec = 10
+  )
+
+  $deadline = (Get-Date).AddSeconds($TimeoutSec)
+  do {
+    $busy = @()
+    foreach ($port in $Ports) {
+      $listeners = @(Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue)
+      if ($listeners) {
+        $pids = $listeners | Select-Object -ExpandProperty OwningProcess -Unique
+        $busy += ("{0} (PID {1})" -f $port, ($pids -join ", "))
       }
     }
-  } catch {
-  }
+    if (-not $busy) { return }
+    Start-Sleep -Milliseconds 250
+  } while ((Get-Date) -lt $deadline)
+
+  $message = (
+    "Cannot start because required ports are still in use: {0}. " +
+    "Only recognized VietToxic services are stopped automatically; stop the remaining process or run start.ps1 from an elevated PowerShell if it belongs to another Windows session."
+  ) -f ($busy -join "; ")
+  throw $message
 }
 
 function Wait-HttpReady {
@@ -157,7 +167,8 @@ function Sync-LocalWebhookSettings {
   param(
     [string]$PythonExe,
     [string]$RepoRoot,
-    [int]$WebhookPort
+    [int]$WebhookPort,
+    [string]$WebhookPublicBaseUrl
   )
 
   $triggerUrl = "http://127.0.0.1:$WebhookPort/kaggle/trigger"
@@ -177,16 +188,17 @@ update_system_settings(
     {
         "KAGGLE_WEBHOOK_URL": sys.argv[2],
         "KAGGLE_STATUS_WEBHOOK_URL": sys.argv[3],
+        "KAGGLE_BUNDLE_PUBLIC_BASE_URL": sys.argv[4],
     },
     updated_by="start.ps1",
 )
 "@
 
-  $code | & $PythonExe - $RepoRoot $triggerUrl $statusUrl
+  $code | & $PythonExe - $RepoRoot $triggerUrl $statusUrl $WebhookPublicBaseUrl
   if ($LASTEXITCODE -ne 0) {
     throw "Failed to sync Kaggle webhook settings."
   }
-  Write-Host ("[INFO] Synced Kaggle webhook settings: {0}" -f $triggerUrl)
+  Write-Host ("[INFO] Synced Kaggle webhook settings: {0}; bundle public base: {1}" -f $triggerUrl, $WebhookPublicBaseUrl)
 }
 
 function Flush-LogJobs {
@@ -211,21 +223,22 @@ if ($WebhookNgrokDomain -match "^https?://") {
 }
 
 if (-not $SkipWebhookSettingsSync) {
-  Sync-LocalWebhookSettings -PythonExe $PythonExe -RepoRoot $RepoRoot -WebhookPort $WebhookPort
+  Sync-LocalWebhookSettings -PythonExe $PythonExe -RepoRoot $RepoRoot -WebhookPort $WebhookPort -WebhookPublicBaseUrl $WebhookNgrokUrl
 } else {
   Write-Host "[INFO] Skipping Kaggle webhook settings sync."
 }
 
-# Clean up stale service processes from earlier runs.
-Stop-ListenersOnPort -Port $BackendPort
-Stop-ListenersOnPort -Port $FrontendPort
-Stop-ListenersOnPort -Port $WebhookPort
+# Clean up stale VietToxic service parents from earlier runs. Uvicorn --reload
+# creates a parent/worker pair that can both appear as listeners, so stop the
+# recognized parent command rather than killing an arbitrary process by port.
 Stop-ProcessRows -Rows (Get-ProcessRowsByCommandPattern "uvicorn\s+backend\.app:app") -Reason "old backend"
 Stop-ProcessRows -Rows (Get-ProcessRowsByCommandPattern "uvicorn\s+backend\.kaggle_webhook_receiver:app") -Reason "old webhook-receiver"
+Stop-ProcessRows -Rows (Get-ProcessRowsByCommandPattern "vite(?:\.js)?(?:\s|.*\s)--.*\bport\s+$FrontendPort\b") -Reason "old frontend"
 Stop-ProcessRows -Rows (Get-ProcessRowsByCommandPattern "ngrok\s+http.*\b$WebhookPort\b") -Reason "old ngrok-webhook"
 if ($StartFrontendNgrok) {
   Stop-ProcessRows -Rows (Get-ProcessRowsByCommandPattern "ngrok\s+http.*\b$FrontendPort\b") -Reason "old ngrok-frontend"
 }
+Assert-PortsAreFree -Ports @($BackendPort, $FrontendPort, $WebhookPort)
 
 if (-not (Test-Path (Join-Path $UiDir "node_modules"))) {
   Write-Host "[INFO] Installing frontend dependencies..."
