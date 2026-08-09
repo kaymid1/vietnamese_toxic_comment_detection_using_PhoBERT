@@ -66,7 +66,7 @@ type IconButtonWithTooltipProps = ComponentProps<typeof Button> & {
 
 function IconButtonWithTooltip({ label, tooltip, children, ...buttonProps }: IconButtonWithTooltipProps) {
   return (
-    <Tooltip>
+    <Tooltip delayDuration={1000}>
       <TooltipTrigger asChild>
         <span className="inline-flex">
           <Button aria-label={label} title={label} {...buttonProps}>

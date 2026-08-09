@@ -457,7 +457,7 @@ interface MlflowBadgeProps extends Omit<ComponentProps<typeof Badge>, "children"
 export function MlflowBadge({ presentation, prefix, className = "", ...badgeProps }: MlflowBadgeProps) {
   const visibleLabel = prefix ? `${prefix}: ${presentation.label}` : presentation.label;
   return (
-    <Tooltip>
+    <Tooltip delayDuration={1000}>
       <TooltipTrigger asChild>
         <Badge
           variant="outline"
