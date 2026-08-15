@@ -26,6 +26,7 @@ The old article/video crawl lane (`setup_and_crawl.py`) is still in the repo, bu
 - **Crawler in active path**: `comment_crawl.py`
 - **Feedback / metadata storage**: SQLite (`data/processed/feedback/feedback.db`)
 - **MLflow review candidates**: same SQLite DB, table `mlflow_comment_item`
+- **Per-model prediction history**: same SQLite DB, table `mlflow_comment_prediction`
 
 ---
 
@@ -95,9 +96,11 @@ So old docs describing interactive ask-mode Selenium decisions or active video c
 
 4. `/api/analyze` now defaults to `collect_for_mlflow: true`.
    - New inferred segments are gated with `mlflow_gate_accept_threshold` / `mlflow_gate_discard_threshold`.
-   - A user scan creates an `mlf_auto_*` MLflow batch only when at least one new row is inserted.
-   - If the URL was already collected in `mlflow_comment_item`, the whole URL is skipped for MLflow collection.
-   - If the segment already exists by `context_segment_hash`/`segment_hash` + `html_tag` (or computed `dedupe_key`), it is skipped.
+   - A user scan creates an `mlf_auto_*` MLflow batch when it stores at least one new canonical sample or one new per-model prediction.
+   - Every inferred segment is resolved by the existing context-sensitive `dedupe_key`; an existing URL no longer suppresses segment processing.
+   - `mlflow_comment_item` remains one canonical sample/review/training row per dedupe identity. `mlflow_comment_prediction` stores one immutable observation per canonical sample and `model_id`.
+   - Re-running the same model version for the same sample is idempotent. Running another model version stores another prediction without duplicating the Manual Verify row.
+   - A same-URL segment with a different effective dedupe key is stored as a new canonical sample.
    - Public analysis results are still returned normally even when MLflow collection skips all rows.
 
 ### MLflow review and training semantics
@@ -105,12 +108,14 @@ So old docs describing interactive ask-mode Selenium decisions or active video c
 The following definitions describe the active implementation in `backend/app.py`, not just the UI labels:
 
 - **Runtime DB**: MLflow batches and review rows are persisted in `data/processed/feedback/feedback.db`, table `mlflow_comment_item`.
+- **Prediction history**: crawl-model evidence is persisted separately in `mlflow_comment_prediction`. Uniqueness is `(sample_item_id, model_id)`. New records retain raw/adjusted toxicity scores, the inference label, constructiveness outputs, threshold, batch/job linkage, and timestamp. Existing crawl rows are backfilled with their recoverable batch/model/score data and `record_origin=legacy_backfill`; their historical predicted label remains `NULL` when it cannot be proven.
 - **Automatic gating** uses the model's raw `toxic_prob`. The defaults are `mlflow_gate_discard_threshold=0.20` and `mlflow_gate_accept_threshold=0.80`:
   - `score <= 0.20`: stored as `gate_bucket=accepted`, `pseudo_label=0`, `verification_status=auto_accepted`, `training_review_status=auto`, and selected for training.
   - `score >= 0.80`: stored as `gate_bucket=accepted`, `pseudo_label=1`, `verification_status=auto_accepted`, `training_review_status=auto`, and selected for training.
   - `0.20 < score < 0.80`: stored as `gate_bucket=candidate`, `verification_status=unverified`, `training_review_status=pending`, and not selected for training. Its provisional `pseudo_label` is split at `0.50`.
   - Batch thresholds may be recorded in the batch `options_json`, but `GET /api/mlflow/training-preview` currently does not return them. The UI therefore documents and displays severity using the verified defaults `0.20/0.80`; it does not infer per-batch values.
 - **Manual Verify (DB persisted pool)** only lists `candidate` rows whose verification status is `unverified`; rows that passed the gate into Training Preview do not appear here again. The UI checkbox is temporary row selection; `Toxic`, `Clean`, and `Remove` call the review API and update DB state. Multiple selected candidates can use the same batched Gemini suggestion/apply flow as Training Preview. Applying a suggestion immediately moves the row into Training Preview with `training_review_status=manual_gemini` and `label_source=gemini_assist`, displayed as both **Review: Thủ công + Gemini** and **Gemini assisted**. `Remove` moves an unlocked row to the discarded/manual-rejected state rather than deleting it physically.
+- Candidate and review-history API rows expose `latest_prediction`, `previous_predictions`, and full `prediction_history`. The term **latest** is timestamp-based and does not imply that the model is best. When `verification_status=manual_accepted`, every prediction with a known inference label also exposes agreement/disagreement against the reusable human label. Later predictions never reopen a manually accepted sample. A newly inserted active-model candidate prediction may move an otherwise unreviewed auto-accepted sample into Pending Manual Verify; legacy backfill/history alone never changes workflow state.
 - **Training Preview** only lists rows in the `accepted` bucket that remain selected for training. Admins can directly correct each row to Toxic/Clean; this persists the corrected `pseudo_label`, `manual_accepted` verification, `manual_approved` review status, and `manual_override` label source. Removing a row from training keeps its DB record and lineage but hides it from Training Preview immediately. A distribution dialog summarizes Toxic/Clean and constructive/non-constructive/masked counts over the complete selected preview set. A row is eligible for the accepted export set only when it is accepted, has `selected_for_training=1` (or the legacy nullable equivalent accepted by the export query), and has `pseudo_label` 0 or 1. Candidate rows remain available through Manual Verify and the bundle's candidate file without being eligible for the accepted training set. Admin-confirmed Synthetic rows enter this same accepted pool with `source_type=synthetic`, `label_source=synthetic_review`, and their original `source_row_id`; repeated confirmation does not duplicate them.
 - **Training Preview list UX** requests up to 300 rows per page, renders every returned row, and provides a draggable/keyboard-accessible resize separator below the list. Each row is explicitly labeled **Nguồn: Thu thập từ website** or **Nguồn: Tạo sinh bằng Gemini** from its persisted `source_type` provenance. Source origin and review status are deliberately shown as separate badges.
 - **`selected_for_training`** is a persistent DB selection flag, not export or training lineage. Value `1` means “selected for training consideration”; it does not prove that the row was included by balancing, exported, submitted to Kaggle, or used by a successful training run. The row checkboxes in Training Preview are a separate in-memory UI selection used for current-page actions such as Gemini review.

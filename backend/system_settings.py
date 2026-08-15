@@ -35,6 +35,9 @@ GROUPS: tuple[tuple[str, str], ...] = (
     ("video_asr", "Video/ASR"),
 )
 
+GROUPS = GROUPS[:3] + (("mlflow_dataset", "MLflow Dataset"),) + GROUPS[3:]
+
+
 DEFAULT_GEMINI_REVIEW_INSTRUCTION = (
     "Bạn là reviewer dữ liệu tiếng Việt cho bài toán toxic-content detection. "
     "Ưu tiên chất lượng nhãn training; chỉ đánh giá từ nội dung và ngữ cảnh được cung cấp. "
@@ -125,6 +128,15 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         "Kaggle Webhook",
         "int",
         default="5",
+        min_value=1,
+    ),
+    SettingDefinition(
+        "MLFLOW_THRESHOLD_TARGET_MAX",
+        "Minimum MLflow rows for training",
+        "mlflow_dataset",
+        "MLflow Dataset",
+        "int",
+        default="10",
         min_value=1,
     ),
     SettingDefinition(
@@ -306,6 +318,12 @@ SETTING_VI_METADATA: Dict[str, tuple[str, str]] = {
     "VIDEO_TRANSCRIPT_LIMIT_SECONDS": ("Giới hạn transcript", "Số giây audio/video tối đa được đưa vào transcript."),
     "ASR_TRIM_SECONDS": ("Cắt ASR (giây)", "Số giây audio tối đa gửi qua ASR để giới hạn chi phí và thời gian."),
 }
+
+
+SETTING_VI_METADATA["MLFLOW_THRESHOLD_TARGET_MAX"] = (
+    "Số mẫu MLflow tối thiểu để train",
+    "Số dòng MLflow thực tế được thêm vào bundle cần có để bundle đủ điều kiện train. Dùng giá trị thấp cho demo/test; không thay đổi gate 0.20/0.80.",
+)
 
 
 def ensure_system_settings_table(conn: sqlite3.Connection) -> None:

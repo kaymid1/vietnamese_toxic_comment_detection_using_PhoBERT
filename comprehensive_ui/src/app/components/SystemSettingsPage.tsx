@@ -43,6 +43,8 @@ interface SystemSettingsPageProps {
   onAdminUnauthorized: () => void;
 }
 
+const MLFLOW_CLEAR_ALL_CONFIRM_TOKEN = "DELETE_ALL_MLFLOW_DATA";
+
 const parseJsonResponse = async <T,>(response: Response): Promise<T> => {
   const raw = await response.text();
   if (response.status === 401) {
@@ -256,6 +258,40 @@ export function SystemSettingsPage({ adminToken, onAdminUnauthorized }: SystemSe
     }
   };
 
+  const clearAllMlflow = async () => {
+    if (!window.confirm("Xóa toàn bộ dữ liệu MLflow? Hành động này không thể hoàn tác.")) return;
+
+    const token = window.prompt(`Nhập ${MLFLOW_CLEAR_ALL_CONFIRM_TOKEN} để xác nhận clear all:`);
+    if (token === null) return;
+    if (token.trim() !== MLFLOW_CLEAR_ALL_CONFIRM_TOKEN) {
+      toast.error("Sai confirm token. Đã hủy clear all.");
+      return;
+    }
+
+    setSaving(true);
+    try {
+      const payload = await parseJsonResponse<{ deleted_rows: Record<string, number> }>(
+        await fetchApiWithFallback("/api/mlflow/clear-all", {
+          method: "POST",
+          headers: authHeaders,
+          body: JSON.stringify({ confirm_token: token.trim() }),
+        }),
+      );
+      const rows = payload.deleted_rows;
+      toast.success(
+        `Đã clear MLflow: do_run=${rows.mlflow_do_run ?? 0}, artifacts=${rows.mlflow_training_artifact ?? 0}, predictions=${rows.mlflow_comment_prediction ?? 0}, items=${rows.mlflow_comment_item ?? 0}, batches=${rows.mlflow_crawl_batch ?? 0}.`,
+      );
+    } catch (err) {
+      if (err instanceof Error && err.message === "UNAUTHORIZED") {
+        onAdminUnauthorized();
+        return;
+      }
+      toast.error(err instanceof Error ? err.message : "Clear all MLflow thất bại.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const renderInput = (setting: SystemSettingItem) => {
     const value = drafts[setting.key];
     if (setting.type === "bool") {
@@ -354,6 +390,22 @@ export function SystemSettingsPage({ adminToken, onAdminUnauthorized }: SystemSe
                 Chỉ bật công tắc toàn cục khi Kaggle bundle endpoint đã public và kiểm tra preflight đạt. `train_only`
                 tạo candidate để admin duyệt; `full_auto` chỉ promote candidate do automation tạo và đã qua production gate.
                 Dữ liệu mới vẫn phải vượt ngưỡng số dòng và cooldown bên dưới.
+              </Card>
+            )}
+
+            {group.id === "mlflow_dataset" && (
+              <Card className="border-destructive/40 bg-destructive/5 p-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <p className="font-medium text-destructive">Vùng dữ liệu nguy hiểm</p>
+                    <p className="text-sm text-muted-foreground">
+                      Clear all sẽ xóa toàn bộ batch, review item, bundle metadata và Kaggle run MLflow; không thể hoàn tác.
+                    </p>
+                  </div>
+                  <Button type="button" variant="destructive" onClick={() => void clearAllMlflow()} disabled={loading || saving}>
+                    Clear all MLflow
+                  </Button>
+                </div>
               </Card>
             )}
 

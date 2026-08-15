@@ -5,6 +5,7 @@ from datetime import datetime
 from pathlib import Path
 
 import pytest
+from fastapi.testclient import TestClient
 
 
 def _seed_mlflow_batch(feedback_db: Path, batch_id: str = "batch_smoke") -> None:
@@ -421,6 +422,26 @@ def test_system_settings_db_override_env_for_gemini(client, admin_headers, monke
     assert app_module.get_gemini_model_candidates() == ["db-model", "fallback-a", "fallback-b"]
 
 
+def test_system_settings_override_mlflow_bundle_minimum_at_runtime(client, admin_headers):
+    response = client.patch(
+        "/api/admin/system-settings",
+        headers=admin_headers,
+        json={"settings": {"MLFLOW_THRESHOLD_TARGET_MAX": 3}},
+    )
+    assert response.status_code == 200
+
+    groups = {group["id"]: group for group in response.json()["groups"]}
+    mlflow_setting = next(
+        item for item in groups["mlflow_dataset"]["settings"] if item["key"] == "MLFLOW_THRESHOLD_TARGET_MAX"
+    )
+    assert mlflow_setting["value"] == "3"
+
+    threshold = client.get("/api/mlflow/threshold-status", headers=admin_headers)
+    assert threshold.status_code == 200
+    assert threshold.json()["target_max_test_stage"] == 3
+    assert threshold.json()["remaining_to_target"] == 3
+
+
 def test_system_settings_drive_kaggle_preflight(client, admin_headers, qa_env, monkeypatch):
     app_module = qa_env["app_module"]
     monkeypatch.setattr(app_module, "_kaggle_webhook_reachability", lambda webhook_url: (True, None))
@@ -453,7 +474,7 @@ def test_admin_system_settings_endpoint_contract(client, admin_headers):
     assert "groups" in payload
     assert isinstance(payload["groups"], list)
     group_ids = {group.get("id") for group in payload["groups"] if isinstance(group, dict)}
-    assert {"kaggle_account", "kaggle_kernel", "kaggle_webhook", "gemini", "video_asr"}.issubset(group_ids)
+    assert {"kaggle_account", "kaggle_kernel", "kaggle_webhook", "mlflow_dataset", "gemini", "video_asr"}.issubset(group_ids)
 
 
 def test_mlflow_review_history_all_batches_empty_contract(client, admin_headers):
@@ -1238,12 +1259,14 @@ def test_mlflow_lock_prevents_drop_in_candidate_review(client, qa_env, admin_hea
     assert drop_resp.json()["skipped_locked"] == 1
 
 
-def test_mlflow_collection_dedupes_existing_url_and_duplicate_segment(qa_env):
-    app_module = qa_env["app_module"]
-    now = datetime.utcnow().isoformat() + "Z"
-
-    def response_result(url: str, url_hash: str, context_hash: str) -> list[dict]:
-        return [
+def _prediction_response_result(
+    url: str,
+    url_hash: str,
+    context_hash: str,
+    score: float,
+    predicted_label: int,
+) -> list[dict]:
+    return [
             {
                 "status": "ok",
                 "url": url,
@@ -1254,7 +1277,9 @@ def test_mlflow_collection_dedupes_existing_url_and_duplicate_segment(qa_env):
                         {
                             "segment_id": f"{url_hash}:0",
                             "text": "Một bình luận mới cần admin review",
-                            "score": 0.91,
+                            "score": score,
+                            "toxic_prob_adjusted": score,
+                            "toxic_label": predicted_label,
                             "html_tags": ["comment"],
                             "segment_hash": "segment_hash_shared",
                             "context_segment_hash": context_hash,
@@ -1263,10 +1288,44 @@ def test_mlflow_collection_dedupes_existing_url_and_duplicate_segment(qa_env):
                     ]
                 },
             }
-        ]
+    ]
+
+
+def _persist_prediction(
+    app_module,
+    *,
+    batch_id: str,
+    model_id: str,
+    context_hash: str,
+    score: float,
+    predicted_label: int,
+    url: str = "https://example.com/a",
+    url_hash: str = "hash_a",
+) -> dict:
+    now = datetime.utcnow().isoformat() + "Z"
+    return app_module.insert_mlflow_comment_rows(
+        batch_id=batch_id,
+        model_id=model_id,
+        source_job_id=f"job_{batch_id}",
+        rows=app_module.build_mlflow_comment_rows(
+            _prediction_response_result(url, url_hash, context_hash, score, predicted_label),
+            batch_id,
+            f"job_{batch_id}",
+            0.8,
+            0.2,
+            now,
+        ),
+        options_json='{"source":"user_analyze"}',
+        created_at=now,
+    )
+
+
+def test_mlflow_collection_keeps_one_sample_with_multi_model_predictions(qa_env, client, admin_headers):
+    app_module = qa_env["app_module"]
+    now = datetime.utcnow().isoformat() + "Z"
 
     first_rows = app_module.build_mlflow_comment_rows(
-        response_result("https://example.com/a", "hash_a", "ctx_hash_a"),
+        _prediction_response_result("https://example.com/a", "hash_a", "ctx_hash_a", 0.55, 0),
         "batch_auto_1",
         "job_auto_1",
         0.8,
@@ -1275,7 +1334,7 @@ def test_mlflow_collection_dedupes_existing_url_and_duplicate_segment(qa_env):
     )
     first = app_module.insert_mlflow_comment_rows(
         batch_id="batch_auto_1",
-        model_id="phobert/v2",
+        model_id="tfidf_lr/v1",
         source_job_id="job_auto_1",
         rows=first_rows,
         options_json='{"source":"user_analyze"}',
@@ -1283,49 +1342,332 @@ def test_mlflow_collection_dedupes_existing_url_and_duplicate_segment(qa_env):
     )
     assert first["batch_id"] == "batch_auto_1"
     assert first["inserted"] == 1
+    assert first["predictions_inserted"] == 1
 
-    same_url_rows = app_module.build_mlflow_comment_rows(
-        response_result("https://example.com/a", "hash_a", "ctx_hash_a_new"),
+    phobert_rows = app_module.build_mlflow_comment_rows(
+        _prediction_response_result("https://example.com/a", "hash_a", "ctx_hash_a", 0.94, 1),
         "batch_auto_2",
         "job_auto_2",
         0.8,
         0.2,
         now,
     )
-    same_url = app_module.insert_mlflow_comment_rows(
+    phobert = app_module.insert_mlflow_comment_rows(
         batch_id="batch_auto_2",
-        model_id="phobert/v2",
+        model_id="phobert/v1",
         source_job_id="job_auto_2",
-        rows=same_url_rows,
+        rows=phobert_rows,
         options_json='{"source":"user_analyze"}',
         created_at=now,
     )
-    assert same_url["batch_id"] is None
-    assert same_url["inserted"] == 0
-    assert same_url["skipped_existing_url"] == 1
+    assert phobert["batch_id"] == "batch_auto_2"
+    assert phobert["inserted"] == 0
+    assert phobert["samples_reused"] == 1
+    assert phobert["predictions_inserted"] == 1
+    assert phobert["counts"]["candidate"] == 1
 
-    duplicate_segment_rows = app_module.build_mlflow_comment_rows(
-        response_result("https://example.com/b", "hash_b", "ctx_hash_a"),
-        "batch_auto_3",
-        "job_auto_3",
-        0.8,
-        0.2,
-        now,
-    )
-    duplicate_segment = app_module.insert_mlflow_comment_rows(
+    duplicate_model = app_module.insert_mlflow_comment_rows(
         batch_id="batch_auto_3",
-        model_id="phobert/v2",
+        model_id="phobert/v1",
         source_job_id="job_auto_3",
-        rows=duplicate_segment_rows,
+        rows=app_module.build_mlflow_comment_rows(
+            _prediction_response_result("https://example.com/a", "hash_a", "ctx_hash_a", 0.94, 1),
+            "batch_auto_3",
+            "job_auto_3",
+            0.8,
+            0.2,
+            now,
+        ),
         options_json='{"source":"user_analyze"}',
         created_at=now,
     )
-    assert duplicate_segment["batch_id"] is None
-    assert duplicate_segment["inserted"] == 0
-    assert duplicate_segment["skipped_duplicate_item"] == 1
+    assert duplicate_model["batch_id"] is None
+    assert duplicate_model["predictions_inserted"] == 0
+    assert duplicate_model["skipped_duplicate_item"] == 1
+
+    changed_content = app_module.insert_mlflow_comment_rows(
+        batch_id="batch_auto_4",
+        model_id="phobert/v1",
+        source_job_id="job_auto_4",
+        rows=app_module.build_mlflow_comment_rows(
+            _prediction_response_result("https://example.com/a", "hash_a", "ctx_hash_changed", 0.91, 1),
+            "batch_auto_4",
+            "job_auto_4",
+            0.8,
+            0.2,
+            now,
+        ),
+        options_json='{"source":"user_analyze"}',
+        created_at=now,
+    )
+    assert changed_content["samples_inserted"] == 1
+    assert changed_content["predictions_inserted"] == 1
 
     with sqlite3.connect(qa_env["feedback_db"]) as conn:
         item_count = conn.execute("SELECT COUNT(1) FROM mlflow_comment_item").fetchone()[0]
+        prediction_count = conn.execute("SELECT COUNT(1) FROM mlflow_comment_prediction").fetchone()[0]
+        pending_count = conn.execute(
+            "SELECT COUNT(1) FROM mlflow_comment_item WHERE gate_bucket = 'candidate' AND verification_status = 'unverified'"
+        ).fetchone()[0]
         batch_count = conn.execute("SELECT COUNT(1) FROM mlflow_crawl_batch").fetchone()[0]
-    assert item_count == 1
-    assert batch_count == 1
+    assert item_count == 2
+    assert prediction_count == 3
+    assert pending_count == 1
+    assert batch_count == 3
+
+    batch_overview = client.get(
+        "/api/mlflow/overview",
+        headers=admin_headers,
+        params={"batch_id": "batch_auto_2", "strict_batch": "true"},
+    )
+    assert batch_overview.status_code == 200
+    assert batch_overview.json()["pipeline_counts"]["inferred"] == 1
+    crawl_history = client.get("/api/mlflow/crawl-history", headers=admin_headers)
+    assert crawl_history.status_code == 200
+    assert any(item["batch_id"] == "batch_auto_2" and item["segment_count"] == 1 for item in crawl_history.json()["items"])
+
+
+def test_mlflow_reviewed_sample_keeps_ground_truth_and_prediction_agreement(qa_env, client, admin_headers):
+    app_module = qa_env["app_module"]
+    first = _persist_prediction(
+        app_module,
+        batch_id="batch_review_1",
+        model_id="tfidf_lr/v1",
+        context_hash="ctx_reviewed",
+        score=0.55,
+        predicted_label=0,
+    )
+    assert first["samples_inserted"] == 1
+
+    with sqlite3.connect(qa_env["feedback_db"]) as conn:
+        sample_id = int(conn.execute("SELECT id FROM mlflow_comment_item").fetchone()[0])
+
+    reviewed = client.post(
+        "/api/mlflow/candidates/review",
+        headers=admin_headers,
+        json={"updates": [{"id": sample_id, "action": "include_toxic"}]},
+    )
+    assert reviewed.status_code == 200
+
+    agreeing = _persist_prediction(
+        app_module,
+        batch_id="batch_review_2",
+        model_id="phobert/v1",
+        context_hash="ctx_reviewed",
+        score=0.94,
+        predicted_label=1,
+    )
+    disagreeing = _persist_prediction(
+        app_module,
+        batch_id="batch_review_3",
+        model_id="phobert/v2",
+        context_hash="ctx_reviewed",
+        score=0.12,
+        predicted_label=0,
+    )
+    assert agreeing["predictions_inserted"] == 1
+    assert disagreeing["predictions_inserted"] == 1
+
+    candidates = client.get("/api/mlflow/candidates", headers=admin_headers, params={"scope": "all_batches"})
+    assert candidates.status_code == 200
+    assert candidates.json()["total"] == 0
+
+    history = client.get("/api/mlflow/review-history", headers=admin_headers, params={"scope": "all_batches"})
+    assert history.status_code == 200
+    item = next(row for row in history.json()["items"] if int(row["id"]) == sample_id)
+    assert item["human_label"] == 1
+    assert len(item["prediction_history"]) == 3
+    agreement_by_model = {
+        prediction["model_id"]: prediction["agreement_with_human"]
+        for prediction in item["prediction_history"]
+    }
+    assert agreement_by_model["tfidf_lr/v1"] is False
+    assert agreement_by_model["phobert/v1"] is True
+    assert agreement_by_model["phobert/v2"] is False
+
+    with sqlite3.connect(qa_env["feedback_db"]) as conn:
+        conn.row_factory = sqlite3.Row
+        sample = conn.execute(
+            "SELECT verification_status, pseudo_label FROM mlflow_comment_item WHERE id = ?",
+            (sample_id,),
+        ).fetchone()
+        training_rows = app_module.select_mlflow_training_rows(conn, None, "all")[0]
+    assert tuple(sample) == ("manual_accepted", 1)
+    assert len(training_rows) == 1
+    assert int(training_rows[0]["pseudo_label"]) == 1
+
+
+def test_mlflow_active_candidate_prediction_reopens_only_unreviewed_auto_sample(qa_env):
+    app_module = qa_env["app_module"]
+    accepted = _persist_prediction(
+        app_module,
+        batch_id="batch_auto_accept_1",
+        model_id="phobert/v1",
+        context_hash="ctx_auto_accept",
+        score=0.95,
+        predicted_label=1,
+    )
+    assert accepted["counts"]["accepted"] == 1
+
+    candidate = _persist_prediction(
+        app_module,
+        batch_id="batch_auto_accept_2",
+        model_id="tfidf_lr/v1",
+        context_hash="ctx_auto_accept",
+        score=0.55,
+        predicted_label=0,
+    )
+    assert candidate["predictions_inserted"] == 1
+    assert candidate["counts"]["candidate"] == 1
+    with sqlite3.connect(qa_env["feedback_db"]) as conn:
+        state = conn.execute(
+            "SELECT gate_bucket, verification_status, selected_for_training FROM mlflow_comment_item"
+        ).fetchone()
+    assert state == ("candidate", "unverified", 0)
+
+
+def test_feedback_schema_is_initialized_during_fastapi_startup(monkeypatch, tmp_path):
+    import backend.app as app_module
+
+    feedback_dir = tmp_path / "startup_repo" / "data" / "processed" / "feedback"
+    feedback_db = feedback_dir / "feedback.db"
+    monkeypatch.setattr(app_module, "FEEDBACK_DIR", feedback_dir)
+    monkeypatch.setattr(app_module, "FEEDBACK_DB_PATH", feedback_db)
+
+    assert not feedback_db.exists()
+
+    with TestClient(app_module.app):
+        assert feedback_db.exists()
+        with sqlite3.connect(feedback_db) as conn:
+            tables = {
+                str(row[0])
+                for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+            }
+        assert "mlflow_comment_prediction" in tables
+        assert "mlflow_comment_item" in tables
+        assert "feedback_page" in tables
+
+        _seed_mlflow_batch(feedback_db, batch_id="startup_legacy_batch")
+        app_module.init_feedback_db()
+        with sqlite3.connect(feedback_db) as conn:
+            first_prediction_count = conn.execute(
+                "SELECT COUNT(1) FROM mlflow_comment_prediction WHERE batch_id = ?",
+                ("startup_legacy_batch",),
+            ).fetchone()[0]
+            sample_count = conn.execute(
+                "SELECT COUNT(1) FROM mlflow_comment_item WHERE batch_id = ?",
+                ("startup_legacy_batch",),
+            ).fetchone()[0]
+
+        app_module.init_feedback_db()
+        with sqlite3.connect(feedback_db) as conn:
+            repeated_prediction_count = conn.execute(
+                "SELECT COUNT(1) FROM mlflow_comment_prediction WHERE batch_id = ?",
+                ("startup_legacy_batch",),
+            ).fetchone()[0]
+
+        assert first_prediction_count == sample_count
+        assert repeated_prediction_count == first_prediction_count
+
+
+def test_mlflow_legacy_backfill_preserves_review_state_without_fabricating_label(qa_env):
+    app_module = qa_env["app_module"]
+    now = datetime.utcnow().isoformat() + "Z"
+    with sqlite3.connect(qa_env["feedback_db"]) as conn:
+        conn.execute(
+            """
+            INSERT INTO mlflow_crawl_batch (batch_id, model_id, status, source_job_id, created_at, completed_at, options_json)
+            VALUES ('legacy_batch', 'phobert/legacy', 'completed', 'legacy_job', ?, ?, '{}')
+            """,
+            (now, now),
+        )
+        conn.execute(
+            """
+            INSERT INTO mlflow_comment_item (
+                batch_id, job_id, url, url_hash, text, score, pseudo_label,
+                gate_bucket, verification_status, segment_hash, context_segment_hash,
+                dedupe_key, html_tag, seg_threshold_used, label_source, label_confidence,
+                selected_for_training, training_review_status, created_at, reviewed_at
+            ) VALUES (
+                'legacy_batch', 'legacy_job', 'https://example.com/legacy', 'legacy_hash', 'legacy reviewed',
+                0.55, 1, 'accepted', 'manual_accepted', 'legacy_segment', 'legacy_context',
+                'comment_only_v3:legacy_context:comment', 'comment', 0.4, 'manual_override', 'high',
+                1, 'manual_approved', ?, ?
+            )
+            """,
+            (now, now),
+        )
+        conn.execute(
+            """
+            INSERT INTO mlflow_comment_item (
+                batch_id, job_id, url, url_hash, text, score, pseudo_label,
+                gate_bucket, verification_status, segment_hash, context_segment_hash,
+                dedupe_key, html_tag, seg_threshold_used, label_source, label_confidence,
+                selected_for_training, training_review_status, created_at
+            ) VALUES (
+                'legacy_batch', 'legacy_job', 'https://example.com/legacy-auto', 'legacy_auto_hash', 'legacy auto',
+                0.55, 1, 'accepted', 'auto_accepted', 'legacy_auto_segment', 'legacy_auto_context',
+                'comment_only_v3:legacy_auto_context:comment', 'comment', 0.4, 'auto_gate', 'high',
+                1, 'auto', ?
+            )
+            """,
+            (now,),
+        )
+        conn.commit()
+
+    app_module.init_feedback_db()
+    with sqlite3.connect(qa_env["feedback_db"]) as conn:
+        prediction = conn.execute(
+            """
+            SELECT model_id, raw_toxicity_score, predicted_label, record_origin
+            FROM mlflow_comment_prediction
+            WHERE sample_item_id = (
+                SELECT id FROM mlflow_comment_item WHERE text = 'legacy reviewed'
+            )
+            """
+        ).fetchone()
+        state = conn.execute(
+            "SELECT verification_status, pseudo_label FROM mlflow_comment_item WHERE text = 'legacy reviewed'"
+        ).fetchone()
+        auto_state = conn.execute(
+            "SELECT gate_bucket, verification_status FROM mlflow_comment_item WHERE text = 'legacy auto'"
+        ).fetchone()
+    assert prediction == ("phobert/legacy", 0.55, None, "legacy_backfill")
+    assert state == ("manual_accepted", 1)
+    assert auto_state == ("accepted", "auto_accepted")
+
+
+def test_mlflow_clear_batch_reassigns_shared_sample_without_orphans(qa_env, client, admin_headers):
+    app_module = qa_env["app_module"]
+    _persist_prediction(
+        app_module,
+        batch_id="batch_clear_1",
+        model_id="tfidf_lr/v1",
+        context_hash="ctx_clear",
+        score=0.55,
+        predicted_label=0,
+    )
+    _persist_prediction(
+        app_module,
+        batch_id="batch_clear_2",
+        model_id="phobert/v1",
+        context_hash="ctx_clear",
+        score=0.94,
+        predicted_label=1,
+    )
+
+    cleared = client.post(
+        "/api/mlflow/clear-batch",
+        headers=admin_headers,
+        json={"batch_id": "batch_clear_1"},
+    )
+    assert cleared.status_code == 200
+    assert cleared.json()["deleted_rows"]["mlflow_comment_prediction"] == 1
+    assert cleared.json()["deleted_rows"]["mlflow_comment_item_reassigned"] == 1
+    assert cleared.json()["deleted_rows"]["mlflow_crawl_batch"] == 1
+
+    with sqlite3.connect(qa_env["feedback_db"]) as conn:
+        conn.execute("PRAGMA foreign_keys = ON")
+        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+        assert conn.execute("SELECT batch_id FROM mlflow_comment_item").fetchone()[0] == "batch_clear_2"
+        assert conn.execute("SELECT COUNT(1) FROM mlflow_comment_prediction").fetchone()[0] == 1

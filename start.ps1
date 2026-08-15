@@ -4,6 +4,8 @@ param(
   [int]$FrontendPort = 5173,
   [int]$WebhookPort = 9001,
   [string]$WebhookNgrokDomain = "living-rare-ram.ngrok-free.app",
+  [ValidateRange(1, 100)]
+  [int]$PortFallbackAttempts = 20,
   [switch]$StartFrontendNgrok,
   [switch]$SkipWebhookSettingsSync,
   [switch]$NoLogStream
@@ -59,45 +61,125 @@ function Get-ProcessRowsByCommandPattern {
   }
 }
 
+function Get-DescendantProcessRows {
+  param([object[]]$RootRows)
+
+  if (-not $RootRows) { return @() }
+
+  try {
+    $allRows = @(Get-CimInstance Win32_Process)
+  } catch {
+    Write-Warning "Unable to inspect child processes; recognized service parents will still be stopped."
+    return @()
+  }
+
+  $knownPids = @{}
+  $frontier = @()
+  foreach ($row in $RootRows) {
+    $pidKey = [string]$row.ProcessId
+    if (-not $knownPids.ContainsKey($pidKey)) {
+      $knownPids[$pidKey] = $true
+      $frontier += [int]$row.ProcessId
+    }
+  }
+
+  $descendants = @()
+  while ($frontier.Count -gt 0) {
+    $children = @($allRows | Where-Object {
+      ($frontier -contains [int]$_.ParentProcessId) -and
+      (-not $knownPids.ContainsKey([string]$_.ProcessId))
+    })
+    if (-not $children) { break }
+
+    $frontier = @()
+    foreach ($child in $children) {
+      $knownPids[[string]$child.ProcessId] = $true
+      $descendants += $child
+      $frontier += [int]$child.ProcessId
+    }
+  }
+
+  return $descendants
+}
+
 function Stop-ProcessRows {
   param(
     [object[]]$Rows,
     [string]$Reason
   )
-  foreach ($row in $Rows) {
+
+  $roots = @($Rows | Sort-Object ProcessId -Unique)
+  if (-not $roots) { return }
+
+  # Snapshot descendants before stopping reload/watch parents. Uvicorn workers
+  # use a generic multiprocessing command line, so they cannot be recognized
+  # safely by command-line matching after their parent exits.
+  $descendants = @(Get-DescendantProcessRows -RootRows $roots)
+
+  foreach ($row in $roots) {
     try {
       Write-Host ("[INFO] Stopping stale process PID={0} ({1}) [{2}]" -f $row.ProcessId, $row.Name, $Reason)
       Stop-Process -Id $row.ProcessId -Force -ErrorAction SilentlyContinue
     } catch {
     }
   }
+
+  foreach ($row in $descendants) {
+    try {
+      if (Get-Process -Id $row.ProcessId -ErrorAction SilentlyContinue) {
+        Write-Host ("[INFO] Stopping stale child PID={0} ({1}) [{2}]" -f $row.ProcessId, $row.Name, $Reason)
+        Stop-Process -Id $row.ProcessId -Force -ErrorAction SilentlyContinue
+      }
+    } catch {
+    }
+  }
 }
 
-function Assert-PortsAreFree {
-  param(
-    [int[]]$Ports,
-    [int]$TimeoutSec = 10
-  )
+function Get-BusyPortRows {
+  param([int[]]$Ports)
 
-  $deadline = (Get-Date).AddSeconds($TimeoutSec)
-  do {
-    $busy = @()
-    foreach ($port in $Ports) {
-      $listeners = @(Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue)
-      if ($listeners) {
-        $pids = $listeners | Select-Object -ExpandProperty OwningProcess -Unique
-        $busy += ("{0} (PID {1})" -f $port, ($pids -join ", "))
+  $busyRows = @()
+  foreach ($port in $Ports) {
+    $listeners = @(Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue)
+    if ($listeners) {
+      $ownerPids = @($listeners | Select-Object -ExpandProperty OwningProcess -Unique)
+      $busyRows += [pscustomobject]@{
+        Port = $port
+        OwnerPids = $ownerPids
       }
     }
-    if (-not $busy) { return }
-    Start-Sleep -Milliseconds 250
-  } while ((Get-Date) -lt $deadline)
+  }
+  return $busyRows
+}
 
-  $message = (
-    "Cannot start because required ports are still in use: {0}. " +
-    "Only recognized VietToxic services are stopped automatically; stop the remaining process or run start.ps1 from an elevated PowerShell if it belongs to another Windows session."
-  ) -f ($busy -join "; ")
-  throw $message
+function Resolve-AvailablePort {
+  param(
+    [string]$ServiceName,
+    [int]$PreferredPort,
+    [int[]]$ReservedPorts = @(),
+    [int]$MaxAttempts = 20
+  )
+
+  for ($offset = 0; $offset -lt $MaxAttempts; $offset++) {
+    $candidate = $PreferredPort + $offset
+    if ($candidate -gt 65535) { break }
+    if ($ReservedPorts -contains $candidate) { continue }
+
+    $busyRows = @(Get-BusyPortRows -Ports @($candidate))
+    if (-not $busyRows) {
+      if ($candidate -ne $PreferredPort) {
+        Write-Warning ("{0} port {1} is busy; using {2}." -f $ServiceName, $PreferredPort, $candidate)
+      }
+      return $candidate
+    }
+
+    if ($offset -eq 0) {
+      $owners = @($busyRows[0].OwnerPids) -join ", "
+      Write-Host ("[INFO] {0} preferred port {1} is in use by PID(s) {2}; looking for the next free port." -f $ServiceName, $PreferredPort, $owners)
+    }
+  }
+
+  throw ("No free port found for {0} in range {1}-{2}." -f $ServiceName, $PreferredPort, [Math]::Min(65535, $PreferredPort + $MaxAttempts - 1))
 }
 
 function Wait-HttpReady {
@@ -227,23 +309,28 @@ if ($WebhookNgrokDomain -match "^https?://") {
   $WebhookNgrokUrl = "https://$WebhookNgrokDomain"
 }
 
+# Clean up stale VietToxic service trees from earlier runs. Uvicorn --reload
+# creates a parent/worker pair that can both appear as listeners. Match only
+# recognized parents, then stop the descendants captured from those trees.
+Stop-ProcessRows -Rows (Get-ProcessRowsByCommandPattern "uvicorn\s+backend\.app:app") -Reason "old backend"
+Stop-ProcessRows -Rows (Get-ProcessRowsByCommandPattern "uvicorn\s+backend\.kaggle_webhook_receiver:app") -Reason "old webhook-receiver"
+$frontendCleanupPorts = @($FrontendPort..([Math]::Min(65535, $FrontendPort + $PortFallbackAttempts - 1))) -join "|"
+$webhookCleanupPorts = @($WebhookPort..([Math]::Min(65535, $WebhookPort + $PortFallbackAttempts - 1))) -join "|"
+Stop-ProcessRows -Rows (Get-ProcessRowsByCommandPattern "vite(?:\.js)?(?:\s|.*\s)--.*\bport\s+(?:$frontendCleanupPorts)\b") -Reason "old frontend"
+Stop-ProcessRows -Rows (Get-ProcessRowsByCommandPattern "ngrok\s+http.*\b(?:$webhookCleanupPorts)\b") -Reason "old ngrok-webhook"
+if ($StartFrontendNgrok) {
+  Stop-ProcessRows -Rows (Get-ProcessRowsByCommandPattern "ngrok\s+http.*\b(?:$frontendCleanupPorts)\b") -Reason "old ngrok-frontend"
+}
+
+$BackendPort = Resolve-AvailablePort -ServiceName "Backend" -PreferredPort $BackendPort -MaxAttempts $PortFallbackAttempts
+$FrontendPort = Resolve-AvailablePort -ServiceName "Frontend" -PreferredPort $FrontendPort -ReservedPorts @($BackendPort) -MaxAttempts $PortFallbackAttempts
+$WebhookPort = Resolve-AvailablePort -ServiceName "Webhook" -PreferredPort $WebhookPort -ReservedPorts @($BackendPort, $FrontendPort) -MaxAttempts $PortFallbackAttempts
+
 if (-not $SkipWebhookSettingsSync) {
   Sync-LocalWebhookSettings -PythonExe $PythonExe -RepoRoot $RepoRoot -WebhookPort $WebhookPort -WebhookPublicBaseUrl $WebhookNgrokUrl
 } else {
   Write-Host "[INFO] Skipping Kaggle webhook settings sync."
 }
-
-# Clean up stale VietToxic service parents from earlier runs. Uvicorn --reload
-# creates a parent/worker pair that can both appear as listeners, so stop the
-# recognized parent command rather than killing an arbitrary process by port.
-Stop-ProcessRows -Rows (Get-ProcessRowsByCommandPattern "uvicorn\s+backend\.app:app") -Reason "old backend"
-Stop-ProcessRows -Rows (Get-ProcessRowsByCommandPattern "uvicorn\s+backend\.kaggle_webhook_receiver:app") -Reason "old webhook-receiver"
-Stop-ProcessRows -Rows (Get-ProcessRowsByCommandPattern "vite(?:\.js)?(?:\s|.*\s)--.*\bport\s+$FrontendPort\b") -Reason "old frontend"
-Stop-ProcessRows -Rows (Get-ProcessRowsByCommandPattern "ngrok\s+http.*\b$WebhookPort\b") -Reason "old ngrok-webhook"
-if ($StartFrontendNgrok) {
-  Stop-ProcessRows -Rows (Get-ProcessRowsByCommandPattern "ngrok\s+http.*\b$FrontendPort\b") -Reason "old ngrok-frontend"
-}
-Assert-PortsAreFree -Ports @($BackendPort, $FrontendPort, $WebhookPort)
 
 if (-not (Test-Path (Join-Path $UiDir "node_modules"))) {
   Write-Host "[INFO] Installing frontend dependencies..."
@@ -285,13 +372,23 @@ try {
     -OutLogFile (Join-Path $RuntimeDir "webhook-receiver.out.log") `
     -ErrLogFile (Join-Path $RuntimeDir "webhook-receiver.err.log")
 
-  $processes += Start-ServiceProcess `
-    -Name "frontend" `
-    -FilePath $NpmExe `
-    -Arguments @("run", "dev", "--", "--host", "0.0.0.0", "--port", "$FrontendPort") `
-    -WorkingDirectory $UiDir `
-    -OutLogFile (Join-Path $RuntimeDir "frontend.out.log") `
-    -ErrLogFile (Join-Path $RuntimeDir "frontend.err.log")
+  $previousApiBaseUrl = [Environment]::GetEnvironmentVariable("VITE_API_BASE_URL", "Process")
+  try {
+    $env:VITE_API_BASE_URL = "http://127.0.0.1:$BackendPort"
+    $processes += Start-ServiceProcess `
+      -Name "frontend" `
+      -FilePath $NpmExe `
+      -Arguments @("run", "dev", "--", "--host", "0.0.0.0", "--port", "$FrontendPort", "--strictPort") `
+      -WorkingDirectory $UiDir `
+      -OutLogFile (Join-Path $RuntimeDir "frontend.out.log") `
+      -ErrLogFile (Join-Path $RuntimeDir "frontend.err.log")
+  } finally {
+    if ($null -eq $previousApiBaseUrl) {
+      Remove-Item Env:\VITE_API_BASE_URL -ErrorAction SilentlyContinue
+    } else {
+      $env:VITE_API_BASE_URL = $previousApiBaseUrl
+    }
+  }
 
   $processes += Start-ServiceProcess `
     -Name "ngrok-webhook" `

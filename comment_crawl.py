@@ -705,10 +705,16 @@ DOMAIN_SELECTORS: dict[str, dict[str, str]] = {
         "load_more": ".btn-more, .load-more-comment, [class*='load-more'], [class*='view-more'], [data-role*='load-more']",
     },
     "vietnamnet.vn": {
-        "container": "#box_comment, .comment-container",
-        "item": ".comment-item",
-        "text": ".comment-content, p",
-        "load_more": ".btn-more-comment",
+        # Vietnamnet now mounts article comments in a cross-origin iframe.
+        # Keep the host-page container separate from the selectors used after
+        # Selenium switches into that frame.
+        "container": "#comment",
+        "comment_iframe": "iframe[src*='comment.vietnamnet.vn']",
+        # The "Xem them" control is a sibling of the list, so scope the
+        # iframe search to its application root rather than only the list.
+        "frame_container": "#root",
+        "item": ".user__item",
+        "text": ".__content",
     },
 }
 
@@ -1062,6 +1068,13 @@ class NewsSiteCommentCrawler:
             self._prime_comment_section(driver, container_css)
             _raise_if_deadline_passed("comment priming")
 
+            if self._switch_to_comment_iframe(driver, selectors, deadline):
+                # Subsequent extraction now happens inside the embedded
+                # Vietnamnet comment application, not in the article DOM.
+                frame_container_css = selectors.get("frame_container", "")
+                if frame_container_css:
+                    selectors = {**selectors, "container": frame_container_css}
+
             self._activate_comment_tab(driver, selectors)
             _raise_if_deadline_passed("comment tab activation")
 
@@ -1216,6 +1229,42 @@ class NewsSiteCommentCrawler:
             # Best-effort only; extraction logic below is still the source of truth.
             pass
 
+    def _switch_to_comment_iframe(
+        self,
+        driver,
+        selectors: dict[str, str],
+        deadline: float,
+    ) -> bool:
+        """Enter a domain-specific embedded comment frame when configured."""
+        from selenium.common.exceptions import TimeoutException
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.support.ui import WebDriverWait
+
+        iframe_css = selectors.get("comment_iframe", "")
+        if not iframe_css:
+            return False
+
+        wait_seconds = int(max(1, min(12, deadline - time.time())))
+        try:
+            iframe = WebDriverWait(driver, wait_seconds).until(
+                lambda current_driver: next(
+                    (
+                        element
+                        for element in current_driver.find_elements(By.CSS_SELECTOR, iframe_css)
+                        if element.is_displayed()
+                    ),
+                    False,
+                )
+            )
+            driver.switch_to.frame(iframe)
+            logger.info("Entered embedded comment iframe via selector '%s'", iframe_css)
+            return True
+        except TimeoutException:
+            logger.warning("Comment iframe not found within timeout: %s", iframe_css)
+        except Exception as exc:
+            logger.warning("Could not enter comment iframe '%s': %s", iframe_css, exc)
+        return False
+
     def _activate_comment_tab(self, driver, selectors: dict[str, str]) -> bool:
         from selenium.webdriver.common.by import By
 
@@ -1313,10 +1362,17 @@ class NewsSiteCommentCrawler:
             try:
                 if not element.is_displayed():
                     continue
-                text = _normalize_text((element.text or "").lower())
-                if not text:
+                raw_text = _normalize_text((element.text or "").lower())
+                if not raw_text:
                     continue
-                if any(keyword in text for keyword in _NEWS_LOAD_MORE_TEXT_KEYWORDS):
+                folded_text = unicodedata.normalize("NFD", raw_text)
+                folded_text = "".join(
+                    ch for ch in folded_text if unicodedata.category(ch) != "Mn"
+                )
+                if any(
+                    keyword in raw_text or keyword in folded_text
+                    for keyword in _NEWS_LOAD_MORE_TEXT_KEYWORDS
+                ):
                     return element
             except Exception:
                 continue

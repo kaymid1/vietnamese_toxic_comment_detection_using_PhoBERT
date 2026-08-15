@@ -335,6 +335,14 @@ def get_bool_setting(key: str, default: bool = False) -> bool:
     return get_runtime_bool_setting(key, default, db_path=FEEDBACK_DB_PATH)
 
 
+def get_mlflow_bundle_min_rows() -> int:
+    return get_int_setting(
+        "MLFLOW_THRESHOLD_TARGET_MAX",
+        MLFLOW_THRESHOLD_TARGET_MAX,
+        min_value=1,
+    )
+
+
 DO_API_BASE = os.getenv("DO_API_BASE", "https://api.digitalocean.com/v2").rstrip("/")
 DO_DEFAULT_REGION = os.getenv("DO_DEFAULT_REGION", "sgp1")
 DO_DEFAULT_IMAGE = os.getenv("DO_DEFAULT_IMAGE", "ubuntu-24-04-x64")
@@ -2505,6 +2513,29 @@ def init_feedback_db() -> None:
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS mlflow_comment_prediction (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                sample_item_id INTEGER NOT NULL,
+                batch_id TEXT NOT NULL,
+                job_id TEXT,
+                model_id TEXT NOT NULL,
+                raw_toxicity_score REAL,
+                adjusted_toxicity_score REAL,
+                predicted_label INTEGER,
+                constructiveness_score REAL,
+                constructiveness_label INTEGER,
+                constructiveness_confidence TEXT,
+                seg_threshold_used REAL,
+                record_origin TEXT NOT NULL DEFAULT 'inference',
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(sample_item_id) REFERENCES mlflow_comment_item(id) ON DELETE CASCADE,
+                FOREIGN KEY(batch_id) REFERENCES mlflow_crawl_batch(batch_id) ON DELETE CASCADE,
+                UNIQUE(sample_item_id, model_id)
+            )
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS mlflow_training_artifact (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 run_name TEXT NOT NULL,
@@ -2643,6 +2674,8 @@ def init_feedback_db() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_mlflow_item_bucket ON mlflow_comment_item(batch_id, gate_bucket)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_mlflow_item_status ON mlflow_comment_item(batch_id, verification_status)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_mlflow_item_hash ON mlflow_comment_item(context_segment_hash, segment_hash)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_mlflow_prediction_batch ON mlflow_comment_prediction(batch_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_mlflow_prediction_sample ON mlflow_comment_prediction(sample_item_id, created_at DESC)")
 
         conn.execute(
             """
@@ -2778,6 +2811,7 @@ def init_feedback_db() -> None:
         ensure_table_column(conn, "mlflow_comment_item", "dedupe_key", "TEXT")
         ensure_table_column(conn, "mlflow_comment_item", "source_type", "TEXT NOT NULL DEFAULT 'crawl'")
         ensure_table_column(conn, "mlflow_comment_item", "source_row_id", "INTEGER")
+        ensure_table_column(conn, "mlflow_comment_prediction", "constructiveness_confidence", "TEXT")
         conn.execute(
             """
             CREATE UNIQUE INDEX IF NOT EXISTS idx_mlflow_item_dedupe_key
@@ -2790,6 +2824,23 @@ def init_feedback_db() -> None:
             CREATE UNIQUE INDEX IF NOT EXISTS idx_mlflow_item_source_row
             ON mlflow_comment_item(source_type, source_row_id)
             WHERE source_type = 'synthetic' AND source_row_id IS NOT NULL
+            """
+        )
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO mlflow_comment_prediction (
+                sample_item_id, batch_id, job_id, model_id,
+                raw_toxicity_score, adjusted_toxicity_score, predicted_label,
+                constructiveness_score, constructiveness_label, constructiveness_confidence, seg_threshold_used,
+                record_origin, created_at
+            )
+            SELECT item.id, item.batch_id, item.job_id, batch.model_id,
+                   item.score, NULL, NULL,
+                   item.constructiveness_score, item.constructiveness_label, item.constructiveness_confidence, item.seg_threshold_used,
+                   'legacy_backfill', item.created_at
+            FROM mlflow_comment_item AS item
+            JOIN mlflow_crawl_batch AS batch ON batch.batch_id = item.batch_id
+            WHERE item.source_type = 'crawl'
             """
         )
         ensure_table_column(conn, "mlflow_do_run", "droplet_id", "TEXT")
@@ -2816,6 +2867,11 @@ def init_feedback_db() -> None:
         migrate_training_tracker_lora_terminology(conn)
         seed_training_tracker_default(conn)
         conn.commit()
+
+
+@app.on_event("startup")
+def initialize_feedback_database() -> None:
+    init_feedback_db()
 
 
 def fetch_training_tracker_payload() -> Dict[str, Any]:
@@ -4418,12 +4474,18 @@ def resolve_mlflow_batch_id_or_none(batch_id: Optional[str], strict: bool = Fals
 def build_mlflow_gate_counts(conn: sqlite3.Connection, batch_id: str) -> Dict[str, int]:
     rows = conn.execute(
         """
-        SELECT gate_bucket, COUNT(1) AS c
-        FROM mlflow_comment_item
-        WHERE batch_id = ?
-        GROUP BY gate_bucket
+        SELECT item.gate_bucket, COUNT(1) AS c
+        FROM mlflow_comment_item AS item
+        WHERE item.batch_id = ?
+           OR EXISTS (
+                SELECT 1
+                FROM mlflow_comment_prediction AS prediction
+                WHERE prediction.sample_item_id = item.id
+                  AND prediction.batch_id = ?
+           )
+        GROUP BY item.gate_bucket
         """,
-        (batch_id,),
+        (batch_id, batch_id),
     ).fetchall()
     counts = {"accepted": 0, "candidate": 0, "discarded": 0}
     for bucket, value in rows:
@@ -4432,6 +4494,52 @@ def build_mlflow_gate_counts(conn: sqlite3.Connection, batch_id: str) -> Dict[st
             counts[key] = int(value or 0)
     counts["total"] = counts["accepted"] + counts["candidate"] + counts["discarded"]
     return counts
+
+
+def attach_mlflow_prediction_history(
+    conn: sqlite3.Connection,
+    items: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    sample_ids = [int(item["id"]) for item in items if item.get("id") is not None]
+    history_by_sample: Dict[int, List[Dict[str, Any]]] = {sample_id: [] for sample_id in sample_ids}
+    for group in chunked(sample_ids):
+        placeholders = ", ".join("?" for _ in group)
+        prediction_rows = conn.execute(
+            f"""
+            SELECT id, sample_item_id, batch_id, job_id, model_id,
+                   raw_toxicity_score, adjusted_toxicity_score, predicted_label,
+                   constructiveness_score, constructiveness_label, constructiveness_confidence, seg_threshold_used,
+                   record_origin, created_at
+            FROM mlflow_comment_prediction
+            WHERE sample_item_id IN ({placeholders})
+            ORDER BY created_at DESC, id DESC
+            """,
+            tuple(group),
+        ).fetchall()
+        for prediction_row in prediction_rows:
+            prediction = dict(prediction_row)
+            history_by_sample.setdefault(int(prediction["sample_item_id"]), []).append(prediction)
+
+    for item in items:
+        sample_id = int(item["id"])
+        human_label = (
+            normalize_int(item.get("pseudo_label"))
+            if str(item.get("verification_status") or "") == "manual_accepted"
+            else None
+        )
+        prediction_history = history_by_sample.get(sample_id, [])
+        for prediction in prediction_history:
+            predicted_label = normalize_int(prediction.get("predicted_label"))
+            prediction["agreement_with_human"] = (
+                predicted_label == human_label
+                if predicted_label in {0, 1} and human_label in {0, 1}
+                else None
+            )
+        item["human_label"] = human_label
+        item["latest_prediction"] = prediction_history[0] if prediction_history else None
+        item["previous_predictions"] = prediction_history[1:]
+        item["prediction_history"] = prediction_history
+    return items
 
 
 def build_mlflow_required_bundle_contents(bundle_profile: str = "clean_victsd_gold") -> List[str]:
@@ -4549,6 +4657,8 @@ def build_mlflow_comment_rows(
         url_hash = str(result.get("url_hash") or hash_url(url))
         for seg in (result.get("toxicity") or {}).get("by_segment") or []:
             score = normalize_score(seg.get("score"))
+            adjusted_score = normalize_score(seg.get("toxic_prob_adjusted"))
+            predicted_label = normalize_int(seg.get("toxic_label"))
             text = str(seg.get("text") or seg.get("text_preview") or "").strip()
             if score is None or not text:
                 continue
@@ -4575,6 +4685,8 @@ def build_mlflow_comment_rows(
                     "domain_category": seg.get("domain_category") or result.get("domain_category"),
                     "text": text,
                     "score": score,
+                    "adjusted_score": adjusted_score,
+                    "predicted_label": predicted_label if predicted_label in {0, 1} else None,
                     "pseudo_label": gate["pseudo_label"],
                     "constructiveness_score": constructiveness_score,
                     "constructiveness_label": constructiveness_label,
@@ -4597,50 +4709,50 @@ def build_mlflow_comment_rows(
     return rows
 
 
-def load_existing_mlflow_url_hashes(conn: sqlite3.Connection, url_hashes: List[str]) -> set[str]:
-    existing: set[str] = set()
-    for group in chunked([value for value in sorted(set(url_hashes)) if value]):
+def load_existing_mlflow_samples(
+    conn: sqlite3.Connection,
+    rows: List[Dict[str, Any]],
+) -> Dict[str, sqlite3.Row]:
+    existing: Dict[str, sqlite3.Row] = {}
+    dedupe_keys = sorted({str(row.get("dedupe_key") or "") for row in rows if row.get("dedupe_key")})
+    for group in chunked(dedupe_keys):
         placeholders = ", ".join("?" for _ in group)
-        rows = conn.execute(
-            f"SELECT DISTINCT url_hash FROM mlflow_comment_item WHERE url_hash IN ({placeholders})",
+        db_rows = conn.execute(
+            f"""
+            SELECT id, dedupe_key, gate_bucket, verification_status, pseudo_label,
+                   selected_for_training, training_review_status
+            FROM mlflow_comment_item
+            WHERE dedupe_key IN ({placeholders})
+            """,
             tuple(group),
         ).fetchall()
-        existing.update(str(row[0]) for row in rows if row[0])
-    return existing
+        for db_row in db_rows:
+            key = str(db_row["dedupe_key"] or "")
+            if key:
+                existing[key] = db_row
 
-
-def load_existing_mlflow_dedupe_keys(conn: sqlite3.Connection, dedupe_keys: List[str]) -> set[str]:
-    existing: set[str] = set()
-    for group in chunked([value for value in sorted(set(dedupe_keys)) if value]):
-        placeholders = ", ".join("?" for _ in group)
-        rows = conn.execute(
-            f"SELECT dedupe_key FROM mlflow_comment_item WHERE dedupe_key IN ({placeholders})",
-            tuple(group),
-        ).fetchall()
-        existing.update(str(row[0]) for row in rows if row[0])
-    return existing
-
-
-def load_existing_mlflow_hash_tag_keys(conn: sqlite3.Connection, rows: List[Dict[str, Any]]) -> set[str]:
     hashes = sorted({str(row.get("_effective_hash") or "") for row in rows if row.get("_effective_hash")})
     if not hashes:
-        return set()
+        return existing
 
-    existing: set[str] = set()
     for group in chunked(hashes):
         placeholders = ", ".join("?" for _ in group)
         db_rows = conn.execute(
             f"""
-            SELECT COALESCE(NULLIF(context_segment_hash, ''), NULLIF(segment_hash, '')) AS effective_hash,
+            SELECT id, dedupe_key, gate_bucket, verification_status, pseudo_label,
+                   selected_for_training, training_review_status,
+                   COALESCE(NULLIF(context_segment_hash, ''), NULLIF(segment_hash, '')) AS effective_hash,
                    COALESCE(html_tag, '') AS html_tag
             FROM mlflow_comment_item
             WHERE COALESCE(NULLIF(context_segment_hash, ''), NULLIF(segment_hash, '')) IN ({placeholders})
             """,
             tuple(group),
         ).fetchall()
-        for effective_hash, html_tag in db_rows:
+        for db_row in db_rows:
+            effective_hash = db_row["effective_hash"]
             if effective_hash:
-                existing.add(f"comment_only_v3:{str(effective_hash).strip()}:{normalize_mlflow_html_tag(html_tag)}")
+                legacy_key = f"comment_only_v3:{str(effective_hash).strip()}:{normalize_mlflow_html_tag(db_row['html_tag'])}"
+                existing.setdefault(legacy_key, db_row)
     return existing
 
 
@@ -4660,45 +4772,23 @@ def insert_mlflow_comment_rows(
         "batch_id": batch_id if batch_created else None,
         "candidate_rows": len(rows),
         "inserted": 0,
+        "samples_inserted": 0,
+        "samples_reused": 0,
+        "predictions_inserted": 0,
         "skipped_existing_url": 0,
         "skipped_duplicate_item": 0,
         "counts": {"accepted": 0, "candidate": 0, "discarded": 0, "total": 0},
     }
 
     with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
-        existing_url_hashes = load_existing_mlflow_url_hashes(
-            conn,
-            [str(row.get("url_hash") or "") for row in rows],
-        )
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        existing_samples = load_existing_mlflow_samples(conn, rows)
 
-        url_filtered: List[Dict[str, Any]] = []
-        for row in rows:
-            if str(row.get("url_hash") or "") in existing_url_hashes:
-                stats["skipped_existing_url"] += 1
-                continue
-            url_filtered.append(row)
-
-        existing_dedupe_keys = load_existing_mlflow_dedupe_keys(
-            conn,
-            [str(row.get("dedupe_key") or "") for row in url_filtered],
-        )
-        existing_hash_tag_keys = load_existing_mlflow_hash_tag_keys(conn, url_filtered)
-        seen_dedupe_keys: set[str] = set()
-        insert_rows: List[Dict[str, Any]] = []
-        for row in url_filtered:
-            dedupe_key = str(row.get("dedupe_key") or "")
-            if dedupe_key and (
-                dedupe_key in existing_dedupe_keys
-                or dedupe_key in existing_hash_tag_keys
-                or dedupe_key in seen_dedupe_keys
-            ):
-                stats["skipped_duplicate_item"] += 1
-                continue
-            if dedupe_key:
-                seen_dedupe_keys.add(dedupe_key)
-            insert_rows.append(row)
-
-        if insert_rows and not batch_created:
+        def ensure_batch() -> None:
+            nonlocal batch_created
+            if batch_created:
+                return
             conn.execute(
                 """
                 INSERT INTO mlflow_crawl_batch (batch_id, model_id, status, source_job_id, created_at, options_json)
@@ -4709,25 +4799,141 @@ def insert_mlflow_comment_rows(
             stats["batch_id"] = batch_id
             batch_created = True
 
-        if insert_rows:
-            conn.executemany(
-                """
-                INSERT OR IGNORE INTO mlflow_comment_item (
-                    batch_id, job_id, url, url_hash, segment_id, domain_category, text, score, pseudo_label,
-                    constructiveness_score, constructiveness_label, constructiveness_confidence,
-                    selected_for_training, training_review_status,
-                    gate_bucket, verification_status, segment_hash, context_segment_hash, dedupe_key,
-                    html_tag, seg_threshold_used, label_source, label_confidence, created_at
-                ) VALUES (
-                    :batch_id, :job_id, :url, :url_hash, :segment_id, :domain_category, :text, :score, :pseudo_label,
-                    :constructiveness_score, :constructiveness_label, :constructiveness_confidence,
-                    :selected_for_training, :training_review_status,
-                    :gate_bucket, :verification_status, :segment_hash, :context_segment_hash, :dedupe_key,
-                    :html_tag, :seg_threshold_used, :label_source, :label_confidence, :created_at
+        for row in rows:
+            dedupe_key = str(row.get("dedupe_key") or "")
+            sample = existing_samples.get(dedupe_key)
+            sample_was_existing = sample is not None
+
+            if sample is not None:
+                duplicate_prediction = conn.execute(
+                    """
+                    SELECT 1
+                    FROM mlflow_comment_prediction
+                    WHERE sample_item_id = ? AND model_id = ?
+                    """,
+                    (int(sample["id"]), model_id),
+                ).fetchone()
+                if duplicate_prediction:
+                    stats["skipped_duplicate_item"] += 1
+                    continue
+
+            ensure_batch()
+
+            if sample is None:
+                cursor = conn.execute(
+                    """
+                    INSERT OR IGNORE INTO mlflow_comment_item (
+                        batch_id, job_id, url, url_hash, segment_id, domain_category, text, score, pseudo_label,
+                        constructiveness_score, constructiveness_label, constructiveness_confidence,
+                        selected_for_training, training_review_status,
+                        gate_bucket, verification_status, segment_hash, context_segment_hash, dedupe_key,
+                        html_tag, seg_threshold_used, label_source, label_confidence, created_at
+                    ) VALUES (
+                        :batch_id, :job_id, :url, :url_hash, :segment_id, :domain_category, :text, :score, :pseudo_label,
+                        :constructiveness_score, :constructiveness_label, :constructiveness_confidence,
+                        :selected_for_training, :training_review_status,
+                        :gate_bucket, :verification_status, :segment_hash, :context_segment_hash, :dedupe_key,
+                        :html_tag, :seg_threshold_used, :label_source, :label_confidence, :created_at
+                    )
+                    """,
+                    row,
                 )
+                if int(cursor.rowcount or 0) > 0:
+                    stats["samples_inserted"] += 1
+                    stats["inserted"] += 1
+                    sample_id = int(cursor.lastrowid)
+                else:
+                    sample_row = conn.execute(
+                        """
+                        SELECT id, dedupe_key, gate_bucket, verification_status, pseudo_label,
+                               selected_for_training, training_review_status
+                        FROM mlflow_comment_item
+                        WHERE dedupe_key = ?
+                        """,
+                        (dedupe_key,),
+                    ).fetchone()
+                    if sample_row is None:
+                        raise RuntimeError(f"Unable to resolve MLflow sample for dedupe key: {dedupe_key}")
+                    sample = sample_row
+                    sample_id = int(sample["id"])
+                    sample_was_existing = True
+                sample = conn.execute(
+                    """
+                    SELECT id, dedupe_key, gate_bucket, verification_status, pseudo_label,
+                           selected_for_training, training_review_status
+                    FROM mlflow_comment_item WHERE id = ?
+                    """,
+                    (sample_id,),
+                ).fetchone()
+                existing_samples[dedupe_key] = sample
+            else:
+                sample_id = int(sample["id"])
+
+            prediction_cursor = conn.execute(
+                """
+                INSERT OR IGNORE INTO mlflow_comment_prediction (
+                    sample_item_id, batch_id, job_id, model_id,
+                    raw_toxicity_score, adjusted_toxicity_score, predicted_label,
+                    constructiveness_score, constructiveness_label, constructiveness_confidence, seg_threshold_used,
+                    record_origin, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'inference', ?)
                 """,
-                insert_rows,
+                (
+                    sample_id,
+                    batch_id,
+                    row.get("job_id") or source_job_id,
+                    model_id,
+                    row.get("score"),
+                    row.get("adjusted_score"),
+                    row.get("predicted_label"),
+                    row.get("constructiveness_score"),
+                    row.get("constructiveness_label"),
+                    row.get("constructiveness_confidence"),
+                    row.get("seg_threshold_used"),
+                    row.get("created_at") or created_at,
+                ),
             )
+            if int(prediction_cursor.rowcount or 0) == 0:
+                stats["skipped_duplicate_item"] += 1
+                continue
+
+            stats["predictions_inserted"] += 1
+            if sample_was_existing:
+                stats["samples_reused"] += 1
+
+            verification_status = str(sample["verification_status"] or "")
+            if (
+                sample_was_existing
+                and verification_status not in {"manual_accepted", "manual_rejected"}
+                and str(row.get("gate_bucket") or "") == "candidate"
+                and str(sample["gate_bucket"] or "") != "candidate"
+            ):
+                conn.execute(
+                    """
+                    UPDATE mlflow_comment_item
+                    SET score = ?, pseudo_label = ?, gate_bucket = 'candidate', verification_status = 'unverified',
+                        selected_for_training = 0, training_review_status = 'pending',
+                        seg_threshold_used = ?, label_source = ?, label_confidence = ?, reviewed_at = NULL
+                    WHERE id = ?
+                    """,
+                    (
+                        row.get("score"),
+                        row.get("pseudo_label"),
+                        row.get("seg_threshold_used"),
+                        row.get("label_source"),
+                        row.get("label_confidence"),
+                        sample_id,
+                    ),
+                )
+                sample = conn.execute(
+                    """
+                    SELECT id, dedupe_key, gate_bucket, verification_status, pseudo_label,
+                           selected_for_training, training_review_status
+                    FROM mlflow_comment_item WHERE id = ?
+                    """,
+                    (sample_id,),
+                ).fetchone()
+                existing_samples[dedupe_key] = sample
 
         if batch_created:
             conn.execute(
@@ -4737,13 +4943,6 @@ def insert_mlflow_comment_rows(
                 WHERE batch_id = ?
                 """,
                 (datetime.utcnow().isoformat() + "Z", batch_id),
-            )
-            stats["inserted"] = int(
-                conn.execute(
-                    "SELECT COUNT(1) FROM mlflow_comment_item WHERE batch_id = ?",
-                    (batch_id,),
-                ).fetchone()[0]
-                or 0
             )
             stats["counts"] = build_mlflow_gate_counts(conn, batch_id)
 
@@ -5850,6 +6049,9 @@ def mlflow_ingest(request: MlflowIngestRequest) -> Dict[str, Any]:
             "dedupe": {
                 "candidate_rows": mlflow_collection["candidate_rows"],
                 "inserted": mlflow_collection["inserted"],
+                "samples_inserted": mlflow_collection["samples_inserted"],
+                "samples_reused": mlflow_collection["samples_reused"],
+                "predictions_inserted": mlflow_collection["predictions_inserted"],
                 "skipped_existing_url": mlflow_collection["skipped_existing_url"],
                 "skipped_duplicate_item": mlflow_collection["skipped_duplicate_item"],
             },
@@ -5968,11 +6170,23 @@ def mlflow_crawl_history(
         conn.row_factory = sqlite3.Row
         total_row = conn.execute(
             """
+            WITH batch_samples AS (
+                SELECT batch_id, id AS sample_item_id, created_at AS seen_at
+                FROM mlflow_comment_item
+                UNION ALL
+                SELECT batch_id, sample_item_id, created_at AS seen_at
+                FROM mlflow_comment_prediction
+            ), resolved AS (
+                SELECT batch_id, sample_item_id, MAX(seen_at) AS seen_at
+                FROM batch_samples
+                GROUP BY batch_id, sample_item_id
+            )
             SELECT COUNT(1)
             FROM (
-                SELECT batch_id, url_hash
-                FROM mlflow_comment_item
-                GROUP BY batch_id, url_hash
+                SELECT resolved.batch_id, item.url_hash
+                FROM resolved
+                JOIN mlflow_comment_item AS item ON item.id = resolved.sample_item_id
+                GROUP BY resolved.batch_id, item.url_hash
             )
             """
         ).fetchone()
@@ -5984,32 +6198,44 @@ def mlflow_crawl_history(
             if len(row) >= 2
         }
         domain_category_expr = (
-            "MAX(domain_category) AS domain_category"
+            "MAX(item.domain_category) AS domain_category"
             if "domain_category" in comment_item_columns
             else "NULL AS domain_category"
         )
 
         rows = conn.execute(
             f"""
+            WITH batch_samples AS (
+                SELECT batch_id, id AS sample_item_id, created_at AS seen_at
+                FROM mlflow_comment_item
+                UNION ALL
+                SELECT batch_id, sample_item_id, created_at AS seen_at
+                FROM mlflow_comment_prediction
+            ), resolved AS (
+                SELECT batch_id, sample_item_id, MAX(seen_at) AS seen_at
+                FROM batch_samples
+                GROUP BY batch_id, sample_item_id
+            )
             SELECT
-                batch_id,
-                url,
-                url_hash,
+                resolved.batch_id,
+                item.url,
+                item.url_hash,
                 {domain_category_expr},
                 COUNT(1) AS segment_count,
-                SUM(CASE WHEN gate_bucket = 'accepted' THEN 1 ELSE 0 END) AS accepted_count,
-                SUM(CASE WHEN gate_bucket = 'candidate' THEN 1 ELSE 0 END) AS candidate_count,
-                SUM(CASE WHEN gate_bucket = 'discarded' THEN 1 ELSE 0 END) AS discarded_count,
-                MAX(created_at) AS last_seen_at
-            FROM mlflow_comment_item
-            GROUP BY batch_id, url_hash, url
+                SUM(CASE WHEN item.gate_bucket = 'accepted' THEN 1 ELSE 0 END) AS accepted_count,
+                SUM(CASE WHEN item.gate_bucket = 'candidate' THEN 1 ELSE 0 END) AS candidate_count,
+                SUM(CASE WHEN item.gate_bucket = 'discarded' THEN 1 ELSE 0 END) AS discarded_count,
+                MAX(resolved.seen_at) AS last_seen_at
+            FROM resolved
+            JOIN mlflow_comment_item AS item ON item.id = resolved.sample_item_id
+            GROUP BY resolved.batch_id, item.url_hash, item.url
             ORDER BY last_seen_at DESC
             LIMIT ? OFFSET ?
             """,
             (page_size, offset),
         ).fetchall()
+        items = [dict(row) for row in rows]
 
-    items = [dict(row) for row in rows]
     return {
         "items": items,
         "total": total,
@@ -6023,17 +6249,66 @@ def mlflow_clear_batch(request: MlflowClearBatchRequest) -> Dict[str, Any]:
     batch_id = resolve_mlflow_batch_id(request.batch_id, strict=True)
 
     with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
 
         deleted_do_run = int(
             conn.execute("DELETE FROM mlflow_do_run WHERE batch_id = ?", (batch_id,)).rowcount or 0
         )
-        deleted_comment_item = int(
-            conn.execute("DELETE FROM mlflow_comment_item WHERE batch_id = ?", (batch_id,)).rowcount or 0
+        deleted_prediction = int(
+            conn.execute("DELETE FROM mlflow_comment_prediction WHERE batch_id = ?", (batch_id,)).rowcount or 0
         )
-        deleted_crawl_batch = int(
-            conn.execute("DELETE FROM mlflow_crawl_batch WHERE batch_id = ?", (batch_id,)).rowcount or 0
-        )
+
+        owned_samples = conn.execute(
+            """
+            SELECT id, verification_status, selected_for_training, is_locked
+            FROM mlflow_comment_item
+            WHERE batch_id = ?
+            ORDER BY id ASC
+            """,
+            (batch_id,),
+        ).fetchall()
+        deleted_comment_item = 0
+        preserved_comment_item = 0
+        reassigned_comment_item = 0
+        for sample in owned_samples:
+            sample_id = int(sample["id"])
+            replacement_prediction = conn.execute(
+                """
+                SELECT batch_id
+                FROM mlflow_comment_prediction
+                WHERE sample_item_id = ?
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+                """,
+                (sample_id,),
+            ).fetchone()
+            if replacement_prediction is not None:
+                conn.execute(
+                    "UPDATE mlflow_comment_item SET batch_id = ? WHERE id = ?",
+                    (str(replacement_prediction["batch_id"]), sample_id),
+                )
+                reassigned_comment_item += 1
+                continue
+
+            requires_preservation = (
+                str(sample["verification_status"] or "") in {"manual_accepted", "manual_rejected"}
+                or int(sample["selected_for_training"] or 0) == 1
+                or int(sample["is_locked"] or 0) == 1
+            )
+            if requires_preservation:
+                preserved_comment_item += 1
+                continue
+            deleted_comment_item += int(
+                conn.execute("DELETE FROM mlflow_comment_item WHERE id = ?", (sample_id,)).rowcount or 0
+            )
+
+        if preserved_comment_item:
+            deleted_crawl_batch = 0
+        else:
+            deleted_crawl_batch = int(
+                conn.execute("DELETE FROM mlflow_crawl_batch WHERE batch_id = ?", (batch_id,)).rowcount or 0
+            )
 
         conn.commit()
 
@@ -6042,7 +6317,10 @@ def mlflow_clear_batch(request: MlflowClearBatchRequest) -> Dict[str, Any]:
         "batch_id": batch_id,
         "deleted_rows": {
             "mlflow_do_run": deleted_do_run,
+            "mlflow_comment_prediction": deleted_prediction,
             "mlflow_comment_item": deleted_comment_item,
+            "mlflow_comment_item_preserved": preserved_comment_item,
+            "mlflow_comment_item_reassigned": reassigned_comment_item,
             "mlflow_crawl_batch": deleted_crawl_batch,
             "mlflow_training_artifact": 0,
         },
@@ -6061,6 +6339,7 @@ def mlflow_clear_all(request: MlflowClearAllRequest) -> Dict[str, Any]:
 
         deleted_do_run = int(conn.execute("DELETE FROM mlflow_do_run").rowcount or 0)
         deleted_training_artifact = int(conn.execute("DELETE FROM mlflow_training_artifact").rowcount or 0)
+        deleted_prediction = int(conn.execute("DELETE FROM mlflow_comment_prediction").rowcount or 0)
         deleted_comment_item = int(conn.execute("DELETE FROM mlflow_comment_item").rowcount or 0)
         deleted_crawl_batch = int(conn.execute("DELETE FROM mlflow_crawl_batch").rowcount or 0)
 
@@ -6071,6 +6350,7 @@ def mlflow_clear_all(request: MlflowClearAllRequest) -> Dict[str, Any]:
         "deleted_rows": {
             "mlflow_do_run": deleted_do_run,
             "mlflow_training_artifact": deleted_training_artifact,
+            "mlflow_comment_prediction": deleted_prediction,
             "mlflow_comment_item": deleted_comment_item,
             "mlflow_crawl_batch": deleted_crawl_batch,
         },
@@ -6090,20 +6370,23 @@ def mlflow_review_history(
     offset = (page - 1) * page_size
 
     decision_normalized = (decision or "all").strip().lower()
-    where_parts = ["verification_status != 'unverified'"]
+    where_parts = ["item.verification_status != 'unverified'"]
     params: List[Any] = []
 
     if scope == "batch":
         resolved_batch_id = resolve_mlflow_batch_id(batch_id, strict=strict_batch)
-        where_parts.append("batch_id = ?")
-        params.append(resolved_batch_id)
+        where_parts.append(
+            "(item.batch_id = ? OR EXISTS (SELECT 1 FROM mlflow_comment_prediction AS prediction "
+            "WHERE prediction.sample_item_id = item.id AND prediction.batch_id = ?))"
+        )
+        params.extend([resolved_batch_id, resolved_batch_id])
 
     if decision_normalized == "accepted":
-        where_parts.append("gate_bucket = 'accepted'")
+        where_parts.append("item.gate_bucket = 'accepted'")
     elif decision_normalized == "rejected":
-        where_parts.append("verification_status = 'manual_rejected'")
+        where_parts.append("item.verification_status = 'manual_rejected'")
     elif decision_normalized == "discarded":
-        where_parts.append("gate_bucket = 'discarded'")
+        where_parts.append("item.gate_bucket = 'discarded'")
     elif decision_normalized != "all":
         raise HTTPException(status_code=400, detail=f"Unsupported decision filter: {decision}")
 
@@ -6112,27 +6395,28 @@ def mlflow_review_history(
     with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
         total_row = conn.execute(
-            f"SELECT COUNT(1) FROM mlflow_comment_item WHERE {where_sql}",
+            f"SELECT COUNT(1) FROM mlflow_comment_item AS item WHERE {where_sql}",
             tuple(params),
         ).fetchone()
         total = int(total_row[0] if total_row else 0)
 
         rows = conn.execute(
             f"""
-            SELECT id, batch_id, url, url_hash, segment_id, domain_category, text, score,
-                   pseudo_label, constructiveness_score, constructiveness_label, constructiveness_confidence,
-                   selected_for_training, training_review_status, is_locked, gate_bucket, verification_status,
-                   segment_hash, context_segment_hash, html_tag,
-                   seg_threshold_used, label_source, label_confidence, review_provider, review_model_name, created_at, reviewed_at
-            FROM mlflow_comment_item
+            SELECT item.id, item.batch_id, item.url, item.url_hash, item.segment_id, item.domain_category, item.text, item.score,
+                   item.pseudo_label, item.constructiveness_score, item.constructiveness_label, item.constructiveness_confidence,
+                   item.selected_for_training, item.training_review_status, item.is_locked, item.gate_bucket, item.verification_status,
+                   item.segment_hash, item.context_segment_hash, item.html_tag,
+                   item.seg_threshold_used, item.label_source, item.label_confidence, item.review_provider, item.review_model_name,
+                   item.created_at, item.reviewed_at
+            FROM mlflow_comment_item AS item
             WHERE {where_sql}
-            ORDER BY COALESCE(reviewed_at, created_at) DESC, id DESC
+            ORDER BY COALESCE(item.reviewed_at, item.created_at) DESC, item.id DESC
             LIMIT ? OFFSET ?
             """,
             tuple([*params, page_size, offset]),
         ).fetchall()
+        items = attach_mlflow_prediction_history(conn, [dict(row) for row in rows])
 
-    items = [dict(row) for row in rows]
     return {
         "scope": scope,
         "batch_id": resolved_batch_id,
@@ -6155,15 +6439,19 @@ def mlflow_candidates(
     resolved_batch_id: Optional[str] = None
     offset = (page - 1) * page_size
     where_parts = [
-        "gate_bucket = 'candidate'",
-        "verification_status = 'unverified'",
+        "item.gate_bucket = 'candidate'",
+        "item.verification_status = 'unverified'",
     ]
     params: List[Any] = []
 
     if scope == "batch":
         resolved_batch_id = resolve_mlflow_batch_id(batch_id, strict=strict_batch)
-        where_parts.insert(0, "batch_id = ?")
-        params.append(resolved_batch_id)
+        where_parts.insert(
+            0,
+            "(item.batch_id = ? OR EXISTS (SELECT 1 FROM mlflow_comment_prediction AS prediction "
+            "WHERE prediction.sample_item_id = item.id AND prediction.batch_id = ?))",
+        )
+        params.extend([resolved_batch_id, resolved_batch_id])
 
     where_sql = " AND ".join(where_parts)
 
@@ -6172,7 +6460,7 @@ def mlflow_candidates(
         total_row = conn.execute(
             f"""
             SELECT COUNT(1)
-            FROM mlflow_comment_item
+            FROM mlflow_comment_item AS item
             WHERE {where_sql}
             """,
             tuple(params),
@@ -6181,20 +6469,21 @@ def mlflow_candidates(
 
         rows = conn.execute(
             f"""
-            SELECT id, batch_id, url, url_hash, segment_id, domain_category, text, score,
-                   pseudo_label, constructiveness_score, constructiveness_label, constructiveness_confidence,
-                   selected_for_training, training_review_status, is_locked, gate_bucket, verification_status,
-                   segment_hash, context_segment_hash, html_tag,
-                   seg_threshold_used, label_source, label_confidence, review_provider, review_model_name, created_at, reviewed_at
-            FROM mlflow_comment_item
+            SELECT item.id, item.batch_id, item.url, item.url_hash, item.segment_id, item.domain_category, item.text, item.score,
+                   item.pseudo_label, item.constructiveness_score, item.constructiveness_label, item.constructiveness_confidence,
+                   item.selected_for_training, item.training_review_status, item.is_locked, item.gate_bucket, item.verification_status,
+                   item.segment_hash, item.context_segment_hash, item.html_tag,
+                   item.seg_threshold_used, item.label_source, item.label_confidence, item.review_provider, item.review_model_name,
+                   item.created_at, item.reviewed_at
+            FROM mlflow_comment_item AS item
             WHERE {where_sql}
-            ORDER BY id DESC
+            ORDER BY item.id DESC
             LIMIT ? OFFSET ?
             """,
             tuple([*params, page_size, offset]),
         ).fetchall()
+        items = attach_mlflow_prediction_history(conn, [dict(row) for row in rows])
 
-    items = [dict(row) for row in rows]
     return {
         "scope": scope,
         "batch_id": resolved_batch_id,
@@ -6396,6 +6685,7 @@ def mlflow_threshold_status(
     batch_id: Optional[str] = None,
     strict_batch: bool = Query(default=False),
 ) -> Dict[str, Any]:
+    target_min_rows = get_mlflow_bundle_min_rows()
     resolved_batch_id = resolve_mlflow_batch_id_or_none(batch_id, strict=strict_batch)
     if not resolved_batch_id:
         return {
@@ -6403,8 +6693,8 @@ def mlflow_threshold_status(
             "scope": "all_batches",
             "accepted_count": 0,
             "accepted_count_current_batch": 0,
-            "target_max_test_stage": MLFLOW_THRESHOLD_TARGET_MAX,
-            "remaining_to_target": MLFLOW_THRESHOLD_TARGET_MAX,
+            "target_max_test_stage": target_min_rows,
+            "remaining_to_target": target_min_rows,
             "is_ready": False,
             "has_data": False,
         }
@@ -6429,15 +6719,15 @@ def mlflow_threshold_status(
         ).fetchone()
         accepted_count_current_batch = int(accepted_batch_row[0] if accepted_batch_row else 0)
 
-    remaining = max(MLFLOW_THRESHOLD_TARGET_MAX - accepted_count, 0)
+    remaining = max(target_min_rows - accepted_count, 0)
     return {
         "batch_id": resolved_batch_id,
         "scope": "all_batches",
         "accepted_count": accepted_count,
         "accepted_count_current_batch": accepted_count_current_batch,
-        "target_max_test_stage": MLFLOW_THRESHOLD_TARGET_MAX,
+        "target_max_test_stage": target_min_rows,
         "remaining_to_target": remaining,
-        "is_ready": accepted_count >= MLFLOW_THRESHOLD_TARGET_MAX,
+        "is_ready": accepted_count >= target_min_rows,
         "has_data": True,
     }
 
@@ -6856,7 +7146,7 @@ def mlflow_manual_export_bundle(request: MlflowManualExportBundleRequest) -> Dic
     gate_policy_json = {
         "accept_threshold": MLFLOW_ACCEPT_THRESHOLD,
         "discard_threshold": MLFLOW_DISCARD_THRESHOLD,
-        "target_max_test_stage": MLFLOW_THRESHOLD_TARGET_MAX,
+        "target_max_test_stage": get_mlflow_bundle_min_rows(),
     }
 
     manifest_json = {
@@ -9222,6 +9512,9 @@ def analyze(request: AnalyzeRequest) -> Dict[str, Any]:
             "batch_id": None,
             "candidate_rows": 0,
             "inserted": 0,
+            "samples_inserted": 0,
+            "samples_reused": 0,
+            "predictions_inserted": 0,
             "skipped_existing_url": 0,
             "skipped_duplicate_item": 0,
             "counts": {"accepted": 0, "candidate": 0, "discarded": 0, "total": 0},

@@ -171,6 +171,28 @@ export interface MlflowCandidate {
   verification_status: string;
   reviewed_at?: string | null;
   created_at?: string | null;
+  human_label?: number | null;
+  latest_prediction?: MlflowPrediction | null;
+  previous_predictions?: MlflowPrediction[];
+  prediction_history?: MlflowPrediction[];
+}
+
+export interface MlflowPrediction {
+  id: number;
+  sample_item_id: number;
+  batch_id: string;
+  job_id?: string | null;
+  model_id: string;
+  raw_toxicity_score?: number | null;
+  adjusted_toxicity_score?: number | null;
+  predicted_label?: number | null;
+  constructiveness_score?: number | null;
+  constructiveness_label?: number | null;
+  constructiveness_confidence?: string | null;
+  seg_threshold_used?: number | null;
+  record_origin: "inference" | "legacy_backfill" | string;
+  created_at: string;
+  agreement_with_human?: boolean | null;
 }
 
 export interface MlflowTrainingPreview {
@@ -421,7 +443,10 @@ export interface MlflowGeminiEvaluationResponse {
 
 export interface MlflowDeletedRows {
   mlflow_do_run: number;
+  mlflow_comment_prediction?: number;
   mlflow_comment_item: number;
+  mlflow_comment_item_preserved?: number;
+  mlflow_comment_item_reassigned?: number;
   mlflow_crawl_batch: number;
   mlflow_training_artifact: number;
 }
