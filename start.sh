@@ -7,9 +7,10 @@ mkdir -p "$RUNTIME_DIR"
 
 BACKEND_PORT="${BACKEND_PORT:-8000}"
 FRONTEND_PORT="${FRONTEND_PORT:-5173}"
-WEBHOOK_PORT="${WEBHOOK_PORT:-9000}"
+WEBHOOK_PORT="${WEBHOOK_PORT:-9001}"
 WEBHOOK_NGROK_DOMAIN="${WEBHOOK_NGROK_DOMAIN:-living-rare-ram.ngrok-free.app}"
 START_FRONTEND_NGROK="${START_FRONTEND_NGROK:-0}"
+SKIP_WEBHOOK_SETTINGS_SYNC="${SKIP_WEBHOOK_SETTINGS_SYNC:-0}"
 
 if [[ "$WEBHOOK_NGROK_DOMAIN" =~ ^https?:// ]]; then
   WEBHOOK_NGROK_URL="$WEBHOOK_NGROK_DOMAIN"
@@ -38,6 +39,32 @@ fi
 if ! command -v ngrok >/dev/null 2>&1; then
   echo "[ERR] ngrok not found in PATH."
   exit 1
+fi
+
+if [[ "$SKIP_WEBHOOK_SETTINGS_SYNC" != "1" ]]; then
+  echo "[INFO] Syncing local Kaggle webhook settings..."
+  "$PYTHON_BIN" - "$REPO_ROOT" "http://127.0.0.1:$WEBHOOK_PORT/kaggle/trigger" "http://127.0.0.1:$WEBHOOK_PORT/kaggle/status" "$WEBHOOK_NGROK_URL" <<'PY'
+import sys
+from pathlib import Path
+
+repo_root = Path(sys.argv[1])
+sys.path.insert(0, str(repo_root))
+
+from backend.system_settings import DEFAULT_SETTINGS_DB_PATH, update_system_settings
+
+DEFAULT_SETTINGS_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+update_system_settings(
+    DEFAULT_SETTINGS_DB_PATH,
+    {
+        "KAGGLE_WEBHOOK_URL": sys.argv[2],
+        "KAGGLE_STATUS_WEBHOOK_URL": sys.argv[3],
+        "KAGGLE_BUNDLE_PUBLIC_BASE_URL": sys.argv[4],
+    },
+    updated_by="start.sh",
+)
+PY
+else
+  echo "[INFO] Skipping Kaggle webhook settings sync."
 fi
 
 cleanup() {
@@ -77,7 +104,7 @@ FRONTEND_PID=$!
 echo "[INFO] Starting ngrok webhook tunnel https://$WEBHOOK_NGROK_DOMAIN -> localhost:$WEBHOOK_PORT"
 (
   cd "$REPO_ROOT"
-  exec ngrok http --url="$WEBHOOK_NGROK_URL" "$WEBHOOK_PORT"
+  exec ngrok http --url="$WEBHOOK_NGROK_URL" --pooling-enabled=true "$WEBHOOK_PORT"
 ) >"$RUNTIME_DIR/ngrok-webhook.log" 2>&1 &
 NGROK_WEBHOOK_PID=$!
 
@@ -97,4 +124,19 @@ echo "[INFO] Webhook:   http://127.0.0.1:$WEBHOOK_PORT"
 echo "[INFO] Ngrok URL: $WEBHOOK_NGROK_URL"
 echo "[INFO] Logs dir:  $RUNTIME_DIR"
 
-wait -n "$BACKEND_PID" "$FRONTEND_PID" "$WEBHOOK_PID" "$NGROK_WEBHOOK_PID" ${NGROK_FRONTEND_PID:+$NGROK_FRONTEND_PID}
+SERVICE_PIDS=("$BACKEND_PID" "$FRONTEND_PID" "$WEBHOOK_PID" "$NGROK_WEBHOOK_PID")
+if [[ -n "${NGROK_FRONTEND_PID:-}" ]]; then
+  SERVICE_PIDS+=("$NGROK_FRONTEND_PID")
+fi
+
+# Bash 3.2, which is still the macOS system shell, does not support wait -n.
+# Polling keeps this launcher compatible with the default macOS Bash.
+while true; do
+  for pid in "${SERVICE_PIDS[@]}"; do
+    if ! kill -0 "$pid" >/dev/null 2>&1; then
+      echo "[ERR] Service process exited: PID=$pid"
+      exit 1
+    fi
+  done
+  sleep 2
+done

@@ -4,6 +4,8 @@ import zipfile
 from datetime import datetime
 from pathlib import Path
 
+import pytest
+
 
 def _seed_mlflow_batch(feedback_db: Path, batch_id: str = "batch_smoke") -> None:
     now = datetime.utcnow().isoformat() + "Z"
@@ -209,6 +211,8 @@ def test_synthetic_gemini_review_persists_provenance_and_transfers(client, qa_en
     suggestion = suggestion_response.json()["suggestions"][0]
     assert suggestion["toxicity_label"] == 0
     assert suggestion["constructiveness_label"] == 1
+    assert suggestion["provider"] == "gemini"
+    assert suggestion["model"] == "gemini-2.5-flash"
 
     apply_response = client.post(
         "/api/dataset/synthetic/review",
@@ -222,6 +226,8 @@ def test_synthetic_gemini_review_persists_provenance_and_transfers(client, qa_en
                     "constructiveness": suggestion["constructiveness_label"],
                     "review_method": "gemini_assisted",
                     "label_confidence": suggestion["confidence"],
+                    "review_provider": suggestion["provider"],
+                    "review_model_name": suggestion["model"],
                 }
             ]
         },
@@ -230,12 +236,13 @@ def test_synthetic_gemini_review_persists_provenance_and_transfers(client, qa_en
     with sqlite3.connect(qa_env["feedback_db"]) as conn:
         reviewed = conn.execute(
             """
-            SELECT label, constructiveness, is_accepted, review_method, label_confidence, reviewed_by
+            SELECT label, constructiveness, is_accepted, review_method, label_confidence, reviewed_by,
+                   review_provider, review_model_name
             FROM synthetic_dataset_row WHERE id = ?
             """,
             (row_id,),
         ).fetchone()
-    assert reviewed == (0, 1, 1, "gemini_assisted", "high", "admin")
+    assert reviewed == (0, 1, 1, "gemini_assisted", "high", "admin", "gemini", "gemini-2.5-flash")
 
     transfer = client.post(
         "/api/dataset/synthetic/transfer-to-training-preview",
@@ -246,12 +253,13 @@ def test_synthetic_gemini_review_persists_provenance_and_transfers(client, qa_en
     with sqlite3.connect(qa_env["feedback_db"]) as conn:
         mlflow_row = conn.execute(
             """
-            SELECT pseudo_label, constructiveness_label, training_review_status, label_source, label_confidence
+            SELECT pseudo_label, constructiveness_label, training_review_status, label_source, label_confidence,
+                   review_provider, review_model_name
             FROM mlflow_comment_item WHERE source_type = 'synthetic' AND source_row_id = ?
             """,
             (row_id,),
         ).fetchone()
-    assert mlflow_row == (0, 1, "manual_gemini", "gemini_assist", "high")
+    assert mlflow_row == (0, 1, "manual_gemini", "gemini_assist", "high", "gemini", "gemini-2.5-flash")
 
 
 def test_admin_confirms_synthetic_transfer_to_training_preview(client, qa_env, admin_headers):
@@ -855,6 +863,9 @@ def test_mlflow_gemini_review_parses_mock_response_and_apply_metadata(client, qa
                     "clear_constructiveness": True,
                     "label_source": "gemini_assist",
                     "label_confidence": suggestion["confidence"],
+                    "reviewed_by_gemini": True,
+                    "review_provider": suggestion["provider"],
+                    "review_model_name": suggestion["model"],
                 }
             ]
         },
@@ -862,10 +873,10 @@ def test_mlflow_gemini_review_parses_mock_response_and_apply_metadata(client, qa
     assert apply_response.status_code == 200
     with sqlite3.connect(qa_env["feedback_db"]) as conn:
         row = conn.execute(
-            "SELECT pseudo_label, constructiveness_label, label_source, label_confidence FROM mlflow_comment_item WHERE id = ?",
+            "SELECT pseudo_label, constructiveness_label, label_source, label_confidence, review_provider, review_model_name FROM mlflow_comment_item WHERE id = ?",
             (target_id,),
         ).fetchone()
-    assert row == (0, None, "gemini_assist", "high")
+    assert row == (0, None, "gemini_assist", "high", "gemini", "gemini-2.5-flash")
 
 
 def test_mlflow_bulk_gemini_review_and_apply_preserves_review_origin(client, qa_env, admin_headers, monkeypatch):
@@ -928,6 +939,8 @@ def test_mlflow_bulk_gemini_review_and_apply_preserves_review_origin(client, qa_
                     "label_source": "gemini_assist",
                     "label_confidence": item["confidence"],
                     "reviewed_by_gemini": True,
+                    "review_provider": item["provider"],
+                    "review_model_name": item["model"],
                 }
                 for item in suggestions
             ]
@@ -938,10 +951,65 @@ def test_mlflow_bulk_gemini_review_and_apply_preserves_review_origin(client, qa_
 
     with sqlite3.connect(qa_env["feedback_db"]) as conn:
         applied_rows = conn.execute(
-            "SELECT training_review_status, label_source FROM mlflow_comment_item WHERE id IN (?, ?) ORDER BY id",
+            "SELECT training_review_status, label_source, review_provider, review_model_name FROM mlflow_comment_item WHERE id IN (?, ?) ORDER BY id",
             tuple(ids),
         ).fetchall()
-    assert applied_rows == [("auto_gemini", "gemini_assist"), ("manual_gemini", "gemini_assist")]
+    assert applied_rows == [
+        ("auto_gemini", "gemini_assist", "gemini", "gemini-2.5-flash"),
+        ("manual_gemini", "gemini_assist", "gemini", "gemini-2.5-flash"),
+    ]
+
+
+def test_gemini_review_uses_actual_model_and_enforces_rate_window(qa_env, monkeypatch):
+    app_module = qa_env["app_module"]
+    rows = [
+        {
+            "id": 501,
+            "text": "comment provenance",
+            "score": 0.5,
+            "pseudo_label": 0,
+            "constructiveness_score": None,
+            "constructiveness_label": None,
+            "gate_bucket": "accepted",
+            "domain_category": "news",
+            "url": "https://example.com/provenance",
+        }
+    ]
+
+    def fake_call_gemini(_prompt: str) -> str:
+        payload = json.dumps(
+            [{"id": 501, "toxicity_label": 1, "constructiveness_label": None, "confidence": "high", "reason": "reviewed", "action": "apply"}]
+        )
+        return app_module.GeminiTextResponse(payload, model="gemini-fallback-test")
+
+    monkeypatch.setattr(app_module, "call_gemini", fake_call_gemini)
+    suggestion = app_module.run_mlflow_gemini_review(rows)[0]
+    assert suggestion["provider"] == "gemini"
+    assert suggestion["model"] == "gemini-fallback-test"
+
+    with pytest.raises(app_module.HTTPException) as exc_info:
+        app_module.validate_gemini_review_item_limit(list(range(10)))
+    assert exc_info.value.status_code == 422
+    assert "at most 9 comments" in str(exc_info.value.detail)
+
+    clock = [100.0]
+    sleeps: list[float] = []
+    monkeypatch.setattr(
+        app_module,
+        "get_int_setting",
+        lambda key, default, min_value=0: 13 if key == "GEMINI_MIN_REQUEST_INTERVAL_SECONDS" else default,
+    )
+    monkeypatch.setattr(app_module.time, "monotonic", lambda: clock[0])
+
+    def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock[0] += seconds
+
+    monkeypatch.setattr(app_module.time, "sleep", fake_sleep)
+    app_module.GEMINI_NEXT_REQUEST_AT = 0.0
+    app_module.wait_for_gemini_request_slot()
+    app_module.wait_for_gemini_request_slot()
+    assert sleeps == [13.0]
 
 
 def test_mlflow_gemini_review_splits_more_than_three_comments_into_complete_batches(qa_env, monkeypatch):
@@ -1093,6 +1161,8 @@ def test_mlflow_manual_verify_gemini_review_and_apply(client, qa_env, admin_head
                     "label_source": "gemini_assist",
                     "label_confidence": "high",
                     "reviewed_by_gemini": True,
+                    "review_provider": suggestion["provider"],
+                    "review_model_name": suggestion["model"],
                 }
             ]
         },
@@ -1102,12 +1172,15 @@ def test_mlflow_manual_verify_gemini_review_and_apply(client, qa_env, admin_head
         row = conn.execute(
             """
             SELECT gate_bucket, verification_status, pseudo_label, constructiveness_label,
-                   training_review_status, label_source, label_confidence
+                   training_review_status, label_source, label_confidence, review_provider, review_model_name
             FROM mlflow_comment_item WHERE id = ?
             """,
             (candidate_id,),
         ).fetchone()
-    assert row == ("accepted", "manual_accepted", 1, None, "manual_gemini", "gemini_assist", "high")
+    assert row == (
+        "accepted", "manual_accepted", 1, None, "manual_gemini", "gemini_assist", "high",
+        "gemini", "gemini-2.5-flash",
+    )
 
     remaining = client.get("/api/mlflow/candidates", headers=admin_headers, params={"scope": "all_batches"})
     preview = client.get("/api/mlflow/training-preview", headers=admin_headers, params={"scope": "all_batches"})

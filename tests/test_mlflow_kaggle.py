@@ -1023,7 +1023,7 @@ def test_gemini_evaluate_persists_a_compact_vietnamese_assessment(
 
     def fake_gemini(prompt: str) -> str:
         calls.append(prompt)
-        return json.dumps(
+        return app_module.GeminiTextResponse(json.dumps(
             {
                 "summary": "Candidate có cải thiện nhỏ; cần xem trade-off recall trước khi quyết định.",
                 "verdict": "review",
@@ -1033,7 +1033,7 @@ def test_gemini_evaluate_persists_a_compact_vietnamese_assessment(
                 "metric_observations": ["So sánh dùng cùng test fingerprint."],
             },
             ensure_ascii=False,
-        )
+        ), model="gemini-evaluate-fallback-test")
 
     monkeypatch.setattr(app_module, "call_gemini_with_model", fake_gemini)
 
@@ -1047,6 +1047,7 @@ def test_gemini_evaluate_persists_a_compact_vietnamese_assessment(
     payload = response.json()
     assert payload["status"] == "evaluated"
     assert payload["evaluation"]["verdict"] == "review"
+    assert payload["model"] == "gemini-evaluate-fallback-test"
     assert "Candidate" in payload["evaluation"]["summary"]
     assert len(calls) == 1
     assert "Không tự promote model" in calls[0]
@@ -1063,6 +1064,41 @@ def test_gemini_evaluate_persists_a_compact_vietnamese_assessment(
     status = client.get("/api/mlflow/kaggle/status", headers=admin_headers, params={"run_id": run_id})
     assert status.status_code == 200
     assert status.json()["gemini_evaluation"]["evaluation"]["verdict"] == "review"
+    assert status.json()["gemini_evaluation"]["model"] == "gemini-evaluate-fallback-test"
+
+
+def test_gemini_evaluate_retries_invalid_json_and_accepts_fenced_object(client, qa_env, admin_headers, monkeypatch):
+    app_module = qa_env["app_module"]
+    run_id, _ = _prepare_family_production_flow(qa_env, model_family="tfidf_lr")
+    calls = 0
+
+    def fake_gemini(_prompt: str) -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return "Tôi chưa thể trả kết quả theo định dạng yêu cầu."
+        return (
+            "```json\n"
+            + json.dumps(
+                {
+                    "summary": "Candidate có đủ bằng chứng để admin xem xét.",
+                    "verdict": "review",
+                    "recommendation": "Kiểm tra gate trước khi promote.",
+                    "strengths": ["Có artifact."],
+                    "risks": [],
+                    "metric_observations": ["So sánh cùng test set."],
+                },
+                ensure_ascii=False,
+            )
+            + "\n```"
+        )
+
+    monkeypatch.setattr(app_module, "call_gemini_with_model", fake_gemini)
+    response = client.post("/api/mlflow/kaggle/evaluate", headers=admin_headers, json={"run_id": run_id})
+
+    assert response.status_code == 200
+    assert response.json()["evaluation"]["verdict"] == "review"
+    assert calls == 2
 
 
 def test_system_settings_expose_vietnamese_help_and_ai_instructions(client, admin_headers):

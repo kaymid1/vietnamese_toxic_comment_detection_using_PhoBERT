@@ -593,6 +593,7 @@ def infer_crawled(
     # ── Load model assets (skip in debug force-prob mode) ────────────────
     tokenizer = None
     model = None
+    constructiveness_model = None
     vectorizer = None
     tokenizer_source = None
     if debug_force_prob is None:
@@ -627,6 +628,18 @@ def infer_crawled(
             model = joblib.load(resolved_model_path / "model_lr.pkl")
             if not hasattr(model, "predict_proba"):
                 raise ValueError("TF-IDF+LR model must support predict_proba")
+            for filename in ("model_constructiveness_lr.joblib", "model_lr_constructiveness.pkl"):
+                candidate_path = resolved_model_path / filename
+                if not candidate_path.is_file():
+                    continue
+                constructiveness_model = joblib.load(candidate_path)
+                if not hasattr(constructiveness_model, "predict_proba"):
+                    raise ValueError(
+                        f"TF-IDF constructiveness model must support predict_proba: {candidate_path}"
+                    )
+                if not quiet:
+                    print("[INFO] Loading TF-IDF constructiveness LR model from:", str(candidate_path))
+                break
         else:
             raise ValueError(f"Unsupported model type: {model_type}")
     else:
@@ -725,7 +738,21 @@ def infer_crawled(
                     score_rows = predict_scores(batch_texts, tokenizer, model, device=device, max_length=max_length)
                 else:
                     X = vectorizer.transform(batch_texts)
-                    score_rows = [{"toxic_prob": float(prob)} for prob in model.predict_proba(X)[:, 1].tolist()]
+                    toxicity_probs = model.predict_proba(X)[:, 1].tolist()
+                    if constructiveness_model is None:
+                        score_rows = [{"toxic_prob": float(prob)} for prob in toxicity_probs]
+                    else:
+                        constructiveness_probs = constructiveness_model.predict_proba(X)[:, 1].tolist()
+                        score_rows = [
+                            {
+                                "toxic_prob": float(toxicity_prob),
+                                "constructiveness_prob": float(constructiveness_prob),
+                            }
+                            for toxicity_prob, constructiveness_prob in zip(
+                                toxicity_probs,
+                                constructiveness_probs,
+                            )
+                        ]
             else:
                 score_rows = [{"toxic_prob": float(debug_force_prob)} for _ in batch_texts]
             for local_idx, (text, score_row) in enumerate(zip(batch_texts, score_rows)):

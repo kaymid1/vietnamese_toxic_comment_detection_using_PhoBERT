@@ -90,6 +90,8 @@ interface SyntheticGeminiSuggestion {
   confidence: "low" | "medium" | "high";
   reason: string;
   action: "apply" | "review_more";
+  provider: "gemini";
+  model: string;
 }
 
 const RAW_API_BASE = import.meta.env.VITE_API_BASE_URL?.trim() ?? "";
@@ -397,6 +399,8 @@ export function SyntheticGenerationPage({ onBack, adminToken, onAdminUnauthorize
         constructiveness: suggestion.constructiveness_label,
         review_method: "gemini_assisted" as const,
         label_confidence: suggestion.confidence,
+        review_provider: suggestion.provider,
+        review_model_name: suggestion.model,
       }];
     });
     if (!updates.length) return;
@@ -819,7 +823,7 @@ export function SyntheticGenerationPage({ onBack, adminToken, onAdminUnauthorize
                         {suggestion && (
                           <>
                             <Badge variant="outline">
-                              Gemini: {suggestion.toxicity_label === 1 ? "Toxic" : "Clean"} · {suggestion.confidence}
+                              Gemini ({suggestion.model}): {suggestion.toxicity_label === 1 ? "Toxic" : "Clean"} · {suggestion.confidence}
                             </Badge>
                             {suggestion.reason && (
                               <span className="max-w-[220px] text-xs text-muted-foreground">{suggestion.reason}</span>
@@ -845,7 +849,7 @@ export function SyntheticGenerationPage({ onBack, adminToken, onAdminUnauthorize
                       </select>
                       {suggestion && (
                         <Badge variant="outline" className="mt-2">
-                          Gemini: {suggestion.constructiveness_label == null
+                          Gemini ({suggestion.model}): {suggestion.constructiveness_label == null
                             ? "Masked"
                             : suggestion.constructiveness_label === 1
                               ? "Constructive"

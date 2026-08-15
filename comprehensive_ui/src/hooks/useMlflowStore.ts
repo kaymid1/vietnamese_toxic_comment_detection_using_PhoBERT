@@ -163,6 +163,8 @@ export interface MlflowCandidate {
   is_locked?: number | null;
   label_source?: string | null;
   label_confidence?: string | null;
+  review_provider?: string | null;
+  review_model_name?: string | null;
   source_type?: "crawl" | "synthetic" | string | null;
   source_row_id?: number | null;
   gate_bucket: string;
@@ -231,12 +233,15 @@ export interface MlflowGeminiReviewSuggestion {
   confidence: "low" | "medium" | "high";
   reason: string;
   action: "apply" | "review_more";
+  provider: "gemini";
+  model: string;
 }
 
 export interface MlflowGeminiReviewResponse {
   status: string;
   provider: "gemini";
   model?: string | null;
+  models?: string[];
   suggestions: MlflowGeminiReviewSuggestion[];
   requested: number;
   reviewed: number;
@@ -709,6 +714,8 @@ export function useMlflowStore(options: UseMlflowStoreOptions = {}) {
         label_source?: string;
         label_confidence?: string;
         reviewed_by_gemini?: boolean;
+        review_provider?: string;
+        review_model_name?: string;
       }>,
     ) => {
       return run(async () => {
@@ -1195,6 +1202,8 @@ export function useMlflowStore(options: UseMlflowStoreOptions = {}) {
         label_source?: string;
         label_confidence?: string;
         reviewed_by_gemini?: boolean;
+        review_provider?: string;
+        review_model_name?: string;
       }>,
     ) => {
       return run(async () => {

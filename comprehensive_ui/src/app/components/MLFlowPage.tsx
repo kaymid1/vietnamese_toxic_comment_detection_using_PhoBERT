@@ -567,6 +567,8 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
     label_source: "gemini_assist",
     label_confidence: suggestion.confidence,
     reviewed_by_gemini: true,
+    review_provider: suggestion.provider,
+    review_model_name: suggestion.model,
   });
 
   const handleApplyCandidateGeminiSuggestions = async (suggestions: MlflowGeminiReviewSuggestion[]) => {
@@ -674,6 +676,8 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
     label_source: "gemini_assist",
     label_confidence: suggestion.confidence,
     reviewed_by_gemini: true,
+    review_provider: suggestion.provider,
+    review_model_name: suggestion.model,
   });
 
   const clearAppliedGeminiSuggestions = (suggestions: MlflowGeminiReviewSuggestion[]) => {
@@ -1707,7 +1711,7 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
                       {suggestion && (
                         <div className="mt-2 rounded-md border border-primary/25 bg-primary/5 p-2 text-xs">
                           <div className="flex flex-wrap items-center gap-1.5">
-                            <Badge variant="outline">Gemini</Badge>
+                            <Badge variant="outline">Gemini · {suggestion.model}</Badge>
                             <MlflowBadge presentation={getToxicityPresentation(suggestion.toxicity_label)} prefix="Đề xuất" />
                             <MlflowBadge presentation={getConstructivenessPresentation(suggestion.constructiveness_label)} />
                             <Badge variant="outline">{formatMlflowConfidence(suggestion.confidence)}</Badge>
@@ -1736,6 +1740,7 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
                           <Badge variant="outline">constructiveness_score={item.constructiveness_score?.toFixed(3) ?? "NULL"}</Badge>
                           <Badge variant="outline">is_locked={item.is_locked ? 1 : 0}</Badge>
                           <Badge variant="outline">training_review_status={item.training_review_status ?? "NULL"}</Badge>
+                          {item.review_model_name && <Badge variant="outline">review_model={item.review_model_name}</Badge>}
                           <Badge variant="outline">source_type={item.source_type ?? "crawl"}</Badge>
                           {item.source_row_id != null && <Badge variant="outline">source_row_id={item.source_row_id}</Badge>}
                         </div>
@@ -1854,7 +1859,7 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
                       {suggestion && (
                         <div className="mt-2 space-y-2 rounded-md border border-primary/25 bg-primary/5 p-2 text-xs">
                           <div className="flex flex-wrap items-center gap-1.5">
-                            <Badge variant="outline">Gemini</Badge>
+                            <Badge variant="outline">Gemini · {suggestion.model}</Badge>
                             <MlflowBadge presentation={getToxicityPresentation(suggestion.toxicity_label)} />
                             <MlflowBadge presentation={getConstructivenessPresentation(suggestion.constructiveness_label)} />
                             <Badge variant="outline">{formatMlflowConfidence(suggestion.confidence)}</Badge>

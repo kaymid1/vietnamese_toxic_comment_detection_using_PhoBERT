@@ -75,6 +75,8 @@ ANALYZE_COLLECT_FOR_MLFLOW_DEFAULT = os.getenv("ANALYZE_COLLECT_FOR_MLFLOW_DEFAU
 KAGGLE_WEBHOOK_TIMEOUT_SEC = max(10, int(os.getenv("KAGGLE_WEBHOOK_TIMEOUT_SEC", "180")))
 AUTOMATION_WATCHER_LOCK = threading.Lock()
 AUTOMATION_WATCH_RUN_IDS: set[str] = set()
+GEMINI_REQUEST_SLOT_LOCK = threading.Lock()
+GEMINI_NEXT_REQUEST_AT = 0.0
 
 DO_API_BASE = "https://api.digitalocean.com/v2"
 DO_DEFAULT_REGION = "sgp1"
@@ -132,6 +134,7 @@ PHOBERT_V1_BASELINE_NAME = "baseline"
 PHOBERT_V1_BASELINE_ID = f"phobert/{PHOBERT_V1_BASELINE_NAME}"
 MODEL_DISPLAY_NAMES = {
     "tfidf_lr/baseline_tfidf": "TF-IDF + Logistic Regression",
+    "tfidf_lr/baseline_tfidf_sol": "TF-IDF + Logistic Regression (Gold + Constructiveness)",
     PHOBERT_V1_BASELINE_ID: "PhoBERT v1 Baseline",
     PHOBERT_V2_FINETUNED_ID: "PhoBERT v2 Fine-tuned",
     PHOBERT_V2_FINETUNED_LEGACY_ID: "PhoBERT v2 Fine-tuned",
@@ -688,6 +691,8 @@ class SyntheticReviewItem(BaseModel):
     constructiveness: Optional[int] = Field(default=None, ge=0, le=1)
     review_method: Literal["manual", "gemini_assisted"] = "manual"
     label_confidence: Optional[Literal["low", "medium", "high"]] = None
+    review_provider: Optional[str] = Field(default=None, max_length=32)
+    review_model_name: Optional[str] = Field(default=None, max_length=160)
 
 
 class SyntheticReviewRequest(BaseModel):
@@ -826,6 +831,8 @@ class MlflowCandidateReviewItem(BaseModel):
     label_source: Optional[str] = Field(default=None, max_length=64)
     label_confidence: Optional[str] = Field(default=None, max_length=32)
     reviewed_by_gemini: bool = False
+    review_provider: Optional[str] = Field(default=None, max_length=32)
+    review_model_name: Optional[str] = Field(default=None, max_length=160)
 
 
 class MlflowCandidateReviewRequest(BaseModel):
@@ -859,6 +866,8 @@ class MlflowTrainingPreviewReviewItem(BaseModel):
     label_source: Optional[str] = Field(default=None, max_length=64)
     label_confidence: Optional[str] = Field(default=None, max_length=32)
     reviewed_by_gemini: bool = False
+    review_provider: Optional[str] = Field(default=None, max_length=32)
+    review_model_name: Optional[str] = Field(default=None, max_length=160)
 
 
 class MlflowTrainingPreviewReviewRequest(BaseModel):
@@ -1458,6 +1467,28 @@ def normalize_gemini_model_name(value: Optional[str]) -> Optional[str]:
     return cleaned or None
 
 
+class GeminiTextResponse(str):
+    def __new__(
+        cls,
+        value: str,
+        *,
+        model: str,
+        usage_metadata: Optional[Dict[str, Any]] = None,
+    ) -> "GeminiTextResponse":
+        instance = str.__new__(cls, value)
+        instance.provider = "gemini"
+        instance.model = model
+        instance.usage_metadata = usage_metadata or {}
+        return instance
+
+
+class GeminiRequestFailure(Exception):
+    def __init__(self, status_code: Optional[int], detail: str):
+        super().__init__(detail)
+        self.status_code = status_code
+        self.detail = detail
+
+
 def get_gemini_model_candidates() -> List[str]:
     primary = normalize_gemini_model_name(get_setting("GEMINI_MODEL", "gemini-1.5-flash-latest"))
     fallback_raw = get_setting("GEMINI_FALLBACK_MODELS", "") or ""
@@ -1483,6 +1514,70 @@ def is_gemini_rate_limited(status_code: int, detail: str) -> bool:
     ):
         return True
     return False
+
+
+def is_gemini_daily_quota_exhausted(detail: str) -> bool:
+    lowered = detail.lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "per_day",
+            "perday",
+            "per day",
+            "requests per day",
+            "daily quota",
+            "rpd",
+        )
+    )
+
+
+def wait_for_gemini_request_slot() -> None:
+    global GEMINI_NEXT_REQUEST_AT
+    interval = get_int_setting("GEMINI_MIN_REQUEST_INTERVAL_SECONDS", 13, min_value=0)
+    if interval <= 0:
+        return
+    with GEMINI_REQUEST_SLOT_LOCK:
+        now = time.monotonic()
+        wait_seconds = max(0.0, GEMINI_NEXT_REQUEST_AT - now)
+        if wait_seconds > 0:
+            logger.info("Waiting %.1fs for the Gemini request rate window", wait_seconds)
+            time.sleep(wait_seconds)
+        GEMINI_NEXT_REQUEST_AT = time.monotonic() + float(interval)
+
+
+def request_gemini_raw(req: urllib.request.Request, *, model: str, timeout: int) -> str:
+    attempts = min(4, get_int_setting("GEMINI_RETRY_ATTEMPTS", 2, min_value=1))
+    last_failure: Optional[GeminiRequestFailure] = None
+    for attempt in range(1, attempts + 1):
+        wait_for_gemini_request_slot()
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.read().decode("utf-8")
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8") if exc.fp else str(exc)
+            last_failure = GeminiRequestFailure(exc.code, detail)
+            retryable = is_gemini_rate_limited(exc.code, detail) and not is_gemini_daily_quota_exhausted(detail)
+            if retryable and attempt < attempts:
+                logger.warning(
+                    "Gemini transient error on %s; waiting for the next request slot (%s/%s)",
+                    model,
+                    attempt + 1,
+                    attempts,
+                )
+                continue
+            break
+        except urllib.error.URLError as exc:
+            last_failure = GeminiRequestFailure(None, str(exc))
+            if attempt < attempts:
+                logger.warning(
+                    "Gemini network error on %s; waiting for the next request slot (%s/%s)",
+                    model,
+                    attempt + 1,
+                    attempts,
+                )
+                continue
+            break
+    raise last_failure or GeminiRequestFailure(None, "Unknown Gemini request error")
 
 
 def call_gemini(prompt: str) -> str:
@@ -1521,20 +1616,19 @@ def call_gemini(prompt: str) -> str:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                raw = resp.read().decode("utf-8")
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8") if exc.fp else str(exc)
-            last_error = detail
-            if exc.code == 404 and idx < len(candidates) - 1:
+            raw = request_gemini_raw(req, model=model, timeout=30)
+        except GeminiRequestFailure as exc:
+            last_error = exc.detail
+            if exc.status_code == 404 and idx < len(candidates) - 1:
                 logger.warning("Gemini model not found: %s", model)
                 continue
-            if is_gemini_rate_limited(exc.code, detail) and idx < len(candidates) - 1:
+            if exc.status_code is not None and is_gemini_rate_limited(exc.status_code, exc.detail) and idx < len(candidates) - 1:
                 logger.warning("Gemini rate limited on %s, trying fallback", model)
                 continue
-            raise HTTPException(status_code=502, detail=f"Gemini API error: {detail}") from exc
-        except urllib.error.URLError as exc:
-            raise HTTPException(status_code=502, detail=f"Gemini API error: {exc}") from exc
+            if exc.status_code is None and idx < len(candidates) - 1:
+                logger.warning("Gemini network error on %s, trying fallback", model)
+                continue
+            raise HTTPException(status_code=502, detail=f"Gemini API error: {exc.detail}") from exc
 
         try:
             parsed = json.loads(raw)
@@ -1544,7 +1638,8 @@ def call_gemini(prompt: str) -> str:
             parts = model_candidates[0].get("content", {}).get("parts", [])
             if not parts:
                 raise ValueError("No content parts returned")
-            return "\n".join([p.get("text", "") for p in parts if p.get("text")])
+            text = "\n".join([p.get("text", "") for p in parts if p.get("text")])
+            return GeminiTextResponse(text, model=model, usage_metadata=parsed.get("usageMetadata"))
         except Exception as exc:
             last_error = str(exc)
             raise HTTPException(status_code=502, detail=f"Gemini response parse error: {exc}") from exc
@@ -1579,6 +1674,9 @@ def list_gemini_models() -> Dict[str, Any]:
         "model": get_setting("GEMINI_MODEL", "gemini-1.5-flash-latest"),
         "fallback_models": get_gemini_model_candidates()[1:],
         "max_tokens": get_int_setting("GEMINI_MAX_TOKENS", 1024, min_value=1),
+        "min_request_interval_seconds": get_int_setting("GEMINI_MIN_REQUEST_INTERVAL_SECONDS", 13, min_value=0),
+        "retry_attempts": min(4, get_int_setting("GEMINI_RETRY_ATTEMPTS", 2, min_value=1)),
+        "review_max_items": min(25, get_int_setting("GEMINI_REVIEW_MAX_ITEMS", 9, min_value=1)),
         "models": parsed.get("models", []),
     }
 
@@ -1974,6 +2072,29 @@ GEMINI_REVIEW_BATCH_SIZE = 3
 GEMINI_REVIEW_JSON_ATTEMPTS = 2
 
 
+def validate_gemini_review_item_limit(ids: List[int]) -> None:
+    configured = get_int_setting("GEMINI_REVIEW_MAX_ITEMS", 9, min_value=1)
+    maximum = min(25, configured)
+    if len(ids) > maximum:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Gemini Review accepts at most {maximum} comments per operation to protect the API rate window",
+        )
+
+
+def build_gemini_review_response(suggestions: List[Dict[str, Any]], requested: int) -> Dict[str, Any]:
+    models = sorted({str(item.get("model") or "").strip() for item in suggestions if item.get("model")})
+    return {
+        "status": "ok",
+        "provider": "gemini",
+        "model": models[0] if len(models) == 1 else None,
+        "models": models,
+        "suggestions": suggestions,
+        "requested": requested,
+        "reviewed": len(suggestions),
+    }
+
+
 def request_mlflow_gemini_review_chunk(rows: List[sqlite3.Row]) -> List[Dict[str, Any]]:
     expected_ids = {int(row["id"]) for row in rows}
     suggestions: Optional[List[Dict[str, Any]]] = None
@@ -1981,6 +2102,10 @@ def request_mlflow_gemini_review_chunk(rows: List[sqlite3.Row]) -> List[Dict[str
         raw = call_gemini(build_mlflow_gemini_review_prompt(rows))
         try:
             suggestions = normalize_gemini_review_suggestions(raw, expected_ids)
+            actual_model = getattr(raw, "model", None) or get_setting("GEMINI_MODEL", "gemini-1.5-flash-latest")
+            for suggestion in suggestions:
+                suggestion["provider"] = getattr(raw, "provider", "gemini")
+                suggestion["model"] = actual_model
             break
         except HTTPException:
             if attempt < GEMINI_REVIEW_JSON_ATTEMPTS:
@@ -2095,21 +2220,16 @@ def call_gemini_with_model(prompt: str, model_name: Optional[str] = None) -> str
         )
 
         try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                raw = resp.read().decode("utf-8")
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8") if exc.fp else str(exc)
-            last_error = detail
-            if (exc.code == 404 or is_gemini_rate_limited(exc.code, detail)) and idx < len(candidates) - 1:
+            raw = request_gemini_raw(req, model=model, timeout=30)
+        except GeminiRequestFailure as exc:
+            last_error = exc.detail
+            can_fallback = exc.status_code is None or exc.status_code == 404 or (
+                exc.status_code is not None and is_gemini_rate_limited(exc.status_code, exc.detail)
+            )
+            if can_fallback and idx < len(candidates) - 1:
                 logger.warning("Gemini failed on %s, trying fallback", model)
                 continue
-            raise HTTPException(status_code=502, detail=f"Gemini API error: {detail}") from exc
-        except urllib.error.URLError as exc:
-            last_error = str(exc)
-            if idx < len(candidates) - 1:
-                logger.warning("Gemini network error on %s, trying fallback", model)
-                continue
-            raise HTTPException(status_code=502, detail=f"Gemini API error: {exc}") from exc
+            raise HTTPException(status_code=502, detail=f"Gemini API error: {exc.detail}") from exc
 
         try:
             parsed = json.loads(raw)
@@ -2121,7 +2241,7 @@ def call_gemini_with_model(prompt: str, model_name: Optional[str] = None) -> str
                 raise ValueError("No content parts returned")
             text = "\n".join([p.get("text", "") for p in parts if p.get("text")])
             if text.strip():
-                return text
+                return GeminiTextResponse(text, model=model, usage_metadata=parsed.get("usageMetadata"))
             raise ValueError("Empty text returned")
         except Exception as exc:
             last_error = str(exc)
@@ -2322,7 +2442,9 @@ def init_feedback_db() -> None:
                 reviewed_at TEXT,
                 review_method TEXT NOT NULL DEFAULT 'manual',
                 label_confidence TEXT,
-                reviewed_by TEXT
+                reviewed_by TEXT,
+                review_provider TEXT,
+                review_model_name TEXT
             )
             """
         )
@@ -2371,6 +2493,8 @@ def init_feedback_db() -> None:
                 seg_threshold_used REAL,
                 label_source TEXT,
                 label_confidence TEXT,
+                review_provider TEXT,
+                review_model_name TEXT,
                 source_type TEXT NOT NULL DEFAULT 'crawl',
                 source_row_id INTEGER,
                 created_at TEXT NOT NULL,
@@ -2638,8 +2762,12 @@ def init_feedback_db() -> None:
         ensure_table_column(conn, "synthetic_dataset_row", "review_method", "TEXT NOT NULL DEFAULT 'manual'")
         ensure_table_column(conn, "synthetic_dataset_row", "label_confidence", "TEXT")
         ensure_table_column(conn, "synthetic_dataset_row", "reviewed_by", "TEXT")
+        ensure_table_column(conn, "synthetic_dataset_row", "review_provider", "TEXT")
+        ensure_table_column(conn, "synthetic_dataset_row", "review_model_name", "TEXT")
         ensure_table_column(conn, "mlflow_comment_item", "label_source", "TEXT")
         ensure_table_column(conn, "mlflow_comment_item", "label_confidence", "TEXT")
+        ensure_table_column(conn, "mlflow_comment_item", "review_provider", "TEXT")
+        ensure_table_column(conn, "mlflow_comment_item", "review_model_name", "TEXT")
         ensure_table_column(conn, "mlflow_comment_item", "domain_category", "TEXT")
         ensure_table_column(conn, "mlflow_comment_item", "constructiveness_score", "REAL")
         ensure_table_column(conn, "mlflow_comment_item", "constructiveness_label", "INTEGER")
@@ -3685,7 +3813,7 @@ def load_synthetic_rows(
     query = f"""
         SELECT id, batch_id, text, label, constructiveness, domain, style, is_accepted,
                validation_flags, meta_json, created_at, reviewed_at,
-               review_method, label_confidence, reviewed_by
+               review_method, label_confidence, reviewed_by, review_provider, review_model_name
         FROM synthetic_dataset_row
         {where_sql}
         ORDER BY id DESC
@@ -3711,6 +3839,8 @@ def load_synthetic_rows(
         review_method,
         label_confidence,
         reviewed_by,
+        review_provider,
+        review_model_name,
     ) in results:
         meta: Dict[str, Any] = {}
         if isinstance(meta_json, str) and meta_json.strip():
@@ -3759,6 +3889,8 @@ def load_synthetic_rows(
                 "review_method": review_method,
                 "label_confidence": label_confidence,
                 "reviewed_by": reviewed_by,
+                "review_provider": review_provider,
+                "review_model_name": review_model_name,
             }
         )
 
@@ -3814,6 +3946,13 @@ def update_synthetic_review(items: List[Dict[str, Any]], reviewed_by: str) -> in
         label_confidence = str(item.get("label_confidence") or "").strip().lower() or None
         if label_confidence not in {None, "low", "medium", "high"}:
             label_confidence = None
+        review_provider = str(item.get("review_provider") or "").strip().lower() or None
+        review_model_name = normalize_gemini_model_name(item.get("review_model_name"))
+        if review_method != "gemini_assisted":
+            review_provider = None
+            review_model_name = None
+        elif review_provider != "gemini" or not review_model_name:
+            raise HTTPException(status_code=400, detail=f"Gemini review provenance is required for synthetic row {sample_id}")
         normalized.append(
             (
                 1 if bool(item.get("is_accepted")) else 0,
@@ -3824,6 +3963,8 @@ def update_synthetic_review(items: List[Dict[str, Any]], reviewed_by: str) -> in
                 text_hash,
                 review_method,
                 label_confidence,
+                review_provider,
+                review_model_name,
                 sample_id,
             )
         )
@@ -3842,6 +3983,8 @@ def update_synthetic_review(items: List[Dict[str, Any]], reviewed_by: str) -> in
             text_hash,
             review_method,
             label_confidence,
+            review_provider,
+            review_model_name,
             sample_id,
         ) in normalized:
             existing = conn.execute(
@@ -3875,6 +4018,8 @@ def update_synthetic_review(items: List[Dict[str, Any]], reviewed_by: str) -> in
             meta["constructiveness"] = final_constructiveness if normalize_int(final_constructiveness) in {0, 1} else None
             meta["review_method"] = review_method
             meta["reviewed_by"] = reviewed_by
+            meta["review_provider"] = review_provider
+            meta["review_model_name"] = review_model_name
 
             conn.execute(
                 """
@@ -3888,7 +4033,9 @@ def update_synthetic_review(items: List[Dict[str, Any]], reviewed_by: str) -> in
                     reviewed_at = ?,
                     review_method = ?,
                     label_confidence = ?,
-                    reviewed_by = ?
+                    reviewed_by = ?,
+                    review_provider = ?,
+                    review_model_name = ?
                 WHERE id = ?
                 """,
                 (
@@ -3902,6 +4049,8 @@ def update_synthetic_review(items: List[Dict[str, Any]], reviewed_by: str) -> in
                     review_method,
                     label_confidence,
                     reviewed_by,
+                    review_provider,
+                    review_model_name,
                     sample_id,
                 ),
             )
@@ -3969,7 +4118,8 @@ def transfer_synthetic_rows_to_training_preview(ids: List[int], admin_username: 
             f"""
             SELECT s.id, s.batch_id, s.text, s.label, s.constructiveness, s.domain,
                    s.style, s.created_at, s.reviewed_at, s.review_method,
-                   s.label_confidence, s.reviewed_by, b.generator_model
+                   s.label_confidence, s.reviewed_by, s.review_provider,
+                   s.review_model_name, b.generator_model
             FROM synthetic_dataset_row AS s
             JOIN synthetic_generation_batch AS b ON b.batch_id = s.batch_id
             WHERE s.id IN ({placeholders})
@@ -4030,11 +4180,11 @@ def transfer_synthetic_rows_to_training_preview(ids: List[int], admin_username: 
                     constructiveness_confidence, selected_for_training, training_review_status,
                     gate_bucket, verification_status, segment_hash, context_segment_hash,
                     dedupe_key, html_tag, seg_threshold_used, label_source, label_confidence,
-                    source_type, source_row_id, created_at, reviewed_at
+                    review_provider, review_model_name, source_type, source_row_id, created_at, reviewed_at
                 ) VALUES (
                     ?, NULL, ?, ?, ?, ?, ?, NULL, ?, NULL, ?, ?, 1, ?,
                     'accepted', 'manual_accepted', ?, ?, ?, 'synthetic', NULL,
-                    ?, ?, 'synthetic', ?, ?, ?
+                    ?, ?, ?, ?, 'synthetic', ?, ?, ?
                 )
                 """,
                 (
@@ -4055,6 +4205,8 @@ def transfer_synthetic_rows_to_training_preview(ids: List[int], admin_username: 
                     f"synthetic:{source_row_id}",
                     label_source,
                     label_confidence,
+                    row["review_provider"] if gemini_assisted else None,
+                    row["review_model_name"] if gemini_assisted else None,
                     source_row_id,
                     str(row["created_at"] or now),
                     now,
@@ -4645,7 +4797,8 @@ def select_mlflow_training_rows(
         f"""
         SELECT id, batch_id, text, pseudo_label, constructiveness_score, constructiveness_label,
                constructiveness_confidence, training_review_status, score, url, url_hash,
-               segment_hash, context_segment_hash, html_tag, source_type, source_row_id
+               segment_hash, context_segment_hash, html_tag, review_provider, review_model_name,
+               source_type, source_row_id
         FROM mlflow_comment_item
         WHERE {accepted_where}
         ORDER BY id ASC
@@ -4703,6 +4856,8 @@ def build_training_merge_plan(
             "segment_hash": row["segment_hash"],
             "constructiveness_score": row["constructiveness_score"],
             "constructiveness_confidence": row["constructiveness_confidence"],
+            "review_provider": row["review_provider"],
+            "review_model_name": row["review_model_name"],
         }
         if source_type == "synthetic":
             source_meta["synthetic_row_id"] = normalize_int(row["source_row_id"])
@@ -5968,7 +6123,7 @@ def mlflow_review_history(
                    pseudo_label, constructiveness_score, constructiveness_label, constructiveness_confidence,
                    selected_for_training, training_review_status, is_locked, gate_bucket, verification_status,
                    segment_hash, context_segment_hash, html_tag,
-                   seg_threshold_used, label_source, label_confidence, created_at, reviewed_at
+                   seg_threshold_used, label_source, label_confidence, review_provider, review_model_name, created_at, reviewed_at
             FROM mlflow_comment_item
             WHERE {where_sql}
             ORDER BY COALESCE(reviewed_at, created_at) DESC, id DESC
@@ -6030,7 +6185,7 @@ def mlflow_candidates(
                    pseudo_label, constructiveness_score, constructiveness_label, constructiveness_confidence,
                    selected_for_training, training_review_status, is_locked, gate_bucket, verification_status,
                    segment_hash, context_segment_hash, html_tag,
-                   seg_threshold_used, label_source, label_confidence, created_at, reviewed_at
+                   seg_threshold_used, label_source, label_confidence, review_provider, review_model_name, created_at, reviewed_at
             FROM mlflow_comment_item
             WHERE {where_sql}
             ORDER BY id DESC
@@ -6054,6 +6209,7 @@ def mlflow_candidates(
 def mlflow_candidates_gemini_review(request: MlflowTrainingPreviewGeminiReviewRequest) -> Dict[str, Any]:
     init_feedback_db()
     ids = list(dict.fromkeys(request.ids))
+    validate_gemini_review_item_limit(ids)
     placeholders = ", ".join(["?"] * len(ids))
     with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
@@ -6076,15 +6232,7 @@ def mlflow_candidates_gemini_review(request: MlflowTrainingPreviewGeminiReviewRe
     failed_ids = sorted({int(row["id"]) for row in rows} - {int(item["id"]) for item in suggestions})
     if not suggestions:
         raise HTTPException(status_code=502, detail="Gemini could not produce valid review suggestions after retrying")
-    return {
-        "status": "ok",
-        "provider": "gemini",
-        "model": get_setting("GEMINI_MODEL", "gemini-1.5-flash-latest"),
-        "suggestions": suggestions,
-        "requested": len(ids),
-        "reviewed": len(suggestions),
-        "failed_ids": failed_ids,
-    }
+    return {**build_gemini_review_response(suggestions, len(ids)), "failed_ids": failed_ids}
 
 
 @app.post("/api/mlflow/candidates/review", dependencies=[Depends(require_admin)])
@@ -6106,6 +6254,8 @@ def mlflow_candidates_review(request: MlflowCandidateReviewRequest) -> Dict[str,
     label_source_by_id = {item.id: item.label_source for item in request.updates}
     label_confidence_by_id = {item.id: item.label_confidence for item in request.updates}
     reviewed_by_gemini_by_id = {item.id: item.reviewed_by_gemini for item in request.updates}
+    review_provider_by_id = {item.id: item.review_provider for item in request.updates}
+    review_model_by_id = {item.id: normalize_gemini_model_name(item.review_model_name) for item in request.updates}
 
     with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
@@ -6137,6 +6287,13 @@ def mlflow_candidates_review(request: MlflowCandidateReviewRequest) -> Dict[str,
             review_status = "manual_gemini" if reviewed_by_gemini else "manual_approved"
             label_source = label_source_by_id.get(item_id) or ("gemini_assist" if reviewed_by_gemini else "manual_override")
             label_confidence = label_confidence_by_id.get(item_id) or "high"
+            review_provider = str(review_provider_by_id.get(item_id) or "").strip().lower() or None
+            review_model_name = review_model_by_id.get(item_id)
+            if reviewed_by_gemini and (review_provider != "gemini" or not review_model_name):
+                raise HTTPException(status_code=400, detail=f"Gemini review provenance is required for item {item_id}")
+            if not reviewed_by_gemini:
+                review_provider = None
+                review_model_name = None
             effective_locked = bool(int(row["is_locked"] or 0))
 
             requested_lock_state = lock_state_by_id.get(item_id)
@@ -6177,20 +6334,22 @@ def mlflow_candidates_review(request: MlflowCandidateReviewRequest) -> Dict[str,
                     """
                     UPDATE mlflow_comment_item
                     SET verification_status = ?, gate_bucket = ?, pseudo_label = ?, constructiveness_label = ?,
-                        selected_for_training = ?, training_review_status = ?, label_source = ?, label_confidence = ?, reviewed_at = ?
+                        selected_for_training = ?, training_review_status = ?, label_source = ?, label_confidence = ?,
+                        review_provider = ?, review_model_name = ?, reviewed_at = ?
                     WHERE id = ?
                     """,
-                    ("manual_accepted", "accepted", 1, final_constructiveness, 1, review_status, label_source, label_confidence, now, item_id),
+                    ("manual_accepted", "accepted", 1, final_constructiveness, 1, review_status, label_source, label_confidence, review_provider, review_model_name, now, item_id),
                 )
             elif action == "include_clean":
                 cursor = conn.execute(
                     """
                     UPDATE mlflow_comment_item
                     SET verification_status = ?, gate_bucket = ?, pseudo_label = ?, constructiveness_label = ?,
-                        selected_for_training = ?, training_review_status = ?, label_source = ?, label_confidence = ?, reviewed_at = ?
+                        selected_for_training = ?, training_review_status = ?, label_source = ?, label_confidence = ?,
+                        review_provider = ?, review_model_name = ?, reviewed_at = ?
                     WHERE id = ?
                     """,
-                    ("manual_accepted", "accepted", 0, final_constructiveness, 1, review_status, label_source, label_confidence, now, item_id),
+                    ("manual_accepted", "accepted", 0, final_constructiveness, 1, review_status, label_source, label_confidence, review_provider, review_model_name, now, item_id),
                 )
             elif final_label in {0, 1}:
                 cursor = conn.execute(
@@ -6322,7 +6481,8 @@ def mlflow_training_preview(
                    pseudo_label, constructiveness_score, constructiveness_label, constructiveness_confidence,
                    selected_for_training, training_review_status, is_locked, gate_bucket, verification_status,
                    segment_hash, context_segment_hash, html_tag, seg_threshold_used,
-                   label_source, label_confidence, source_type, source_row_id, created_at, reviewed_at
+                   label_source, label_confidence, review_provider, review_model_name,
+                   source_type, source_row_id, created_at, reviewed_at
             FROM mlflow_comment_item
             WHERE {where_sql}
             ORDER BY gate_bucket ASC, selected_for_training DESC, id DESC
@@ -6404,6 +6564,7 @@ def mlflow_training_preview_gemini_review(request: MlflowTrainingPreviewGeminiRe
         if item_id not in seen:
             ids.append(item_id)
             seen.add(item_id)
+    validate_gemini_review_item_limit(ids)
     placeholders = ", ".join(["?"] * len(ids))
 
     with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
@@ -6428,15 +6589,7 @@ def mlflow_training_preview_gemini_review(request: MlflowTrainingPreviewGeminiRe
     failed_ids = sorted({int(row["id"]) for row in rows} - {int(item["id"]) for item in suggestions})
     if not suggestions:
         raise HTTPException(status_code=502, detail="Gemini could not produce valid review suggestions after retrying")
-    return {
-        "status": "ok",
-        "provider": "gemini",
-        "model": get_setting("GEMINI_MODEL", "gemini-1.5-flash-latest"),
-        "suggestions": suggestions,
-        "requested": len(ids),
-        "reviewed": len(suggestions),
-        "failed_ids": failed_ids,
-    }
+    return {**build_gemini_review_response(suggestions, len(ids)), "failed_ids": failed_ids}
 
 
 @app.post("/api/mlflow/training-preview/review", dependencies=[Depends(require_admin)])
@@ -6476,10 +6629,33 @@ def mlflow_training_preview_review(request: MlflowTrainingPreviewReviewRequest) 
                 values.append(1 if item.selected_for_training else 0)
                 next_review_status = "manual_approved" if item.selected_for_training else "manual_removed"
             if item.pseudo_label in {0, 1}:
-                fields.extend(["pseudo_label = ?", "gate_bucket = ?", "verification_status = ?", "label_source = ?", "label_confidence = ?"])
+                fields.extend([
+                    "pseudo_label = ?",
+                    "gate_bucket = ?",
+                    "verification_status = ?",
+                    "label_source = ?",
+                    "label_confidence = ?",
+                    "review_provider = ?",
+                    "review_model_name = ?",
+                ])
                 source = (item.label_source or "manual_override").strip() or "manual_override"
                 confidence = (item.label_confidence or "high").strip() or "high"
-                values.extend([int(item.pseudo_label), "accepted", "manual_accepted", source[:64], confidence[:32]])
+                review_provider = str(item.review_provider or "").strip().lower() or None
+                review_model_name = normalize_gemini_model_name(item.review_model_name)
+                if item.reviewed_by_gemini and (review_provider != "gemini" or not review_model_name):
+                    raise HTTPException(status_code=400, detail=f"Gemini review provenance is required for item {item.id}")
+                if not item.reviewed_by_gemini:
+                    review_provider = None
+                    review_model_name = None
+                values.extend([
+                    int(item.pseudo_label),
+                    "accepted",
+                    "manual_accepted",
+                    source[:64],
+                    confidence[:32],
+                    review_provider,
+                    review_model_name,
+                ])
                 if not item.reviewed_by_gemini:
                     next_review_status = "manual_approved"
             if item.reviewed_by_gemini and item.pseudo_label in {0, 1}:
@@ -8440,6 +8616,17 @@ def _smoke_validate_staged_model(model_family: str, model_dir: Path) -> None:
             prediction = model.predict(features)
             if len(prediction) != 1:
                 raise ValueError("unexpected prediction shape")
+            for filename in ("model_constructiveness_lr.joblib", "model_lr_constructiveness.pkl"):
+                constructiveness_path = model_dir / filename
+                if not constructiveness_path.is_file():
+                    continue
+                constructiveness_model = joblib.load(constructiveness_path)
+                if not hasattr(constructiveness_model, "predict_proba"):
+                    raise ValueError("constructiveness classifier lacks predict_proba")
+                constructiveness_probs = constructiveness_model.predict_proba(features)
+                if len(constructiveness_probs) != 1:
+                    raise ValueError("unexpected constructiveness prediction shape")
+                break
         except Exception as exc:
             raise HTTPException(status_code=400, detail=f"TF-IDF/LR serving smoke check failed: {exc}") from exc
         return
@@ -8504,7 +8691,17 @@ def _install_candidate_artifact(candidate: Dict[str, Any], comparison: Dict[str,
                 if source is None:
                     raise HTTPException(status_code=400, detail=f"Artifact missing {target_name}")
                 shutil.copy2(source, staging_dir / target_name)
-            for optional_name in ("model_constructiveness_lr.joblib", "training_evidence.json", "run_summary.json"):
+            constructiveness_source = next(
+                (
+                    path
+                    for filename in ("model_constructiveness_lr.joblib", "model_lr_constructiveness.pkl")
+                    for path in extract_dir.rglob(filename)
+                ),
+                None,
+            )
+            if constructiveness_source:
+                shutil.copy2(constructiveness_source, staging_dir / "model_constructiveness_lr.joblib")
+            for optional_name in ("training_evidence.json", "run_summary.json"):
                 optional_source = next(iter(extract_dir.rglob(optional_name)), None)
                 if optional_source:
                     shutil.copy2(optional_source, staging_dir / optional_name)
@@ -10013,6 +10210,7 @@ def synthetic_preview(
 def synthetic_gemini_review(request: MlflowTrainingPreviewGeminiReviewRequest) -> Dict[str, Any]:
     init_feedback_db()
     ids = list(dict.fromkeys(request.ids))
+    validate_gemini_review_item_limit(ids)
     placeholders = ", ".join(["?"] * len(ids))
     with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
@@ -10031,14 +10229,7 @@ def synthetic_gemini_review(request: MlflowTrainingPreviewGeminiReviewRequest) -
     if not rows:
         raise HTTPException(status_code=404, detail="No synthetic rows found for provided ids")
     suggestions = run_mlflow_gemini_review(rows)
-    return {
-        "status": "ok",
-        "provider": "gemini",
-        "model": get_setting("GEMINI_MODEL", "gemini-1.5-flash-latest"),
-        "suggestions": suggestions,
-        "requested": len(ids),
-        "reviewed": len(suggestions),
-    }
+    return build_gemini_review_response(suggestions, len(ids))
 
 
 @app.post("/api/dataset/synthetic/review")
@@ -10056,6 +10247,8 @@ def synthetic_review(
             "label": item.label,
             "review_method": item.review_method,
             "label_confidence": item.label_confidence,
+            "review_provider": item.review_provider,
+            "review_model_name": item.review_model_name,
         }
         if "constructiveness" in fields_set:
             payload["constructiveness"] = item.constructiveness

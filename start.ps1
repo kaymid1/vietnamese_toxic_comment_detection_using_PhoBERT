@@ -50,8 +50,13 @@ function Resolve-NpmCommand {
 
 function Get-ProcessRowsByCommandPattern {
   param([string]$Pattern)
-  return Get-CimInstance Win32_Process |
-    Where-Object { $_.CommandLine -and $_.CommandLine -match $Pattern }
+  try {
+    return @(Get-CimInstance Win32_Process |
+      Where-Object { $_.CommandLine -and $_.CommandLine -match $Pattern })
+  } catch {
+    Write-Warning "Unable to inspect process command lines; skipping automatic stale-service cleanup. Run this script elevated to clean services from another Windows session."
+    return @()
+  }
 }
 
 function Stop-ProcessRows {
