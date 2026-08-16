@@ -42,20 +42,29 @@ from backend.system_settings import (
     reveal_system_setting,
     update_system_settings,
 )
+from backend.runtime_paths import (
+    get_data_dir,
+    get_feedback_db_path,
+    get_kaggle_runtime_dir,
+    get_model_options_dir,
+    get_model_registry_dir,
+    get_project_root,
+)
+from backend.artifact_refs import encode_artifact_ref, resolve_artifact_ref
 from infer_crawled_local import infer_crawled, build_segment_hash, build_context_segment_hash
 
-BASE_DIR = Path(__file__).resolve().parents[1]
-DATA_DIR = BASE_DIR / "data" / "raw" / "crawled_urls"
-MODEL_OPTIONS_DIR = Path(
-    os.getenv("VIETTOXIC_MODEL_OPTIONS_DIR", str(BASE_DIR / "models" / "options"))
-).expanduser()
-FEEDBACK_DIR = BASE_DIR / "data" / "processed" / "feedback"
-FEEDBACK_DB_PATH = FEEDBACK_DIR / "feedback.db"
+BASE_DIR = get_project_root()
+APP_DATA_DIR = get_data_dir()
+PROCESSED_DATA_DIR = APP_DATA_DIR / "processed"
+DATA_DIR = APP_DATA_DIR / "raw" / "crawled_urls"
+MODEL_OPTIONS_DIR = get_model_options_dir()
+FEEDBACK_DB_PATH = get_feedback_db_path()
+FEEDBACK_DIR = FEEDBACK_DB_PATH.parent
 EXPERIMENT_REGISTRY_PATH = BASE_DIR / "experiments" / "registry.json"
 EVAL_POLICY_PATH = BASE_DIR / "config" / "eval_policy.json"
-ERROR_ANALYSIS_PATH = BASE_DIR / "data" / "processed" / "error_analysis.json"
-HARD_CASES_PATH = BASE_DIR / "data" / "processed" / "hard_case_candidates.json"
-LOCAL_M1_ARTIFACT_DIR = BASE_DIR / "data" / "processed" / "mlflow_local_artifacts"
+ERROR_ANALYSIS_PATH = PROCESSED_DATA_DIR / "error_analysis.json"
+HARD_CASES_PATH = PROCESSED_DATA_DIR / "hard_case_candidates.json"
+LOCAL_M1_ARTIFACT_DIR = PROCESSED_DATA_DIR / "mlflow_local_artifacts"
 
 DEFAULT_DATASET_VERSION = os.getenv("VIETTOXIC_DATASET_VERSION", "victsd_gold")
 DEFAULT_MODEL_VERSION = os.getenv("VIETTOXIC_MODEL_VERSION", "unknown")
@@ -111,7 +120,7 @@ DATASET_VERSION_ALIASES: Dict[str, str] = {
     "victsd_gold": "victsd_gold",
 }
 DATASET_VERSION_DIRS: Dict[str, Path] = {
-    "victsd_gold": BASE_DIR / "data" / "processed" / "victsd_gold",
+    "victsd_gold": PROCESSED_DATA_DIR / "victsd_gold",
 }
 
 MODEL_TYPES = {
@@ -1836,9 +1845,9 @@ def get_synthetic_length_bounds() -> Tuple[int, int, int]:
 
     lengths: List[int] = []
     source_files = [
-        BASE_DIR / "data" / "processed" / "victsd_gold" / "train.jsonl",
-        BASE_DIR / "data" / "processed" / "victsd_gold" / "validation.jsonl",
-        BASE_DIR / "data" / "processed" / "victsd_gold" / "test.jsonl",
+        PROCESSED_DATA_DIR / "victsd_gold" / "train.jsonl",
+        PROCESSED_DATA_DIR / "victsd_gold" / "validation.jsonl",
+        PROCESSED_DATA_DIR / "victsd_gold" / "test.jsonl",
     ]
 
     for file_path in source_files:
@@ -3563,7 +3572,7 @@ def resolve_dataset_dir(dataset_version: str) -> Path:
             detail={
                 "message": "Dataset directory does not exist",
                 "dataset_version": dataset_version,
-                "path": str(dataset_dir.relative_to(BASE_DIR)),
+                "path": to_relative(str(dataset_dir)),
             },
         )
     return dataset_dir
@@ -4445,7 +4454,7 @@ def validate_synthetic_candidate(
 
 
 def cleanup_old_jobs(ttl_hours: float = 24.0) -> int:
-    processed_dir = BASE_DIR / "data" / "processed"
+    processed_dir = PROCESSED_DATA_DIR
     if not processed_dir.exists():
         return 0
     now = time.time()
@@ -5360,7 +5369,7 @@ def load_victsd_gold_split(split_name: str) -> List[Dict[str, Any]]:
             detail={
                 "message": "Missing victsd_gold split file",
                 "split": split_name,
-                "path": str(path.relative_to(BASE_DIR)),
+                "path": to_relative(str(path)),
             },
         )
 
@@ -6092,7 +6101,7 @@ def mlflow_ingest(request: MlflowIngestRequest) -> Dict[str, Any]:
             raise HTTPException(status_code=500, detail=f"Unable to access model directory: {exc}") from exc
 
         source_job_id = uuid.uuid4().hex
-        out_dir = BASE_DIR / "data" / "processed" / f"job_{source_job_id}"
+        out_dir = PROCESSED_DATA_DIR / f"job_{source_job_id}"
         out_dir.mkdir(parents=True, exist_ok=True)
 
         batch_id = f"mlf_{uuid.uuid4().hex[:12]}"
@@ -7788,7 +7797,7 @@ def mlflow_manual_export_bundle(request: MlflowManualExportBundleRequest) -> Dic
                 ),
             )
 
-    relative_bundle_path = str(out_path.relative_to(BASE_DIR))
+    relative_bundle_path = encode_artifact_ref(out_path)
     download_path = f"/api/mlflow/manual/export-bundle/download?bundle_path={urllib.parse.quote(relative_bundle_path)}"
 
     return {
@@ -7828,8 +7837,11 @@ def mlflow_manual_export_bundle_download(bundle_path: str = Query(..., min_lengt
     if not candidate:
         raise HTTPException(status_code=400, detail="bundle_path is required")
 
-    resolved = (BASE_DIR / candidate).resolve()
-    processed_dir = (BASE_DIR / "data" / "processed").resolve()
+    try:
+        resolved = resolve_artifact_ref(candidate)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid bundle_path") from exc
+    processed_dir = PROCESSED_DATA_DIR.resolve()
 
     try:
         resolved.relative_to(processed_dir)
@@ -7853,7 +7865,7 @@ def mlflow_manual_import_artifact(request: MlflowManualImportArtifactRequest) ->
             """,
             (
                 request.run_name.strip(),
-                request.artifact_path.strip(),
+                encode_artifact_ref(request.artifact_path.strip()),
                 request.notes.strip() if request.notes else None,
                 datetime.utcnow().isoformat() + "Z",
             ),
@@ -7876,8 +7888,8 @@ KAGGLE_STAGES = [
 ]
 
 
-KAGGLE_ARTIFACT_ROOT = (BASE_DIR / ".runtime" / "kaggle_real_jobs").resolve()
-MODEL_REGISTRY_ARTIFACT_ROOT = (BASE_DIR / ".runtime" / "model_registry").resolve()
+KAGGLE_ARTIFACT_ROOT = get_kaggle_runtime_dir().resolve()
+MODEL_REGISTRY_ARTIFACT_ROOT = get_model_registry_dir().resolve()
 
 
 def _kaggle_artifact_download_url(run_id: str, artifact_uri: Optional[str]) -> Optional[str]:
@@ -7895,7 +7907,12 @@ def _resolve_kaggle_artifact_path(artifact_uri: Optional[str]) -> Path:
     if raw.startswith("http://") or raw.startswith("https://"):
         raise HTTPException(status_code=400, detail="Remote artifact downloads are not supported yet")
 
-    if raw.lower().startswith("file://"):
+    if raw.startswith(("data://", "runtime://", "model://")):
+        try:
+            candidate = resolve_artifact_ref(raw)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Invalid portable artifact reference") from exc
+    elif raw.lower().startswith("file://"):
         parsed = urllib.parse.urlparse(raw)
         if parsed.netloc and re.fullmatch(r"[A-Za-z]:", parsed.netloc):
             candidate = Path(urllib.request.url2pathname(f"{parsed.netloc}{parsed.path}"))
@@ -7928,7 +7945,12 @@ def _resolve_registry_artifact_path(artifact_uri: Optional[str]) -> Path:
     raw = str(artifact_uri or "").strip()
     if not raw:
         raise HTTPException(status_code=404, detail="Registry artifact is not available")
-    if raw.lower().startswith("file://"):
+    if raw.startswith(("data://", "runtime://", "model://")):
+        try:
+            candidate = resolve_artifact_ref(raw)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Invalid portable registry artifact reference") from exc
+    elif raw.lower().startswith("file://"):
         parsed = urllib.parse.urlparse(raw)
         candidate = Path(urllib.request.url2pathname(f"{parsed.netloc}{parsed.path}")) if parsed.netloc else Path(urllib.request.url2pathname(parsed.path))
     else:
@@ -8717,7 +8739,7 @@ def mlflow_kaggle_trigger(request: MlflowDOTriggerRequest, http_request: Request
         )
     )
     bundle_path = str(bundle_result["bundle_path"])
-    resolved_bundle_path = (BASE_DIR / bundle_path).resolve()
+    resolved_bundle_path = resolve_artifact_ref(bundle_path)
     bundle_checksum = _sha256_file(resolved_bundle_path)
     bundle_token = uuid.uuid4().hex + uuid.uuid4().hex
     bundle_token_hash = hashlib.sha256(bundle_token.encode("utf-8")).hexdigest()
@@ -9211,7 +9233,7 @@ def _semantic_jsonl_fingerprint_bytes(raw: bytes) -> Tuple[str, int]:
 
 
 def _local_gold_test_fingerprint() -> Tuple[Optional[str], Optional[int]]:
-    test_path = DATASET_VERSION_DIRS.get("victsd_gold", BASE_DIR / "data" / "processed" / "victsd_gold") / "test.jsonl"
+    test_path = DATASET_VERSION_DIRS.get("victsd_gold", PROCESSED_DATA_DIR / "victsd_gold") / "test.jsonl"
     try:
         return _semantic_jsonl_fingerprint_bytes(test_path.read_bytes())
     except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
@@ -9222,12 +9244,9 @@ def _bundle_test_fingerprint(bundle_path: Optional[str]) -> Tuple[Optional[str],
     raw_path = str(bundle_path or "").strip()
     if not raw_path:
         return None, None
-    candidate = Path(raw_path)
-    if not candidate.is_absolute():
-        candidate = BASE_DIR / candidate
     try:
-        resolved = candidate.resolve()
-        resolved.relative_to((BASE_DIR / "data" / "processed").resolve())
+        resolved = resolve_artifact_ref(raw_path)
+        resolved.relative_to(PROCESSED_DATA_DIR.resolve())
         with zipfile.ZipFile(resolved, "r") as zf:
             members = [name for name in zf.namelist() if Path(name).name == "test.jsonl"]
             if not members:
@@ -9364,7 +9383,7 @@ def _register_kaggle_candidate(run_id: str) -> Optional[Dict[str, Any]]:
                 model_family, model_id, run_id, stored_path, actual,
                 candidate.get("bundle_checksum"), candidate.get("test_fingerprint"), metrics_json, lifecycle, now,
                 candidate.get("model_kind"), candidate.get("training_mode"), runtime_meta.get("base_model"),
-                f"file://{stable_artifact.as_posix()}", row["bundle_path"],
+                encode_artifact_ref(stable_artifact), encode_artifact_ref(str(row["bundle_path"] or "")),
             ),
         )
         conn.commit()
@@ -10196,7 +10215,7 @@ def analyze(request: AnalyzeRequest) -> Dict[str, Any]:
             raise HTTPException(status_code=400, detail="mlflow_gate_discard_threshold must be <= mlflow_gate_accept_threshold")
 
         job_id = uuid.uuid4().hex
-        out_dir = BASE_DIR / "data" / "processed" / f"job_{job_id}"
+        out_dir = PROCESSED_DATA_DIR / f"job_{job_id}"
         out_dir.mkdir(parents=True, exist_ok=True)
         analysis_started_at = time.perf_counter()
 
@@ -10692,7 +10711,7 @@ def analyze_compare(request: AnalyzeCompareRequest) -> Dict[str, Any]:
         if len(model_ids) < 2:
             raise HTTPException(status_code=400, detail="Need at least 2 model_names")
         job_id = uuid.uuid4().hex
-        out_dir = BASE_DIR / "data" / "processed" / f"job_{job_id}"
+        out_dir = PROCESSED_DATA_DIR / f"job_{job_id}"
         out_dir.mkdir(parents=True, exist_ok=True)
 
         model_root = resolve_model_root()
@@ -10826,7 +10845,7 @@ def analyze_rerun(request: AnalyzeRerunRequest) -> Dict[str, Any]:
         if not job_id:
             raise HTTPException(status_code=400, detail="Missing job_id")
 
-        source_dir = BASE_DIR / "data" / "processed" / f"job_{job_id}"
+        source_dir = PROCESSED_DATA_DIR / f"job_{job_id}"
         if not source_dir.exists():
             raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
 
@@ -10898,7 +10917,7 @@ def analyze_rerun(request: AnalyzeRerunRequest) -> Dict[str, Any]:
 
         thresholds_by_domain = get_effective_thresholds(model_id)
         rerun_job_id = uuid.uuid4().hex
-        out_dir = BASE_DIR / "data" / "processed" / f"job_{rerun_job_id}"
+        out_dir = PROCESSED_DATA_DIR / f"job_{rerun_job_id}"
         out_dir.mkdir(parents=True, exist_ok=True)
 
         save_job_meta(
@@ -11109,7 +11128,7 @@ def dataset_export(request: DatasetExportRequest) -> Dict[str, Any]:
             },
         )
 
-    out_dir = BASE_DIR / "data" / "processed"
+    out_dir = PROCESSED_DATA_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
 
     timestamp = utc_timestamp_compact()
@@ -11124,7 +11143,7 @@ def dataset_export(request: DatasetExportRequest) -> Dict[str, Any]:
     stats = build_dataset_stats(filtered)
     manifest = {
         "artifact_type": "dataset_export",
-        "artifact_path": str(out_path.relative_to(BASE_DIR)),
+        "artifact_path": to_relative(str(out_path)),
         "created_at": datetime.utcnow().isoformat() + "Z",
         "filters": {
             "source": request.source or [],
@@ -11140,9 +11159,9 @@ def dataset_export(request: DatasetExportRequest) -> Dict[str, Any]:
         json.dump(manifest, f, ensure_ascii=False, indent=2)
 
     return {
-        "path": str(out_path.relative_to(BASE_DIR)),
-        "artifact_path": str(out_path.relative_to(BASE_DIR)),
-        "manifest_path": str(manifest_path.relative_to(BASE_DIR)),
+        "path": to_relative(str(out_path)),
+        "artifact_path": to_relative(str(out_path)),
+        "manifest_path": to_relative(str(manifest_path)),
         "count": len(filtered),
         "stats": stats,
         "artifact_versions": versions,
@@ -11454,7 +11473,7 @@ def synthetic_export(request: SyntheticExportRequest) -> Dict[str, Any]:
         for row in rows
     ]
 
-    out_dir = BASE_DIR / "data" / "processed"
+    out_dir = PROCESSED_DATA_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / "synthetic_dataset.jsonl"
     with out_path.open("w", encoding="utf-8") as f:
@@ -11462,7 +11481,7 @@ def synthetic_export(request: SyntheticExportRequest) -> Dict[str, Any]:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
     return {
-        "path": str(out_path.relative_to(BASE_DIR)),
+        "path": to_relative(str(out_path)),
         "count": len(export_rows),
         "stats": build_synthetic_stats(rows),
     }

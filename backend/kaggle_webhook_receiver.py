@@ -25,10 +25,13 @@ from backend.system_settings import (
     get_int_setting as get_runtime_int_setting,
     get_setting as get_runtime_setting,
 )
+from backend.runtime_paths import get_kaggle_runtime_dir, get_project_root, get_runtime_dir
+from backend.artifact_refs import encode_artifact_ref, resolve_artifact_ref
 
 
-BASE_DIR = Path(__file__).resolve().parents[1]
-RUNTIME_DIR = BASE_DIR / ".runtime"
+BASE_DIR = get_project_root()
+RUNTIME_DIR = get_runtime_dir()
+KAGGLE_RUNTIME_DIR = get_kaggle_runtime_dir()
 STATE_PATH = RUNTIME_DIR / "kaggle_webhook_jobs.json"
 
 # Load local env files so running this service standalone still picks up backend config.
@@ -597,12 +600,20 @@ def _resolve_artifact_uri(path: Path, job: Dict[str, Any]) -> str:
             )
         except Exception:
             pass
-    return f"file://{path.resolve().as_posix()}"
+    return encode_artifact_ref(path)
+
+
+def _resolve_work_dir(value: Any) -> Path:
+    raw = str(value or RUNTIME_DIR)
+    try:
+        return resolve_artifact_ref(raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid local Kaggle work_dir reference") from exc
 
 
 def _refresh_completed_artifact(job: Dict[str, Any]) -> None:
     """Repair terminal jobs that were previously pointed at the input bundle."""
-    work_dir = Path(str(job.get("work_dir") or RUNTIME_DIR))
+    work_dir = _resolve_work_dir(job.get("work_dir"))
     artifact_file = _pick_artifact_file(work_dir / "output")
     if artifact_file is None:
         return
@@ -656,7 +667,7 @@ def _trigger_real(payload: TriggerRequest) -> Dict[str, Any]:
     owner, slug = _resolve_owner_slug(payload.notebook_url)
     kernel_ref = f"{owner}/{slug}"
     job_id = f"real_{uuid.uuid4().hex[:12]}"
-    job_dir = RUNTIME_DIR / "kaggle_real_jobs" / job_id
+    job_dir = KAGGLE_RUNTIME_DIR / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
 
     kernel_meta = _fetch_existing_kernel_metadata(kernel_ref, job_dir)
@@ -765,7 +776,7 @@ def _trigger_real(payload: TriggerRequest) -> Dict[str, Any]:
         "owner": owner,
         "slug": slug,
         "kernel_ref": kernel_ref,
-        "work_dir": str(job_dir),
+        "work_dir": encode_artifact_ref(job_dir),
         "code_file": final_code_file,
         "kernel_type": final_kernel_type,
         "push_error": push_error,
@@ -827,7 +838,7 @@ def _download_real_output_artifact(job_id: str) -> None:
     if not kernel_ref:
         return
 
-    work_dir = Path(str(job.get("work_dir") or RUNTIME_DIR))
+    work_dir = _resolve_work_dir(job.get("work_dir"))
     output_dir = work_dir / "output"
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -894,7 +905,7 @@ def _status_real(job_id: str, job: Dict[str, Any], jobs: Dict[str, Any]) -> Dict
             job["last_status_stdout"] = status_stdout[-4000:]
             job["status"] = normalized
             if normalized == "failed":
-                work_dir = Path(str(job.get("work_dir") or RUNTIME_DIR))
+                work_dir = _resolve_work_dir(job.get("work_dir"))
                 output_dir = work_dir / "output"
                 output_dir.mkdir(parents=True, exist_ok=True)
                 log_tail = ""

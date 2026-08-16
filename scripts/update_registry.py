@@ -1,12 +1,17 @@
 import argparse
 import json
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict
 
-from registry_builder import build_registry_from_models
-
 BASE_DIR = Path(__file__).resolve().parents[1]
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
+
+from registry_builder import build_registry_from_models
+from backend.artifact_refs import encode_artifact_ref
+
 REGISTRY_PATH = BASE_DIR / "experiments" / "registry.json"
 
 
@@ -77,7 +82,7 @@ def main() -> None:
         "model_name": args.model_name,
         "dataset_version": args.dataset_version,
         "created_at": args.created_at,
-        "checkpoint_path": args.checkpoint_path,
+        "checkpoint_path": encode_artifact_ref(args.checkpoint_path),
         "hyperparameters": hyperparameters,
         "metrics": metrics,
         "is_baseline": bool(args.is_baseline),

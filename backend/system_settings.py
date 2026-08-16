@@ -6,8 +6,10 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 
-BASE_DIR = Path(__file__).resolve().parents[1]
-DEFAULT_SETTINGS_DB_PATH = BASE_DIR / "data" / "processed" / "feedback" / "feedback.db"
+from backend.runtime_paths import get_feedback_db_path
+
+
+DEFAULT_SETTINGS_DB_PATH = get_feedback_db_path()
 
 
 @dataclass(frozen=True)

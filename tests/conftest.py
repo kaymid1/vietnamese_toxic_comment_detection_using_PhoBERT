@@ -39,6 +39,9 @@ def qa_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict:
         )
 
     monkeypatch.setattr(app_module, "BASE_DIR", base_dir)
+    monkeypatch.setattr(app_module, "APP_DATA_DIR", base_dir / "data")
+    monkeypatch.setattr(app_module, "PROCESSED_DATA_DIR", processed_dir)
+    monkeypatch.setattr(app_module, "DATA_DIR", base_dir / "data" / "raw" / "crawled_urls")
     monkeypatch.setattr(app_module, "FEEDBACK_DIR", feedback_dir)
     monkeypatch.setattr(app_module, "FEEDBACK_DB_PATH", feedback_db)
     monkeypatch.setattr(app_module, "MODEL_OPTIONS_DIR", models_dir)
