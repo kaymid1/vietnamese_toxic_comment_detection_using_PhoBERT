@@ -5759,12 +5759,54 @@ def _do_resolve_training_mode(request: "MlflowDOTriggerRequest") -> str:
 def _do_resolve_base_model(request: "MlflowDOTriggerRequest") -> Optional[str]:
     if request.model_kind == "lr_smoke":
         return None
+    if _do_resolve_training_mode(request) == "retrain":
+        return PHOBERT_V2_BASE_MODEL
     raw = (request.base_model or "").strip()
     if not raw:
-        return None
+        raise RuntimeError("PhoBERT finetune requires an explicitly selected base_model")
     if any(x in raw for x in ("..", "\\")):
         raise RuntimeError("Invalid base_model")
     return raw
+
+
+def _validate_phobert_checkpoint_dir(model_path: Path, *, label: str) -> None:
+    required = ["config.json", "tokenizer_config.json"]
+    missing = [name for name in required if not (model_path / name).is_file()]
+    if not ((model_path / "model.safetensors").is_file() or (model_path / "pytorch_model.bin").is_file()):
+        missing.append("model.safetensors or pytorch_model.bin")
+    if not ((model_path / "vocab.txt").is_file() or (model_path / "tokenizer.json").is_file()):
+        missing.append("vocab.txt or tokenizer.json")
+    if missing:
+        raise RuntimeError(f"PhoBERT finetune base model '{label}' is incomplete: missing {', '.join(missing)}")
+
+
+def _resolve_phobert_finetune_base_model(model_id: str) -> Tuple[str, Path, Dict[str, Any]]:
+    try:
+        model_type, model_name, model_path = resolve_model_path(resolve_model_root(), model_id)
+    except Exception as exc:
+        raise RuntimeError(f"Cannot resolve PhoBERT finetune base model '{model_id}': {exc}") from exc
+    if model_type != "phobert":
+        raise RuntimeError("PhoBERT finetune requires a selected PhoBERT model artifact")
+    _validate_phobert_checkpoint_dir(model_path, label=model_id)
+    resolved_model_id = f"{model_type}/{model_name}"
+    provenance: Dict[str, Any] = {
+        "type": "existing_model_artifact",
+        "model_id": resolved_model_id,
+        "source_path": str(model_path),
+    }
+    with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT source_run_id, artifact_checksum, artifact_uri, status FROM mlflow_model_version WHERE model_id = ?",
+            (resolved_model_id,),
+        ).fetchone()
+    if row:
+        provenance.update({
+            "source_run_id": row[0],
+            "artifact_checksum": row[1],
+            "artifact_uri": row[2],
+            "registry_status": row[3],
+        })
+    return resolved_model_id, model_path, provenance
 
 
 def _mlflow_stages_for_mode(compute_mode: Optional[str]) -> List[str]:
@@ -7569,15 +7611,15 @@ def mlflow_manual_export_bundle(request: MlflowManualExportBundleRequest) -> Dic
     bundle_profile = request.bundle_profile
     required_zip_contents = build_mlflow_required_bundle_contents(bundle_profile)
     local_base_model_dir: Optional[Path] = None
+    base_model_provenance: Optional[Dict[str, Any]] = None
     if bundle_profile == "full_bundle" and request.include_base_model and request.base_model:
         try:
-            model_type, _, model_path = resolve_model_path(resolve_model_root(), request.base_model)
-        except Exception as exc:
-            raise HTTPException(status_code=400, detail=f"Cannot include base_model in bundle: {exc}") from exc
-        if model_type != "phobert":
-            raise HTTPException(status_code=400, detail="Only PhoBERT base models can be bundled for finetune")
+            resolved_base_model_id, model_path, base_model_provenance = _resolve_phobert_finetune_base_model(request.base_model)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         local_base_model_dir = model_path
         required_zip_contents.append("base_model/config.json")
+        required_zip_contents.append("base_model/provenance.json")
 
     lineage_token = re.sub(r"[^a-zA-Z0-9_-]+", "_", (request.lineage_run_id or "").strip()).strip("_")
     lineage_suffix = f"_{lineage_token}" if lineage_token else ""
@@ -7674,8 +7716,9 @@ def mlflow_manual_export_bundle(request: MlflowManualExportBundleRequest) -> Dic
         "training_mode": resolved_training_mode,
         "balance_strategy": request.balance_strategy,
         "balance_stats": balance_stats,
-        "base_model": request.base_model,
+        "base_model": resolved_base_model_id if local_base_model_dir is not None else request.base_model,
         "base_model_bundled": local_base_model_dir is not None,
+        "base_model_provenance": base_model_provenance,
         "merge_stats": merge_stats,
         "included_mlflow_ids": included_mlflow_ids,
         "included_mlflow_ids_sha256": included_mlflow_ids_sha256,
@@ -7717,6 +7760,7 @@ def mlflow_manual_export_bundle(request: MlflowManualExportBundleRequest) -> Dic
                 for path in local_base_model_dir.rglob("*"):
                     if path.is_file():
                         zf.write(path, f"base_model/{path.relative_to(local_base_model_dir).as_posix()}")
+                zf.writestr("base_model/provenance.json", json.dumps(base_model_provenance, ensure_ascii=False, indent=2))
             zf.writestr("manifest.json", json.dumps(manifest_json, ensure_ascii=False, indent=2))
             zf.writestr("config/training_config.yaml", training_config_yaml)
             zf.writestr("config/gate_policy.json", json.dumps(gate_policy_json, ensure_ascii=False, indent=2))
@@ -7770,6 +7814,7 @@ def mlflow_manual_export_bundle(request: MlflowManualExportBundleRequest) -> Dic
             "masked": max(0, len(accepted_rows) - int(pseudo_manifest_json["constructiveness_included"])),
         },
         "base_model_bundled": local_base_model_dir is not None,
+        "base_model_provenance": base_model_provenance,
         "merge_stats": manifest_json["merge_stats"],
         "included_mlflow_ids": included_mlflow_ids,
         "included_mlflow_ids_sha256": included_mlflow_ids_sha256,
@@ -8654,15 +8699,18 @@ def mlflow_kaggle_trigger(request: MlflowDOTriggerRequest, http_request: Request
                 detail=public_bundle_error or "Public bundle tunnel is not reachable",
             )
 
+    is_phobert_finetune = request.model_kind == "phobert" and training_mode == "finetune"
+    bundle_profile = "full_bundle" if is_phobert_finetune else "clean_victsd_gold"
+
     bundle_result = mlflow_manual_export_bundle(
         MlflowManualExportBundleRequest(
             batch_id=request.batch_id,
             scope=request.bundle_scope,
-            bundle_profile="clean_victsd_gold",
+            bundle_profile=bundle_profile,
             model_kind=request.model_kind,
             training_mode=training_mode,
             balance_strategy=request.balance_strategy,
-            include_base_model=False,
+            include_base_model=is_phobert_finetune,
             base_model=base_model,
             include_unused=False,
             lineage_run_id=run_id,
@@ -8697,6 +8745,9 @@ def mlflow_kaggle_trigger(request: MlflowDOTriggerRequest, http_request: Request
         "scope": bundle_result.get("scope"),
         "batch_id": bundle_result.get("batch_id"),
         "training_mode": training_mode,
+        "base_model": base_model,
+        "base_model_bundled": bool(bundle_result.get("base_model_bundled")),
+        "base_model_provenance": bundle_result.get("base_model_provenance"),
         "balance_strategy": request.balance_strategy,
         "count_before_balance": bundle_result.get("count_before_balance"),
         "count_after_balance": bundle_result.get("count"),

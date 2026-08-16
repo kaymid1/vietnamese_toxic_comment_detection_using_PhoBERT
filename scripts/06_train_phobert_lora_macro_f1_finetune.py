@@ -113,6 +113,14 @@ DATASET_PREFIX = os.environ.get("DATASET_PREFIX", "").strip()
 DATASET_LAYOUT = os.environ.get("DATASET_LAYOUT", "auto").strip().lower()
 TRAINING_MODE = os.environ.get("TRAINING_MODE", "finetune").strip().lower()
 MODEL_NAME = os.environ.get("MODEL_NAME", "vinai/phobert-base-v2").strip()
+if TRAINING_MODE not in {"retrain", "finetune"}:
+    raise ValueError(f"Unsupported TRAINING_MODE={TRAINING_MODE}. Use 'retrain' or 'finetune'.")
+try:
+    INITIALIZATION = json.loads(os.environ.get("VIETTOXIC_INITIALIZATION_JSON", "{}"))
+except json.JSONDecodeError as exc:
+    raise ValueError(f"Invalid VIETTOXIC_INITIALIZATION_JSON: {exc}") from exc
+if not isinstance(INITIALIZATION, dict):
+    raise ValueError("VIETTOXIC_INITIALIZATION_JSON must be a JSON object")
 MAX_LENGTH = int(os.environ.get("MAX_LENGTH", "256"))
 
 PSEUDO_LABELS_DIR = os.environ.get("PSEUDO_LABELS_DIR", "").strip()
@@ -1268,6 +1276,8 @@ training_manifest = {
     } if ACTIVE_MIXED_MODE else None,
     "hyperparams": {
         "base_model": MODEL_NAME,
+        "training_mode": TRAINING_MODE,
+        "initialization": INITIALIZATION,
         "epochs": int(EPOCHS),
         "lr": float(LR),
         "batch_size": int(BATCH_SIZE),
@@ -1328,6 +1338,8 @@ run_config = {
     "is_baseline": IS_BASELINE,
     "hyperparameters": {
         "MODEL_NAME": MODEL_NAME,
+        "TRAINING_MODE": TRAINING_MODE,
+        "initialization": INITIALIZATION,
         "MAX_LENGTH": MAX_LENGTH,
         "BATCH_SIZE": BATCH_SIZE,
         "GRAD_ACCUM": GRAD_ACCUM,
@@ -1400,6 +1412,7 @@ mlflow_params = {
     "training_type": training_type,
     "training_mode": TRAINING_MODE,
     "base_model": MODEL_NAME,
+    "initialization_type": str(INITIALIZATION.get("type") or "unknown"),
     "epochs": int(EPOCHS),
     "lr": float(LR),
     "batch_size": int(BATCH_SIZE),

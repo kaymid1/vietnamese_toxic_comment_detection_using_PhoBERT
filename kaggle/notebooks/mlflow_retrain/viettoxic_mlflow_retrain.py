@@ -391,11 +391,42 @@ def resolve_phobert_train_script() -> pathlib.Path:
 
 def resolve_phobert_model_name() -> str:
     bundled_base = resolve_bundle_member("base_model")
-    if TRAINING_MODE == "finetune" and (bundled_base / "config.json").exists():
-        return str(bundled_base)
-    if BASE_MODEL and not BASE_MODEL.startswith("phobert/"):
-        return BASE_MODEL
-    return PHOBERT_MODEL_FALLBACK
+    if TRAINING_MODE not in {"retrain", "finetune"}:
+        raise ValueError(f"Unsupported VIETTOXIC_TRAINING_MODE={TRAINING_MODE}. Use 'retrain' or 'finetune'.")
+    if TRAINING_MODE == "retrain":
+        if not PHOBERT_MODEL_FALLBACK:
+            raise RuntimeError("PhoBERT retrain requires VIETTOXIC_PHOBERT_MODEL_FALLBACK to name the pretrained checkpoint.")
+        return PHOBERT_MODEL_FALLBACK
+
+    required = ["config.json", "tokenizer_config.json"]
+    missing = [name for name in required if not (bundled_base / name).is_file()]
+    if not ((bundled_base / "model.safetensors").is_file() or (bundled_base / "pytorch_model.bin").is_file()):
+        missing.append("model.safetensors or pytorch_model.bin")
+    if not ((bundled_base / "vocab.txt").is_file() or (bundled_base / "tokenizer.json").is_file()):
+        missing.append("vocab.txt or tokenizer.json")
+    if missing:
+        raise RuntimeError(
+            "PhoBERT finetune requires a complete bundled base_model checkpoint; missing "
+            + ", ".join(missing)
+            + ". Refusing to fall back to the pretrained base model."
+        )
+    return str(bundled_base)
+
+
+def resolve_phobert_initialization() -> dict[str, Any]:
+    model_name = resolve_phobert_model_name()
+    if TRAINING_MODE == "retrain":
+        return {"type": "pretrained_base", "model_name": model_name, "bundled": False}
+    provenance_path = resolve_bundle_member("base_model", "provenance.json")
+    if not provenance_path.is_file():
+        raise RuntimeError("PhoBERT finetune base_model/provenance.json is required for auditable parent-model lineage.")
+    try:
+        provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Invalid PhoBERT finetune provenance: {exc}") from exc
+    if not isinstance(provenance, dict) or not str(provenance.get("model_id") or "").strip():
+        raise RuntimeError("PhoBERT finetune provenance is missing model_id.")
+    return {"type": "existing_model_artifact", "model_name": model_name, "bundled": True, **provenance}
 
 
 def run_phobert_retrain() -> dict:
@@ -420,14 +451,16 @@ def run_phobert_retrain() -> dict:
     for path in [artifact_dir, output_base, results_base, manifests_dir, zip_output_dir]:
         path.mkdir(parents=True, exist_ok=True)
 
+    initialization = resolve_phobert_initialization()
     env = os.environ.copy()
     env.update(
         {
             "DATA_DIR": str(dataset_root),
             "DATASET_LAYOUT": "plain",
             "GOLD_DATA_DIR": str(dataset_root),
-            "MODEL_NAME": resolve_phobert_model_name(),
-            "TRAINING_MODE": TRAINING_MODE if TRAINING_MODE in {"finetune", "retrain"} else "finetune",
+            "MODEL_NAME": str(initialization["model_name"]),
+            "TRAINING_MODE": TRAINING_MODE,
+            "VIETTOXIC_INITIALIZATION_JSON": json.dumps(initialization, ensure_ascii=False),
             "OUTPUT_BASE": str(output_base),
             "RESULTS_BASE": str(results_base),
             "RUN_MANIFEST_DIR": str(manifests_dir),
@@ -455,6 +488,7 @@ def run_phobert_retrain() -> dict:
             "dataset_root": str(dataset_root),
             "pseudo_enabled": has_pseudo,
             "model_name": env["MODEL_NAME"],
+            "initialization": initialization,
         }
 
     train_cmd = [sys.executable, str(train_script)]
@@ -480,6 +514,7 @@ def run_phobert_retrain() -> dict:
         "dataset_root": str(dataset_root),
         "pseudo_enabled": has_pseudo,
         "model_name": env["MODEL_NAME"],
+        "initialization": initialization,
         "artifact_zip_local": str(artifact_zip_path),
         "import_response": import_response,
     }

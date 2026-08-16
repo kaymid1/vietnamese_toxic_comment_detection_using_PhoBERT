@@ -2796,11 +2796,11 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
 
               {selectedModelKind === "phobert" && selectedTrainingMode === "finetune" && (
                 <div>
-                  <label className="text-xs text-muted-foreground">Base model (optional)</label>
+                  <label className="text-xs text-muted-foreground">Base model (required for finetune)</label>
                   <Input
                     value={finetuneBaseModel}
                     onChange={(e: ChangeEvent<HTMLInputElement>) => setFinetuneBaseModel(e.target.value)}
-                    placeholder="vinai/phobert-base-v2"
+                    placeholder="Select an installed PhoBERT model artifact"
                     className="mt-1"
                     list="finetune-base-models"
                   />
@@ -2813,7 +2813,7 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
                         </option>
                       ))}
                   </datalist>
-                  <p className="mt-1 text-xs text-muted-foreground">Để trống để dùng base model mặc định của script finetune.</p>
+                  <p className="mt-1 text-xs text-muted-foreground">Finetune bundles this exact PhoBERT checkpoint. An empty or incomplete base model is rejected; it never falls back to the original pretrained checkpoint.</p>
                 </div>
               )}
 
