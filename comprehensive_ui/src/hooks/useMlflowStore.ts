@@ -165,6 +165,7 @@ export interface MlflowCandidate {
   label_confidence?: string | null;
   review_provider?: string | null;
   review_model_name?: string | null;
+  review_reason?: string | null;
   source_type?: "crawl" | "synthetic" | string | null;
   source_row_id?: number | null;
   gate_bucket: string;
@@ -175,6 +176,9 @@ export interface MlflowCandidate {
   latest_prediction?: MlflowPrediction | null;
   previous_predictions?: MlflowPrediction[];
   prediction_history?: MlflowPrediction[];
+  latest_re_evaluation?: MlflowPrediction | null;
+  re_evaluation_status?: "agreement" | "conflict" | "uncertain" | "human_resolved" | "human_removed" | "recorded" | null;
+  requires_human_review?: boolean;
 }
 
 export interface MlflowPrediction {
@@ -195,6 +199,22 @@ export interface MlflowPrediction {
   agreement_with_human?: boolean | null;
 }
 
+export interface MlflowRegistryModel {
+  model_id: string;
+  source_run_id: string;
+  model_family: "tfidf_lr" | "phobert" | string;
+  model_kind?: string | null;
+  training_mode?: string | null;
+  base_model?: string | null;
+  status: "candidate" | "production" | "archived" | "deleted" | string;
+  artifact_available: boolean;
+  artifact_checksum?: string | null;
+  metrics: Record<string, number | null>;
+  created_at?: string | null;
+  promoted_at?: string | null;
+  is_current_production?: boolean;
+}
+
 export interface MlflowTrainingPreview {
   scope: "batch" | "all_batches";
   batch_id?: string | null;
@@ -208,6 +228,10 @@ export interface MlflowTrainingPreview {
     selected_clean: number;
     candidate: number;
     removed: number;
+    auto_eligible: number;
+    requires_human_review: number;
+    model_conflicts: number;
+    model_uncertain: number;
   };
   balance: {
     strategy: string;
@@ -268,6 +292,33 @@ export interface MlflowGeminiReviewResponse {
   requested: number;
   reviewed: number;
   failed_ids?: number[];
+}
+
+export interface MlflowModelReEvaluationResponse {
+  status: "ok" | "partial" | string;
+  model_id: string;
+  selection: "selected" | "all_auto_eligible";
+  training_scope: "all_batches" | "batch";
+  batch_id?: string | null;
+  summary: {
+    requested: number;
+    evaluated: number;
+    agreement: number;
+    conflict: number;
+    uncertain: number;
+    needs_review: number;
+    skipped: number;
+    failed: number;
+  };
+  results: Array<{
+    sample_id: number;
+    status: string;
+    message: string;
+    workflow_changed?: boolean;
+    current_label?: number | null;
+    predicted_label?: number | null;
+    raw_toxicity_score?: number | null;
+  }>;
 }
 
 export interface MlflowBatchSummary {
@@ -416,10 +467,27 @@ export interface MlflowKaggleStatus {
   error_message?: string | null;
   run_mode?: string;
   status_source?: string;
+  trigger_source?: "automation" | "manual" | string;
   stage_timestamps?: Record<string, string | null>;
   created_at?: string | null;
   updated_at?: string | null;
   job_id?: string | null;
+}
+
+export interface MlflowAutomationEvent {
+  id: number;
+  model_family: "tfidf_lr" | "phobert" | string;
+  action: string;
+  source_run_id?: string | null;
+  status: string;
+  eligible_count?: number | null;
+  detail?: string | null;
+  created_at: string;
+}
+
+export interface MlflowAutomationStatus {
+  families: Array<{ model_family: string; policy: { enabled: boolean; mode: string; min_new_rows: number; cooldown_minutes: number; dry_run: boolean }; eligible_count: number; new_eligible_rows: number; ready: boolean; blocked_reason?: string | null; state: { active_run_id?: string | null } }>;
+  events: MlflowAutomationEvent[];
 }
 
 export interface MlflowGeminiEvaluation {
@@ -531,11 +599,14 @@ export function useMlflowStore(options: UseMlflowStoreOptions = {}) {
   const [crawlHistoryPage, setCrawlHistoryPage] = useState(1);
   const [crawlHistoryUnavailable, setCrawlHistoryUnavailable] = useState(false);
   const [comparePayload, setComparePayload] = useState<MlflowComparePayload | null>(null);
+  const [registryModels, setRegistryModels] = useState<MlflowRegistryModel[]>([]);
   const [lastBundlePath, setLastBundlePath] = useState<string | null>(null);
   const [requiredZipContents, setRequiredZipContents] = useState<string[]>([]);
   const [doRunId, setDoRunId] = useState<string | null>(readPersistedDORunId);
   const [doStatus, setDoStatus] = useState<MlflowKaggleStatus | null>(null);
   const [doPreflight, setDoPreflight] = useState<MlflowDOPreflight | null>(null);
+  const [automationStatus, setAutomationStatus] = useState<MlflowAutomationStatus | null>(null);
+  const [automationStatusError, setAutomationStatusError] = useState<string | null>(null);
   const [hasNoBatch, setHasNoBatch] = useState(false);
   const [ingestStage, setIngestStage] = useState<MlflowIngestStage>("idle");
   const [ingestProgress, setIngestProgress] = useState(0);
@@ -817,6 +888,39 @@ export function useMlflowStore(options: UseMlflowStoreOptions = {}) {
     [activeBatchId, authorizedFetch, reviewHistoryPage, candidatePageSize, run],
   );
 
+  const reEvaluateWithModel = useCallback(
+    async (options: {
+      modelId: string;
+      selection: "selected" | "all_auto_eligible";
+      sampleIds?: number[];
+      trainingScope?: "all_batches" | "batch";
+      batchId?: string | null;
+    }) => {
+      return run(async () => {
+        const payload = await parseJsonResponse<MlflowModelReEvaluationResponse>(
+          await authorizedFetch(buildApiUrl("/api/mlflow/re-evaluate"), {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              model_id: options.modelId,
+              selection: options.selection,
+              sample_ids: options.sampleIds || [],
+              training_scope: options.trainingScope || "all_batches",
+              batch_id: options.batchId || undefined,
+            }),
+          }),
+        );
+        await Promise.all([
+          refreshTrainingPreview(1, "all_batches"),
+          refreshCandidates(undefined, 1, "all_batches"),
+          refreshReviewHistory(undefined, "all", 1, "all_batches"),
+        ]);
+        return payload;
+      });
+    },
+    [authorizedFetch, refreshCandidates, refreshReviewHistory, refreshTrainingPreview, run],
+  );
+
   const refreshCrawlHistory = useCallback(
     async (page = crawlHistoryPage, options?: { allowUnavailableFallback?: boolean }) => {
       return run(async () => {
@@ -1003,6 +1107,20 @@ export function useMlflowStore(options: UseMlflowStoreOptions = {}) {
     [authorizedFetch, doRunId, run],
   );
 
+  const refreshAutomationStatus = useCallback(async () => run(async () => {
+    try {
+      const payload = await parseJsonResponse<MlflowAutomationStatus>(
+        await authorizedFetch(buildApiUrl("/api/mlflow/automation/status")),
+      );
+      setAutomationStatus(payload);
+      setAutomationStatusError(null);
+      return payload;
+    } catch (err) {
+      setAutomationStatusError(err instanceof Error ? err.message : "Unable to load automation status");
+      throw err;
+    }
+  }), [authorizedFetch, run]);
+
   const geminiEvaluateKaggleRun = useCallback(
     async (runId: string, force = false) => {
       return run(async () => {
@@ -1069,6 +1187,14 @@ export function useMlflowStore(options: UseMlflowStoreOptions = {}) {
     },
     [refreshDOStatus, stopDOPolling],
   );
+
+  const openDORun = useCallback(async (runId: string) => {
+    setDoRunId(runId);
+    const payload = await refreshDOStatus(runId);
+    const status = String(payload?.status || "");
+    if (!DO_TERMINAL_STATUSES.has(status)) startDOPolling(runId);
+    return payload;
+  }, [refreshDOStatus, startDOPolling]);
 
   useEffect(() => {
     return () => {
@@ -1176,6 +1302,33 @@ export function useMlflowStore(options: UseMlflowStoreOptions = {}) {
       return payload;
     });
   }, [authorizedFetch, run]);
+
+  const refreshModelRegistry = useCallback(async () => {
+    return run(async () => {
+      const payload = await parseJsonResponse<{ items: MlflowRegistryModel[] }>(
+        await authorizedFetch(buildApiUrl("/api/mlflow/registry")),
+      );
+      setRegistryModels(payload.items || []);
+      return payload;
+    });
+  }, [authorizedFetch, run]);
+
+  const updateModelRegistryLifecycle = useCallback(
+    async (modelId: string, action: "archive" | "delete") => {
+      return run(async () => {
+        const payload = await parseJsonResponse<{ status: string; model_id: string }>(
+          await authorizedFetch(buildApiUrl(`/api/mlflow/registry/${action}`), {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ model_id: modelId, confirm: action === "delete" }),
+          }),
+        );
+        await refreshModelRegistry();
+        return payload;
+      });
+    },
+    [authorizedFetch, refreshModelRegistry, run],
+  );
 
   const promote = useCallback(
     async (runId: string, artifactChecksum?: string | null, expectedCurrentVersion?: string | null) => {
@@ -1451,11 +1604,14 @@ export function useMlflowStore(options: UseMlflowStoreOptions = {}) {
     crawlHistoryTotal,
     crawlHistoryPage,
     comparePayload,
+    registryModels,
     lastBundlePath,
     requiredZipContents,
     doRunId,
     doStatus,
     doPreflight,
+    automationStatus,
+    automationStatusError,
     ingest,
     refreshOverview,
     refreshBatches,
@@ -1465,6 +1621,7 @@ export function useMlflowStore(options: UseMlflowStoreOptions = {}) {
     reviewTrainingPreview,
     geminiReviewTrainingPreview,
     geminiReviewCandidates,
+    reEvaluateWithModel,
     refreshReviewHistory,
     refreshCrawlHistory,
     reviewCandidates,
@@ -1477,9 +1634,13 @@ export function useMlflowStore(options: UseMlflowStoreOptions = {}) {
     triggerDO,
     refreshDOPreflight,
     refreshDOStatus,
+    refreshAutomationStatus,
+    openDORun,
     geminiEvaluateKaggleRun,
     clearDOSession,
     refreshCompare,
+    refreshModelRegistry,
+    updateModelRegistryLifecycle,
     promote,
     rollback,
     setError,

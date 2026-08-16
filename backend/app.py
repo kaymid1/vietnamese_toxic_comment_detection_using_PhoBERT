@@ -602,12 +602,30 @@ def admin_update_system_settings(
 ) -> Dict[str, Any]:
     init_feedback_db()
     try:
-        return update_system_settings(
+        was_enabled = get_bool_setting("MLFLOW_AUTOMATION_ENABLED", False)
+        was_dry_run = get_bool_setting("MLFLOW_AUTOMATION_DRY_RUN", True)
+        payload = update_system_settings(
             FEEDBACK_DB_PATH,
             request.settings,
             clear=request.clear,
             updated_by=admin_username,
         )
+        enabled_now = get_bool_setting("MLFLOW_AUTOMATION_ENABLED", False)
+        scheduled: List[str] = []
+        dry_run_now = get_bool_setting("MLFLOW_AUTOMATION_DRY_RUN", True)
+        if enabled_now and (not was_enabled or (was_dry_run and not dry_run_now)):
+            for family in ("tfidf_lr", "phobert"):
+                if _automation_mode(family) == "disabled":
+                    continue
+                threading.Thread(
+                    target=_run_automation_cycle,
+                    args=(family, "settings_enabled"),
+                    name=f"mlflow-automation-enable-{family}",
+                    daemon=True,
+                ).start()
+                scheduled.append(family)
+        payload["automation_scheduled_for"] = scheduled
+        return payload
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -886,6 +904,14 @@ class MlflowTrainingPreviewGeminiReviewRequest(BaseModel):
     ids: List[int] = Field(min_length=1, max_length=25)
 
 
+class MlflowModelReEvaluationRequest(BaseModel):
+    model_id: str = Field(min_length=1, max_length=240)
+    selection: Literal["selected", "all_auto_eligible"] = "selected"
+    sample_ids: List[int] = Field(default_factory=list, max_length=300)
+    training_scope: Literal["all_batches", "batch"] = "all_batches"
+    batch_id: Optional[str] = None
+
+
 class MlflowManualImportArtifactRequest(BaseModel):
     run_name: str = Field(min_length=1)
     artifact_path: str = Field(min_length=1)
@@ -924,6 +950,11 @@ class MlflowPromoteRequest(BaseModel):
 class MlflowRollbackRequest(BaseModel):
     model_family: Literal["tfidf_lr", "phobert"]
     expected_current_version: Optional[str] = Field(default=None, max_length=160)
+
+
+class MlflowRegistryLifecycleRequest(BaseModel):
+    model_id: str = Field(min_length=3, max_length=240)
+    confirm: bool = False
 
 
 class MlflowClearBatchRequest(BaseModel):
@@ -2503,6 +2534,7 @@ def init_feedback_db() -> None:
                 label_confidence TEXT,
                 review_provider TEXT,
                 review_model_name TEXT,
+                review_reason TEXT,
                 source_type TEXT NOT NULL DEFAULT 'crawl',
                 source_row_id INTEGER,
                 created_at TEXT NOT NULL,
@@ -2801,6 +2833,7 @@ def init_feedback_db() -> None:
         ensure_table_column(conn, "mlflow_comment_item", "label_confidence", "TEXT")
         ensure_table_column(conn, "mlflow_comment_item", "review_provider", "TEXT")
         ensure_table_column(conn, "mlflow_comment_item", "review_model_name", "TEXT")
+        ensure_table_column(conn, "mlflow_comment_item", "review_reason", "TEXT")
         ensure_table_column(conn, "mlflow_comment_item", "domain_category", "TEXT")
         ensure_table_column(conn, "mlflow_comment_item", "constructiveness_score", "REAL")
         ensure_table_column(conn, "mlflow_comment_item", "constructiveness_label", "INTEGER")
@@ -2856,6 +2889,11 @@ def init_feedback_db() -> None:
         ensure_table_column(conn, "mlflow_do_run", "bundle_manifest_json", "TEXT")
         ensure_table_column(conn, "mlflow_training_artifact", "source_run_id", "TEXT")
         ensure_table_column(conn, "mlflow_training_artifact", "metrics_json", "TEXT")
+        ensure_table_column(conn, "mlflow_model_version", "model_kind", "TEXT")
+        ensure_table_column(conn, "mlflow_model_version", "training_mode", "TEXT")
+        ensure_table_column(conn, "mlflow_model_version", "base_model", "TEXT")
+        ensure_table_column(conn, "mlflow_model_version", "artifact_uri", "TEXT")
+        ensure_table_column(conn, "mlflow_model_version", "bundle_path", "TEXT")
         conn.execute(
             """
             CREATE UNIQUE INDEX IF NOT EXISTS idx_mlflow_training_artifact_source_run_id
@@ -4539,6 +4577,32 @@ def attach_mlflow_prediction_history(
         item["latest_prediction"] = prediction_history[0] if prediction_history else None
         item["previous_predictions"] = prediction_history[1:]
         item["prediction_history"] = prediction_history
+        re_evaluation_history = [
+            prediction
+            for prediction in prediction_history
+            if str(prediction.get("record_origin") or "") == "model_re_evaluation"
+        ]
+        latest_re_evaluation = re_evaluation_history[0] if re_evaluation_history else None
+        review_reason = str(item.get("review_reason") or "")
+        if review_reason == "model_conflict":
+            re_evaluation_status = "conflict"
+        elif review_reason == "model_uncertain":
+            re_evaluation_status = "uncertain"
+        elif review_reason.endswith("_resolved"):
+            re_evaluation_status = "human_resolved"
+        elif review_reason.endswith("_removed"):
+            re_evaluation_status = "human_removed"
+        elif latest_re_evaluation is not None:
+            latest_label = normalize_int(latest_re_evaluation.get("predicted_label"))
+            current_label = normalize_int(item.get("pseudo_label"))
+            re_evaluation_status = (
+                "agreement" if latest_label in {0, 1} and latest_label == current_label else "recorded"
+            )
+        else:
+            re_evaluation_status = None
+        item["latest_re_evaluation"] = latest_re_evaluation
+        item["re_evaluation_status"] = re_evaluation_status
+        item["requires_human_review"] = review_reason in {"model_conflict", "model_uncertain"}
     return items
 
 
@@ -4707,6 +4771,102 @@ def build_mlflow_comment_rows(
                 }
             )
     return rows
+
+
+def run_mlflow_model_re_evaluation(
+    rows: List[sqlite3.Row],
+    model_id: str,
+) -> Tuple[str, Dict[int, Dict[str, Any]]]:
+    """Run the existing crawler inference implementation against stored canonical text."""
+    model_root = resolve_model_root()
+    model_type, model_name, model_path = resolve_model_path(model_root, model_id)
+    resolved_model_id = f"{model_type}/{model_name}"
+    thresholds_by_domain = get_effective_thresholds(resolved_model_id)
+
+    with tempfile.TemporaryDirectory(prefix="viettoxic_model_reevaluation_") as temp_dir:
+        temp_root = Path(temp_dir)
+        input_dir = temp_root / "stored_samples"
+        output_dir = temp_root / "predictions"
+        input_dir.mkdir(parents=True, exist_ok=True)
+        grouped_rows: Dict[Tuple[str, str], List[sqlite3.Row]] = {}
+        for row in rows:
+            group_key = (str(row["url_hash"] or ""), str(row["url"] or ""))
+            grouped_rows.setdefault(group_key, []).append(row)
+        sample_ids_by_folder: Dict[str, List[int]] = {}
+
+        for group_index, ((_, url), group_rows) in enumerate(grouped_rows.items()):
+            folder_name = f"stored_page_{group_index}"
+            sample_ids_by_folder[folder_name] = [int(row["id"]) for row in group_rows]
+            sample_dir = input_dir / folder_name
+            sample_dir.mkdir(parents=True, exist_ok=True)
+            (sample_dir / "meta.json").write_text(
+                json.dumps(
+                    {
+                        "url": url or f"mlflow://stored-page/{group_index}",
+                        "status": "stored_sample",
+                        "method": "model_re_evaluation",
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            segment_lines = [
+                json.dumps(
+                    {
+                        "text": str(row["text"] or ""),
+                        "segment_hash": row["segment_hash"],
+                        "html_tag_effective": row["html_tag"],
+                    },
+                    ensure_ascii=False,
+                )
+                for row in group_rows
+            ]
+            (sample_dir / "segments.jsonl").write_text("\n".join(segment_lines) + "\n", encoding="utf-8")
+
+        inference_result = infer_crawled(
+            model_path=str(model_path),
+            model_type=model_type,
+            data_dir=str(input_dir),
+            out_dir=str(output_dir),
+            batch_size=8,
+            max_length=256,
+            page_threshold=0.25,
+            seg_threshold=0.4,
+            threshold_news=thresholds_by_domain.get("news"),
+            threshold_social=thresholds_by_domain.get("social"),
+            threshold_forum=thresholds_by_domain.get("forum"),
+            threshold_unknown=thresholds_by_domain.get("unknown"),
+            quiet=True,
+            learned_feedback=load_learned_segments(resolved_model_id),
+        )
+
+    predictions: Dict[int, Dict[str, Any]] = {}
+    prediction_index_by_folder: Dict[str, int] = {}
+    for prediction in inference_result.get("segment_results") or []:
+        folder_name = str(prediction.get("url_hash") or "")
+        sample_ids = sample_ids_by_folder.get(folder_name) or []
+        prediction_index = prediction_index_by_folder.get(folder_name, 0)
+        if prediction_index >= len(sample_ids):
+            continue
+        sample_id = sample_ids[prediction_index]
+        prediction_index_by_folder[folder_name] = prediction_index + 1
+        constructiveness_score = normalize_score(
+            prediction.get("constructiveness_prob", prediction.get("constructiveness_score"))
+        )
+        constructiveness_label, constructiveness_confidence = infer_constructiveness_label(
+            constructiveness_score,
+            normalize_int(prediction.get("constructiveness_label")),
+        )
+        predictions[sample_id] = {
+            "raw_toxicity_score": normalize_score(prediction.get("score", prediction.get("toxic_prob"))),
+            "adjusted_toxicity_score": normalize_score(prediction.get("toxic_prob_adjusted")),
+            "predicted_label": normalize_int(prediction.get("toxic_label", prediction.get("label"))),
+            "constructiveness_score": constructiveness_score,
+            "constructiveness_label": constructiveness_label,
+            "constructiveness_confidence": constructiveness_confidence,
+            "seg_threshold_used": normalize_score(prediction.get("seg_threshold_used")),
+        }
+    return resolved_model_id, predictions
 
 
 def load_existing_mlflow_samples(
@@ -4986,21 +5146,27 @@ def select_mlflow_training_rows(
     resolved_batch_id: Optional[str],
     balance_strategy: str,
 ) -> Tuple[List[sqlite3.Row], List[sqlite3.Row], Dict[str, Any]]:
-    accepted_where = "gate_bucket = 'accepted' AND pseudo_label IN (0, 1) AND COALESCE(selected_for_training, 1) = 1"
+    accepted_where = (
+        "item.gate_bucket = 'accepted' AND item.pseudo_label IN (0, 1) "
+        "AND COALESCE(item.selected_for_training, 1) = 1"
+    )
     accepted_params: List[Any] = []
     if resolved_batch_id:
-        accepted_where += " AND batch_id = ?"
-        accepted_params.append(resolved_batch_id)
+        accepted_where += (
+            " AND (item.batch_id = ? OR EXISTS (SELECT 1 FROM mlflow_comment_prediction AS scoped_prediction "
+            "WHERE scoped_prediction.sample_item_id = item.id AND scoped_prediction.batch_id = ?))"
+        )
+        accepted_params.extend([resolved_batch_id, resolved_batch_id])
 
     accepted_rows_all = conn.execute(
         f"""
-        SELECT id, batch_id, text, pseudo_label, constructiveness_score, constructiveness_label,
-               constructiveness_confidence, training_review_status, score, url, url_hash,
-               segment_hash, context_segment_hash, html_tag, review_provider, review_model_name,
-               source_type, source_row_id
-        FROM mlflow_comment_item
+        SELECT item.id, item.batch_id, item.text, item.pseudo_label, item.constructiveness_score, item.constructiveness_label,
+               item.constructiveness_confidence, item.training_review_status, item.score, item.url, item.url_hash,
+               item.segment_hash, item.context_segment_hash, item.html_tag, item.review_provider, item.review_model_name,
+               item.source_type, item.source_row_id
+        FROM mlflow_comment_item AS item
         WHERE {accepted_where}
-        ORDER BY id ASC
+        ORDER BY item.id ASC
         """,
         tuple(accepted_params),
     ).fetchall()
@@ -6407,6 +6573,7 @@ def mlflow_review_history(
                    item.selected_for_training, item.training_review_status, item.is_locked, item.gate_bucket, item.verification_status,
                    item.segment_hash, item.context_segment_hash, item.html_tag,
                    item.seg_threshold_used, item.label_source, item.label_confidence, item.review_provider, item.review_model_name,
+                   item.review_reason,
                    item.created_at, item.reviewed_at
             FROM mlflow_comment_item AS item
             WHERE {where_sql}
@@ -6474,6 +6641,7 @@ def mlflow_candidates(
                    item.selected_for_training, item.training_review_status, item.is_locked, item.gate_bucket, item.verification_status,
                    item.segment_hash, item.context_segment_hash, item.html_tag,
                    item.seg_threshold_used, item.label_source, item.label_confidence, item.review_provider, item.review_model_name,
+                   item.review_reason,
                    item.created_at, item.reviewed_at
             FROM mlflow_comment_item AS item
             WHERE {where_sql}
@@ -6524,6 +6692,282 @@ def mlflow_candidates_gemini_review(request: MlflowTrainingPreviewGeminiReviewRe
     return {**build_gemini_review_response(suggestions, len(ids)), "failed_ids": failed_ids}
 
 
+@app.post("/api/mlflow/re-evaluate", dependencies=[Depends(require_admin)])
+def mlflow_model_re_evaluate(request: MlflowModelReEvaluationRequest) -> Dict[str, Any]:
+    init_feedback_db()
+    requested_model_id = request.model_id.strip()
+    try:
+        model_type, model_name, _ = resolve_model_path(resolve_model_root(), requested_model_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except (PermissionError, OSError) as exc:
+        raise HTTPException(status_code=500, detail=f"Unable to access model directory: {exc}") from exc
+    model_id = f"{model_type}/{model_name}"
+
+    sample_ids = list(dict.fromkeys(int(sample_id) for sample_id in request.sample_ids))
+    if request.selection == "selected" and not sample_ids:
+        raise HTTPException(status_code=400, detail="sample_ids is required for selected re-evaluation")
+
+    resolved_batch_id: Optional[str] = None
+    if request.training_scope == "batch":
+        if not request.batch_id:
+            raise HTTPException(status_code=400, detail="batch_id is required when training_scope=batch")
+        resolved_batch_id = resolve_mlflow_batch_id(request.batch_id, strict=True)
+
+    where_parts: List[str] = []
+    params: List[Any] = []
+    if request.selection == "all_auto_eligible":
+        where_parts.extend(
+            [
+                "item.verification_status = 'auto_accepted'",
+                "item.gate_bucket = 'accepted'",
+                "COALESCE(item.selected_for_training, 1) = 1",
+                "item.pseudo_label IN (0, 1)",
+            ]
+        )
+    else:
+        placeholders = ", ".join("?" for _ in sample_ids)
+        where_parts.append(f"item.id IN ({placeholders})")
+        params.extend(sample_ids)
+    if resolved_batch_id:
+        where_parts.append(
+            "(item.batch_id = ? OR EXISTS (SELECT 1 FROM mlflow_comment_prediction AS scoped_prediction "
+            "WHERE scoped_prediction.sample_item_id = item.id AND scoped_prediction.batch_id = ?))"
+        )
+        params.extend([resolved_batch_id, resolved_batch_id])
+
+    where_sql = " AND ".join(where_parts)
+    with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            f"""
+            SELECT item.id, item.batch_id, item.url, item.url_hash, item.text, item.pseudo_label,
+                   item.selected_for_training, item.gate_bucket, item.verification_status,
+                   item.segment_hash, item.html_tag, item.review_reason
+            FROM mlflow_comment_item AS item
+            WHERE {where_sql}
+            ORDER BY item.id ASC
+            """,
+            tuple(params),
+        ).fetchall()
+        existing_model_ids = (
+            {
+                int(existing[0])
+                for existing in conn.execute(
+                    f"""
+                    SELECT prediction.sample_item_id
+                    FROM mlflow_comment_prediction AS prediction
+                    WHERE prediction.model_id = ?
+                      AND prediction.sample_item_id IN ({', '.join('?' for _ in rows)})
+                    """,
+                    tuple([model_id, *[int(row["id"]) for row in rows]]),
+                ).fetchall()
+            }
+            if rows
+            else set()
+        )
+
+    requested_count = len(sample_ids) if request.selection == "selected" else len(rows)
+    result_by_id: Dict[int, Dict[str, Any]] = {}
+    if request.selection == "selected":
+        found_ids = {int(row["id"]) for row in rows}
+        for missing_id in sample_ids:
+            if missing_id not in found_ids:
+                result_by_id[missing_id] = {
+                    "sample_id": missing_id,
+                    "status": "skipped",
+                    "message": "Sample not found in the requested training scope",
+                }
+
+    inference_rows: List[sqlite3.Row] = []
+    for row in rows:
+        sample_id = int(row["id"])
+        if str(row["verification_status"] or "") == "manual_rejected":
+            result_by_id[sample_id] = {
+                "sample_id": sample_id,
+                "status": "skipped",
+                "message": "Removed samples are not re-evaluated automatically",
+            }
+        elif sample_id in existing_model_ids:
+            result_by_id[sample_id] = {
+                "sample_id": sample_id,
+                "status": "skipped",
+                "message": "Already evaluated with this model version",
+            }
+        else:
+            inference_rows.append(row)
+
+    if inference_rows:
+        try:
+            _, predictions = run_mlflow_model_re_evaluation(inference_rows, model_id)
+        except Exception as exc:
+            logger.exception("MLflow model re-evaluation failed for model %s", model_id)
+            for row in inference_rows:
+                sample_id = int(row["id"])
+                result_by_id[sample_id] = {
+                    "sample_id": sample_id,
+                    "status": "failed",
+                    "message": str(exc),
+                }
+            predictions = {}
+
+        now = datetime.utcnow().isoformat() + "Z"
+        operation_id = f"model_reevaluation_{uuid.uuid4().hex[:12]}"
+        with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+            for queued_row in inference_rows:
+                sample_id = int(queued_row["id"])
+                prediction = predictions.get(sample_id)
+                if prediction is None:
+                    if sample_id not in result_by_id:
+                        result_by_id[sample_id] = {
+                            "sample_id": sample_id,
+                            "status": "failed",
+                            "message": "Selected model did not return a prediction for this sample",
+                        }
+                    continue
+
+                current = conn.execute(
+                    """
+                    SELECT id, batch_id, pseudo_label, selected_for_training, gate_bucket,
+                           verification_status, review_reason
+                    FROM mlflow_comment_item WHERE id = ?
+                    """,
+                    (sample_id,),
+                ).fetchone()
+                if current is None:
+                    result_by_id[sample_id] = {
+                        "sample_id": sample_id,
+                        "status": "failed",
+                        "message": "Sample disappeared before prediction persistence",
+                    }
+                    continue
+
+                prediction_cursor = conn.execute(
+                    """
+                    INSERT OR IGNORE INTO mlflow_comment_prediction (
+                        sample_item_id, batch_id, job_id, model_id,
+                        raw_toxicity_score, adjusted_toxicity_score, predicted_label,
+                        constructiveness_score, constructiveness_label, constructiveness_confidence,
+                        seg_threshold_used, record_origin, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'model_re_evaluation', ?)
+                    """,
+                    (
+                        sample_id,
+                        str(current["batch_id"]),
+                        operation_id,
+                        model_id,
+                        prediction.get("raw_toxicity_score"),
+                        prediction.get("adjusted_toxicity_score"),
+                        prediction.get("predicted_label"),
+                        prediction.get("constructiveness_score"),
+                        prediction.get("constructiveness_label"),
+                        prediction.get("constructiveness_confidence"),
+                        prediction.get("seg_threshold_used"),
+                        now,
+                    ),
+                )
+                if int(prediction_cursor.rowcount or 0) == 0:
+                    result_by_id[sample_id] = {
+                        "sample_id": sample_id,
+                        "status": "skipped",
+                        "message": "Already evaluated with this model version",
+                    }
+                    continue
+
+                current_label = normalize_int(current["pseudo_label"])
+                predicted_label = normalize_int(prediction.get("predicted_label"))
+                raw_score = normalize_score(prediction.get("raw_toxicity_score"))
+                verification_status = str(current["verification_status"] or "")
+                is_auto_eligible = (
+                    verification_status == "auto_accepted"
+                    and str(current["gate_bucket"] or "") == "accepted"
+                    and int(current["selected_for_training"] or 0) == 1
+                    and current_label in {0, 1}
+                )
+
+                if raw_score is None:
+                    re_evaluation_status = "uncertain"
+                else:
+                    re_evaluation_gate = classify_mlflow_gate(
+                        raw_score,
+                        MLFLOW_ACCEPT_THRESHOLD,
+                        MLFLOW_DISCARD_THRESHOLD,
+                    )
+                    re_evaluation_status = (
+                        "uncertain"
+                        if re_evaluation_gate["gate_bucket"] == "candidate" or predicted_label not in {0, 1}
+                        else "agreement"
+                        if predicted_label == current_label
+                        else "conflict"
+                    )
+
+                workflow_changed = False
+                if is_auto_eligible and re_evaluation_status in {"conflict", "uncertain"}:
+                    reason = "model_conflict" if re_evaluation_status == "conflict" else "model_uncertain"
+                    conn.execute(
+                        """
+                        UPDATE mlflow_comment_item
+                        SET gate_bucket = 'candidate', verification_status = 'unverified',
+                            selected_for_training = 0, training_review_status = 'pending',
+                            review_reason = ?, reviewed_at = NULL
+                        WHERE id = ?
+                        """,
+                        (reason, sample_id),
+                    )
+                    workflow_changed = True
+
+                if verification_status == "manual_accepted":
+                    status = "human_agreement" if predicted_label == current_label else "human_disagreement"
+                    message = "Human label remains authoritative; training eligibility was unchanged"
+                elif is_auto_eligible:
+                    status = re_evaluation_status
+                    message = (
+                        "Model agreement; automatic training eligibility was preserved"
+                        if status == "agreement"
+                        else "Model conflict; sample was suspended for Manual Verify"
+                        if status == "conflict"
+                        else "Model result was uncertain; sample was suspended for Manual Verify"
+                    )
+                else:
+                    status = "pending_manual_review" if verification_status == "unverified" else "recorded"
+                    message = "Prediction recorded; existing workflow state was unchanged"
+
+                result_by_id[sample_id] = {
+                    "sample_id": sample_id,
+                    "status": status,
+                    "message": message,
+                    "workflow_changed": workflow_changed,
+                    "current_label": current_label,
+                    "predicted_label": predicted_label,
+                    "raw_toxicity_score": raw_score,
+                    "adjusted_toxicity_score": prediction.get("adjusted_toxicity_score"),
+                    "seg_threshold_used": prediction.get("seg_threshold_used"),
+                }
+            conn.commit()
+
+    results = [result_by_id[key] for key in sorted(result_by_id)]
+    summary = {
+        "requested": requested_count,
+        "evaluated": sum(1 for item in results if item["status"] not in {"skipped", "failed"}),
+        "agreement": sum(1 for item in results if item["status"] in {"agreement", "human_agreement"}),
+        "conflict": sum(1 for item in results if item["status"] == "conflict"),
+        "uncertain": sum(1 for item in results if item["status"] == "uncertain"),
+        "needs_review": sum(1 for item in results if item["status"] in {"conflict", "uncertain"}),
+        "skipped": sum(1 for item in results if item["status"] == "skipped"),
+        "failed": sum(1 for item in results if item["status"] == "failed"),
+    }
+    return {
+        "status": "ok" if summary["failed"] == 0 else "partial",
+        "model_id": model_id,
+        "selection": request.selection,
+        "training_scope": request.training_scope,
+        "batch_id": resolved_batch_id,
+        "summary": summary,
+        "results": results,
+    }
+
+
 @app.post("/api/mlflow/candidates/review", dependencies=[Depends(require_admin)])
 def mlflow_candidates_review(request: MlflowCandidateReviewRequest) -> Dict[str, Any]:
     init_feedback_db()
@@ -6549,7 +6993,7 @@ def mlflow_candidates_review(request: MlflowCandidateReviewRequest) -> Dict[str,
     with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
-            f"SELECT id, batch_id, pseudo_label, constructiveness_label, is_locked FROM mlflow_comment_item WHERE id IN ({', '.join(['?'] * len(ids))})",
+            f"SELECT id, batch_id, pseudo_label, constructiveness_label, is_locked, review_reason FROM mlflow_comment_item WHERE id IN ({', '.join(['?'] * len(ids))})",
             tuple(ids),
         ).fetchall()
         if not rows:
@@ -6584,6 +7028,17 @@ def mlflow_candidates_review(request: MlflowCandidateReviewRequest) -> Dict[str,
                 review_provider = None
                 review_model_name = None
             effective_locked = bool(int(row["is_locked"] or 0))
+            current_review_reason = str(row["review_reason"] or "")
+            resolved_review_reason = (
+                f"{current_review_reason}_resolved"
+                if current_review_reason in {"model_conflict", "model_uncertain"}
+                else current_review_reason or None
+            )
+            removed_review_reason = (
+                f"{current_review_reason}_removed"
+                if current_review_reason in {"model_conflict", "model_uncertain"}
+                else current_review_reason or None
+            )
 
             requested_lock_state = lock_state_by_id.get(item_id)
             if requested_lock_state is not None:
@@ -6624,10 +7079,10 @@ def mlflow_candidates_review(request: MlflowCandidateReviewRequest) -> Dict[str,
                     UPDATE mlflow_comment_item
                     SET verification_status = ?, gate_bucket = ?, pseudo_label = ?, constructiveness_label = ?,
                         selected_for_training = ?, training_review_status = ?, label_source = ?, label_confidence = ?,
-                        review_provider = ?, review_model_name = ?, reviewed_at = ?
+                        review_provider = ?, review_model_name = ?, review_reason = ?, reviewed_at = ?
                     WHERE id = ?
                     """,
-                    ("manual_accepted", "accepted", 1, final_constructiveness, 1, review_status, label_source, label_confidence, review_provider, review_model_name, now, item_id),
+                    ("manual_accepted", "accepted", 1, final_constructiveness, 1, review_status, label_source, label_confidence, review_provider, review_model_name, resolved_review_reason, now, item_id),
                 )
             elif action == "include_clean":
                 cursor = conn.execute(
@@ -6635,30 +7090,30 @@ def mlflow_candidates_review(request: MlflowCandidateReviewRequest) -> Dict[str,
                     UPDATE mlflow_comment_item
                     SET verification_status = ?, gate_bucket = ?, pseudo_label = ?, constructiveness_label = ?,
                         selected_for_training = ?, training_review_status = ?, label_source = ?, label_confidence = ?,
-                        review_provider = ?, review_model_name = ?, reviewed_at = ?
+                        review_provider = ?, review_model_name = ?, review_reason = ?, reviewed_at = ?
                     WHERE id = ?
                     """,
-                    ("manual_accepted", "accepted", 0, final_constructiveness, 1, review_status, label_source, label_confidence, review_provider, review_model_name, now, item_id),
+                    ("manual_accepted", "accepted", 0, final_constructiveness, 1, review_status, label_source, label_confidence, review_provider, review_model_name, resolved_review_reason, now, item_id),
                 )
             elif final_label in {0, 1}:
                 cursor = conn.execute(
                     """
                     UPDATE mlflow_comment_item
                     SET verification_status = ?, gate_bucket = ?, pseudo_label = ?, selected_for_training = ?, training_review_status = ?,
-                        label_source = ?, label_confidence = ?, reviewed_at = ?
+                        label_source = ?, label_confidence = ?, review_reason = ?, reviewed_at = ?
                     WHERE id = ?
                     """,
-                    ("manual_rejected", "discarded", final_label, 0, "manual_removed", "manual_override", "high", now, item_id),
+                    ("manual_rejected", "discarded", final_label, 0, "manual_removed", "manual_override", "high", removed_review_reason, now, item_id),
                 )
             else:
                 cursor = conn.execute(
                     """
                     UPDATE mlflow_comment_item
                     SET verification_status = ?, gate_bucket = ?, selected_for_training = ?, training_review_status = ?,
-                        label_source = ?, label_confidence = ?, reviewed_at = ?
+                        label_source = ?, label_confidence = ?, review_reason = ?, reviewed_at = ?
                     WHERE id = ?
                     """,
-                    ("manual_rejected", "discarded", 0, "manual_removed", "manual_rejected_unlabeled", "low", now, item_id),
+                    ("manual_rejected", "discarded", 0, "manual_removed", "manual_rejected_unlabeled", "low", removed_review_reason, now, item_id),
                 )
             updated += int(cursor.rowcount or 0)
 
@@ -6744,50 +7199,82 @@ def mlflow_training_preview(
 ) -> Dict[str, Any]:
     init_feedback_db()
     resolved_batch_id: Optional[str] = None
+    visibility_clause = (
+        "((item.gate_bucket = 'accepted' AND COALESCE(item.selected_for_training, 1) = 1) "
+        "OR (item.gate_bucket = 'candidate' AND item.verification_status = 'unverified' "
+        "AND item.review_reason IN ('model_conflict', 'model_uncertain')))"
+    )
+    where_parts = [visibility_clause]
     params: List[Any] = []
-    where_parts = ["gate_bucket = 'accepted'", "COALESCE(selected_for_training, 1) = 1"]
+    scope_parts: List[str] = []
+    scope_params: List[Any] = []
     if scope == "batch":
         resolved_batch_id = resolve_mlflow_batch_id(batch_id, strict=strict_batch)
-        where_parts.insert(0, "batch_id = ?")
-        params.append(resolved_batch_id)
+        scope_clause = (
+            "(item.batch_id = ? OR EXISTS (SELECT 1 FROM mlflow_comment_prediction AS scoped_prediction "
+            "WHERE scoped_prediction.sample_item_id = item.id AND scoped_prediction.batch_id = ?))"
+        )
+        where_parts.insert(0, scope_clause)
+        params.extend([resolved_batch_id, resolved_batch_id])
+        scope_parts.append(scope_clause)
+        scope_params.extend([resolved_batch_id, resolved_batch_id])
     if label_filter == "toxic":
-        where_parts.append("pseudo_label = 1")
+        where_parts.append("item.pseudo_label = 1")
     elif label_filter == "clean":
-        where_parts.append("pseudo_label = 0")
+        where_parts.append("item.pseudo_label = 0")
     if constructiveness_filter == "included":
-        where_parts.append("constructiveness_label IN (0, 1)")
+        where_parts.append("item.constructiveness_label IN (0, 1)")
     elif constructiveness_filter == "masked":
-        where_parts.append("constructiveness_label IS NULL")
+        where_parts.append("item.constructiveness_label IS NULL")
 
     where_sql = " AND ".join(where_parts)
+    scope_sql = " AND ".join(scope_parts) if scope_parts else "1 = 1"
     offset = (page - 1) * page_size
 
     with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
-        total = int(conn.execute(f"SELECT COUNT(1) FROM mlflow_comment_item WHERE {where_sql}", tuple(params)).fetchone()[0])
+        total = int(
+            conn.execute(
+                f"SELECT COUNT(1) FROM mlflow_comment_item AS item WHERE {where_sql}",
+                tuple(params),
+            ).fetchone()[0]
+        )
         rows = conn.execute(
             f"""
-            SELECT id, batch_id, url, url_hash, segment_id, domain_category, text, score,
-                   pseudo_label, constructiveness_score, constructiveness_label, constructiveness_confidence,
-                   selected_for_training, training_review_status, is_locked, gate_bucket, verification_status,
-                   segment_hash, context_segment_hash, html_tag, seg_threshold_used,
-                   label_source, label_confidence, review_provider, review_model_name,
-                   source_type, source_row_id, created_at, reviewed_at
-            FROM mlflow_comment_item
+            SELECT item.id, item.batch_id, item.url, item.url_hash, item.segment_id, item.domain_category, item.text, item.score,
+                   item.pseudo_label, item.constructiveness_score, item.constructiveness_label, item.constructiveness_confidence,
+                   item.selected_for_training, item.training_review_status, item.is_locked, item.gate_bucket, item.verification_status,
+                   item.segment_hash, item.context_segment_hash, item.html_tag, item.seg_threshold_used,
+                   item.label_source, item.label_confidence, item.review_provider, item.review_model_name,
+                   item.review_reason, item.source_type, item.source_row_id, item.created_at, item.reviewed_at
+            FROM mlflow_comment_item AS item
             WHERE {where_sql}
-            ORDER BY gate_bucket ASC, selected_for_training DESC, id DESC
+            ORDER BY item.gate_bucket ASC, item.selected_for_training DESC, item.id DESC
             LIMIT ? OFFSET ?
             """,
             tuple([*params, page_size, offset]),
         ).fetchall()
         all_rows = conn.execute(
             f"""
-            SELECT id, pseudo_label, constructiveness_label, selected_for_training, gate_bucket, training_review_status, is_locked
-            FROM mlflow_comment_item
+            SELECT item.id, item.pseudo_label, item.constructiveness_label, item.selected_for_training,
+                   item.gate_bucket, item.verification_status, item.training_review_status,
+                   item.is_locked, item.review_reason
+            FROM mlflow_comment_item AS item
             WHERE {where_sql}
             """,
             tuple(params),
         ).fetchall()
+        removed_count = int(
+            conn.execute(
+                f"""
+                SELECT COUNT(1) FROM mlflow_comment_item AS item
+                WHERE {scope_sql}
+                  AND (item.gate_bucket = 'discarded' OR item.training_review_status = 'manual_removed')
+                """,
+                tuple(scope_params),
+            ).fetchone()[0]
+        )
+        items = attach_mlflow_prediction_history(conn, [dict(row) for row in rows])
 
     selected_rows = [
         row for row in all_rows
@@ -6803,7 +7290,7 @@ def mlflow_training_preview(
     return {
         "scope": scope,
         "batch_id": resolved_batch_id,
-        "items": [dict(row) for row in rows],
+        "items": items,
         "total": total,
         "page": page,
         "page_size": page_size,
@@ -6812,7 +7299,23 @@ def mlflow_training_preview(
             "selected_toxic": toxic_selected,
             "selected_clean": clean_selected,
             "candidate": sum(1 for row in all_rows if str(row["gate_bucket"] or "") == "candidate"),
-            "removed": sum(1 for row in all_rows if str(row["training_review_status"] or "") == "manual_removed"),
+            "auto_eligible": sum(
+                1
+                for row in selected_rows
+                if str(row["verification_status"] or "") == "auto_accepted"
+            ),
+            "requires_human_review": sum(
+                1
+                for row in all_rows
+                if str(row["review_reason"] or "") in {"model_conflict", "model_uncertain"}
+            ),
+            "model_conflicts": sum(
+                1 for row in all_rows if str(row["review_reason"] or "") == "model_conflict"
+            ),
+            "model_uncertain": sum(
+                1 for row in all_rows if str(row["review_reason"] or "") == "model_uncertain"
+            ),
+            "removed": removed_count,
         },
         "balance": {
             "strategy": "balanced_50_50",
@@ -6890,7 +7393,7 @@ def mlflow_training_preview_review(request: MlflowTrainingPreviewReviewRequest) 
     with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
         existing = conn.execute(
-            f"SELECT id, is_locked, training_review_status FROM mlflow_comment_item WHERE id IN ({', '.join(['?'] * len(ids))})",
+            f"SELECT id, is_locked, training_review_status, review_reason FROM mlflow_comment_item WHERE id IN ({', '.join(['?'] * len(ids))})",
             tuple(ids),
         ).fetchall()
         if not existing:
@@ -6903,6 +7406,7 @@ def mlflow_training_preview_review(request: MlflowTrainingPreviewReviewRequest) 
             existing_row = existing_by_id.get(item.id)
             current_locked = bool(int(existing_row["is_locked"] or 0)) if existing_row is not None else False
             current_review_status = str(existing_row["training_review_status"] or "") if existing_row is not None else ""
+            current_review_reason = str(existing_row["review_reason"] or "") if existing_row is not None else ""
             target_locked = item.lock_state if item.lock_state is not None else current_locked
             if item.selected_for_training is False and target_locked:
                 skipped_locked_ids.append(item.id)
@@ -6927,6 +7431,7 @@ def mlflow_training_preview_review(request: MlflowTrainingPreviewReviewRequest) 
                     "label_confidence = ?",
                     "review_provider = ?",
                     "review_model_name = ?",
+                    "review_reason = ?",
                 ])
                 source = (item.label_source or "manual_override").strip() or "manual_override"
                 confidence = (item.label_confidence or "high").strip() or "high"
@@ -6945,6 +7450,9 @@ def mlflow_training_preview_review(request: MlflowTrainingPreviewReviewRequest) 
                     confidence[:32],
                     review_provider,
                     review_model_name,
+                    f"{current_review_reason}_resolved"
+                    if current_review_reason in {"model_conflict", "model_uncertain"}
+                    else current_review_reason or None,
                 ])
                 if not item.reviewed_by_gemini:
                     next_review_status = "manual_approved"
@@ -7324,6 +7832,7 @@ KAGGLE_STAGES = [
 
 
 KAGGLE_ARTIFACT_ROOT = (BASE_DIR / ".runtime" / "kaggle_real_jobs").resolve()
+MODEL_REGISTRY_ARTIFACT_ROOT = (BASE_DIR / ".runtime" / "model_registry").resolve()
 
 
 def _kaggle_artifact_download_url(run_id: str, artifact_uri: Optional[str]) -> Optional[str]:
@@ -7364,6 +7873,49 @@ def _resolve_kaggle_artifact_path(artifact_uri: Optional[str]) -> Path:
     if not resolved.exists() or not resolved.is_file():
         raise HTTPException(status_code=404, detail=f"Kaggle artifact file not found: {resolved.name}")
     return resolved
+
+
+def _registry_model_id(model_family: str, run_id: str) -> str:
+    return f"{model_family}/{_sanitize_import_model_name(run_id)}"
+
+
+def _resolve_registry_artifact_path(artifact_uri: Optional[str]) -> Path:
+    raw = str(artifact_uri or "").strip()
+    if not raw:
+        raise HTTPException(status_code=404, detail="Registry artifact is not available")
+    if raw.lower().startswith("file://"):
+        parsed = urllib.parse.urlparse(raw)
+        candidate = Path(urllib.request.url2pathname(f"{parsed.netloc}{parsed.path}")) if parsed.netloc else Path(urllib.request.url2pathname(parsed.path))
+    else:
+        candidate = Path(raw)
+        if not candidate.is_absolute():
+            candidate = BASE_DIR / candidate
+    resolved = candidate.expanduser().resolve()
+    try:
+        resolved.relative_to(MODEL_REGISTRY_ARTIFACT_ROOT)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid registry artifact path") from exc
+    if not resolved.is_file():
+        raise HTTPException(status_code=404, detail=f"Registry artifact file not found: {resolved.name}")
+    return resolved
+
+
+def _copy_registry_artifact(source: Path, model_family: str, run_id: str, checksum: str) -> Path:
+    target_dir = (MODEL_REGISTRY_ARTIFACT_ROOT / model_family / _sanitize_import_model_name(run_id)).resolve()
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / "artifact.zip"
+    if target.is_file() and hmac.compare_digest(_sha256_file(target), checksum):
+        return target
+    staging = target_dir / f".artifact-{uuid.uuid4().hex}.tmp"
+    try:
+        shutil.copy2(source, staging)
+        if not hmac.compare_digest(_sha256_file(staging), checksum):
+            raise HTTPException(status_code=409, detail="Registry artifact checksum changed while copying")
+        staging.replace(target)
+    finally:
+        if staging.exists():
+            staging.unlink(missing_ok=True)
+    return target
 
 
 def _coerce_numeric_metric_map(value: Any) -> Dict[str, float]:
@@ -7688,6 +8240,31 @@ def _automation_parse_timestamp(value: Any) -> Optional[datetime]:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
+def _repair_dry_run_checkpoint_if_safe(conn: sqlite3.Connection, model_family: str) -> bool:
+    """Restore the old dry-run-only baseline once; never undo a real automation run."""
+    state = conn.execute("SELECT last_run_id, active_run_id FROM mlflow_automation_state WHERE model_family = ?", (model_family,)).fetchone()
+    if not state or state[1] or not state[0]:
+        return False
+    last_run_id = str(state[0])
+    dry_event = conn.execute(
+        "SELECT 1 FROM mlflow_automation_event WHERE model_family = ? AND action = 'train_started' AND source_run_id = ? AND status = 'dry_run'",
+        (model_family, last_run_id),
+    ).fetchone()
+    real_event = conn.execute(
+        "SELECT 1 FROM mlflow_automation_event WHERE model_family = ? AND action = 'train_started' AND status NOT IN ('dry_run', 'failed') LIMIT 1",
+        (model_family,),
+    ).fetchone()
+    if not dry_event or real_event:
+        return False
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        "UPDATE mlflow_automation_state SET last_triggered_eligible_count = 0, last_triggered_at = NULL, last_run_id = NULL, updated_at = ? WHERE model_family = ?",
+        (now, model_family),
+    )
+    _automation_record_event(model_family, "dry_run_checkpoint_restored", "repaired", source_run_id=last_run_id, detail="Dry-run-only checkpoint restored; no real automation run exists.", conn=conn)
+    return True
+
+
 def _automation_state_snapshot(model_family: str) -> Dict[str, Any]:
     init_feedback_db()
     policy = _automation_policy(model_family)
@@ -7704,6 +8281,8 @@ def _automation_state_snapshot(model_family: str) -> Dict[str, Any]:
         state = conn.execute(
             "SELECT * FROM mlflow_automation_state WHERE model_family = ?", (model_family,)
         ).fetchone()
+        if _repair_dry_run_checkpoint_if_safe(conn, model_family):
+            state = conn.execute("SELECT * FROM mlflow_automation_state WHERE model_family = ?", (model_family,)).fetchone()
         eligible_count = _automation_eligible_count(conn)
         conn.commit()
 
@@ -7750,6 +8329,8 @@ def _claim_automation_cycle(model_family: str, cause: str) -> Dict[str, Any]:
         state = conn.execute(
             "SELECT * FROM mlflow_automation_state WHERE model_family = ?", (model_family,)
         ).fetchone()
+        if _repair_dry_run_checkpoint_if_safe(conn, model_family):
+            state = conn.execute("SELECT * FROM mlflow_automation_state WHERE model_family = ?", (model_family,)).fetchone()
         eligible_count = _automation_eligible_count(conn)
         state_payload = dict(state) if state else {}
         new_rows = max(0, eligible_count - int(state_payload.get("last_triggered_eligible_count") or 0))
@@ -7807,7 +8388,7 @@ def _claim_automation_cycle(model_family: str, cause: str) -> Dict[str, Any]:
             "cycle_claimed",
             "scheduled",
             eligible_count=eligible_count,
-            detail=f"cause={cause}; mode={policy['mode']}; dry_run={policy['dry_run']}",
+            detail=f"cause={cause}; mode={policy['mode']}; dry_run={policy['dry_run']}; new_eligible_rows={new_rows}; minimum={policy['min_new_rows']}",
             conn=conn,
         )
         conn.commit()
@@ -7903,30 +8484,25 @@ def _run_automation_cycle(model_family: str, cause: str) -> Dict[str, Any]:
         run_id = str(result["run_id"])
         terminal = str(result.get("status") or "").lower() in {"dry_run", "failed"}
         with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
-            conn.execute(
-                """
-                UPDATE mlflow_automation_state
-                SET last_triggered_eligible_count = ?, last_triggered_at = ?, last_run_id = ?,
-                    active_run_id = ?, updated_at = ?
-                WHERE model_family = ? AND active_run_id = ?
-                """,
-                (
-                    claim["eligible_count"],
-                    datetime.now(timezone.utc).isoformat(),
-                    run_id,
-                    None if terminal else run_id,
-                    datetime.now(timezone.utc).isoformat(),
-                    model_family,
-                    claim_id,
-                ),
-            )
+            if policy["dry_run"]:
+                conn.execute("UPDATE mlflow_automation_state SET active_run_id = NULL, updated_at = ? WHERE model_family = ? AND active_run_id = ?", (datetime.now(timezone.utc).isoformat(), model_family, claim_id))
+            else:
+                conn.execute(
+                    """
+                    UPDATE mlflow_automation_state
+                    SET last_triggered_eligible_count = ?, last_triggered_at = ?, last_run_id = ?,
+                        active_run_id = ?, updated_at = ?
+                    WHERE model_family = ? AND active_run_id = ?
+                    """,
+                    (claim["eligible_count"], datetime.now(timezone.utc).isoformat(), run_id, None if terminal else run_id, datetime.now(timezone.utc).isoformat(), model_family, claim_id),
+                )
             _automation_record_event(
                 model_family,
                 "train_started",
                 "dry_run" if terminal else "running",
                 source_run_id=run_id,
                 eligible_count=claim["eligible_count"],
-                detail=f"cause={cause}; mode={policy['mode']}",
+                detail=f"cause={cause}; mode={policy['mode']}; new_eligible_rows={claim['new_eligible_rows']}; minimum={policy['min_new_rows']}; bundle={result.get('bundle_path') or '-'}",
                 conn=conn,
             )
             conn.commit()
@@ -8370,6 +8946,10 @@ def mlflow_kaggle_status(run_id: str = Query(..., min_length=1)) -> Dict[str, An
             kaggle_metrics,
             notes="Kaggle retrain artifact",
         )
+        try:
+            _register_kaggle_candidate(str(row["run_id"]))
+        except Exception:
+            logger.exception("Model Registry candidate registration failed for %s", row["run_id"])
     if row["status"] in {"completed", "failed", "dry_run"}:
         try:
             _automation_handle_terminal_run(str(row["run_id"]))
@@ -8405,6 +8985,7 @@ def mlflow_kaggle_status(run_id: str = Query(..., min_length=1)) -> Dict[str, An
         "error_message": row["error_message"],
         "run_mode": run_mode,
         "status_source": status_source,
+        "trigger_source": "automation" if _automation_run_was_started(str(row["run_id"])) else "manual",
         "stage_timestamps": stage_timestamps,
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
@@ -8424,6 +9005,119 @@ def mlflow_kaggle_artifact_download(run_id: str = Query(..., min_length=1)) -> F
 
     resolved = _resolve_kaggle_artifact_path(str(row["artifact_uri"] or "").strip())
     return FileResponse(path=str(resolved), filename=resolved.name, media_type="application/zip")
+
+
+def _registry_row_payload(row: sqlite3.Row) -> Dict[str, Any]:
+    artifact_available = False
+    try:
+        _resolve_registry_artifact_path(row["artifact_uri"])
+        artifact_available = True
+    except HTTPException:
+        pass
+    try:
+        metrics = json.loads(row["metrics_json"]) if row["metrics_json"] else {}
+    except json.JSONDecodeError:
+        metrics = {}
+    return {
+        "model_id": row["model_id"],
+        "source_run_id": row["source_run_id"],
+        "model_family": row["model_family"],
+        "model_kind": row["model_kind"],
+        "training_mode": row["training_mode"],
+        "base_model": row["base_model"],
+        "status": row["status"],
+        "artifact_available": artifact_available,
+        "artifact_checksum": row["artifact_checksum"],
+        "metrics": _normalize_saved_model_metrics(metrics),
+        "created_at": row["created_at"],
+        "promoted_at": row["promoted_at"],
+    }
+
+
+@app.get("/api/mlflow/registry", dependencies=[Depends(require_admin)])
+def mlflow_model_registry(include_deleted: bool = Query(False)) -> Dict[str, Any]:
+    _backfill_model_registry_candidates()
+    with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        query = "SELECT * FROM mlflow_model_version"
+        if not include_deleted:
+            query += " WHERE status <> 'deleted'"
+        rows = conn.execute(query + " ORDER BY created_at DESC").fetchall()
+        active_rows = conn.execute("SELECT model_family, active_model_id FROM mlflow_production_slot").fetchall()
+    active = {str(row["model_family"]): str(row["active_model_id"]) for row in active_rows}
+    items = []
+    for row in rows:
+        item = _registry_row_payload(row)
+        item["is_current_production"] = active.get(str(row["model_family"])) == str(row["model_id"])
+        items.append(item)
+    return {"items": items, "backfilled": True}
+
+
+@app.get("/api/mlflow/registry/detail", dependencies=[Depends(require_admin)])
+def mlflow_model_registry_detail(model_id: str = Query(..., min_length=3)) -> Dict[str, Any]:
+    with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM mlflow_model_version WHERE model_id = ?", (model_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Registry model not found")
+        events = conn.execute(
+            "SELECT action, source_run_id, from_model_id, to_model_id, status, detail, created_at FROM mlflow_promotion_event WHERE to_model_id = ? OR from_model_id = ? ORDER BY id DESC",
+            (model_id, model_id),
+        ).fetchall()
+    payload = _registry_row_payload(row)
+    payload.update({
+        "artifact_uri": row["artifact_uri"],
+        "artifact_path": row["artifact_path"],
+        "bundle_path": row["bundle_path"],
+        "bundle_checksum": row["bundle_checksum"],
+        "test_fingerprint": row["test_fingerprint"],
+        "promotion_history": [dict(event) for event in events],
+    })
+    return payload
+
+
+@app.get("/api/mlflow/registry/download", dependencies=[Depends(require_admin)])
+def mlflow_model_registry_download(model_id: str = Query(..., min_length=3)) -> FileResponse:
+    with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+        row = conn.execute("SELECT status, artifact_uri FROM mlflow_model_version WHERE model_id = ?", (model_id,)).fetchone()
+    if not row or str(row[0]) == "deleted":
+        raise HTTPException(status_code=404, detail="Registry model is unavailable")
+    artifact = _resolve_registry_artifact_path(row[1])
+    return FileResponse(path=str(artifact), filename=f"{_sanitize_import_model_name(model_id)}.zip", media_type="application/zip")
+
+
+@app.post("/api/mlflow/registry/archive", dependencies=[Depends(require_admin)])
+def mlflow_model_registry_archive(request: MlflowRegistryLifecycleRequest) -> Dict[str, Any]:
+    with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+        row = conn.execute("SELECT status FROM mlflow_model_version WHERE model_id = ?", (request.model_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Registry model not found")
+        if str(row[0]) == "production":
+            raise HTTPException(status_code=409, detail="Production model cannot be archived")
+        if str(row[0]) == "deleted":
+            raise HTTPException(status_code=409, detail="Deleted registry model cannot be archived")
+        conn.execute("UPDATE mlflow_model_version SET status = 'archived' WHERE model_id = ?", (request.model_id,))
+        conn.commit()
+    return {"status": "archived", "model_id": request.model_id}
+
+
+@app.post("/api/mlflow/registry/delete", dependencies=[Depends(require_admin)])
+def mlflow_model_registry_delete(request: MlflowRegistryLifecycleRequest) -> Dict[str, Any]:
+    if not request.confirm:
+        raise HTTPException(status_code=400, detail="Explicit confirmation is required to delete a registry model")
+    with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+        row = conn.execute("SELECT status FROM mlflow_model_version WHERE model_id = ?", (request.model_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Registry model not found")
+        referenced = conn.execute(
+            "SELECT 1 FROM mlflow_production_slot WHERE active_model_id = ? OR previous_model_id = ? LIMIT 1",
+            (request.model_id, request.model_id),
+        ).fetchone()
+        if str(row[0]) == "production" or referenced:
+            raise HTTPException(status_code=409, detail="A production-slot model cannot be deleted")
+        conn.execute("UPDATE mlflow_model_version SET status = 'deleted' WHERE model_id = ?", (request.model_id,))
+        conn.commit()
+    return {"status": "deleted", "model_id": request.model_id, "artifact_deleted": False, "training_run_deleted": False}
 
 
 def _model_family_from_kind(model_kind: Optional[str]) -> str:
@@ -8563,6 +9257,83 @@ def _load_kaggle_candidate(run_id: str) -> Optional[Dict[str, Any]]:
         "test_fingerprint": test_fingerprint,
         "test_size": test_size,
     }
+
+
+def _register_kaggle_candidate(run_id: str) -> Optional[Dict[str, Any]]:
+    """Durably register one completed, verified Kaggle artifact without deploying it."""
+    candidate = _load_kaggle_candidate(run_id)
+    if not candidate:
+        return None
+    row = candidate["row"]
+    expected = str(candidate.get("artifact_expected_checksum") or "").lower()
+    actual = str(candidate.get("artifact_actual_checksum") or "").lower()
+    artifact_path = candidate.get("artifact_path")
+    if (
+        str(row["status"] or "").lower() != "completed"
+        or not isinstance(artifact_path, Path)
+        or not expected
+        or not actual
+        or not hmac.compare_digest(expected, actual)
+        or not candidate.get("contract_ok")
+    ):
+        return None
+    model_family = str(candidate["model_family"])
+    stable_artifact = _copy_registry_artifact(artifact_path, model_family, run_id, actual)
+    runtime_meta = _do_extract_runtime_metadata(_do_load_logs(row))
+    model_id = _registry_model_id(model_family, run_id)
+    metrics_json = json.dumps(candidate.get("metrics") or {}, ensure_ascii=False)
+    now = datetime.now(timezone.utc).isoformat()
+    with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+        existing = conn.execute(
+            "SELECT status, artifact_path FROM mlflow_model_version WHERE source_run_id = ?",
+            (run_id,),
+        ).fetchone()
+        existing_status = str(existing[0]) if existing else "candidate"
+        lifecycle = existing_status if existing_status in {"production", "archived", "deleted"} else "candidate"
+        stored_path = str(existing[1]) if existing and existing_status == "production" else str(stable_artifact)
+        conn.execute(
+            """
+            INSERT INTO mlflow_model_version (
+                model_family, model_id, source_run_id, artifact_path, artifact_checksum,
+                bundle_checksum, test_fingerprint, metrics_json, status, created_at,
+                model_kind, training_mode, base_model, artifact_uri, bundle_path
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(source_run_id) DO UPDATE SET
+                artifact_checksum = excluded.artifact_checksum,
+                bundle_checksum = excluded.bundle_checksum,
+                test_fingerprint = excluded.test_fingerprint,
+                metrics_json = excluded.metrics_json,
+                model_kind = excluded.model_kind,
+                training_mode = excluded.training_mode,
+                base_model = excluded.base_model,
+                artifact_uri = excluded.artifact_uri,
+                bundle_path = excluded.bundle_path
+            """,
+            (
+                model_family, model_id, run_id, stored_path, actual,
+                candidate.get("bundle_checksum"), candidate.get("test_fingerprint"), metrics_json, lifecycle, now,
+                candidate.get("model_kind"), candidate.get("training_mode"), runtime_meta.get("base_model"),
+                f"file://{stable_artifact.as_posix()}", row["bundle_path"],
+            ),
+        )
+        conn.commit()
+    return {"model_id": model_id, "artifact_path": str(stable_artifact), "status": lifecycle}
+
+
+def _backfill_model_registry_candidates() -> int:
+    init_feedback_db()
+    with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+        rows = conn.execute(
+            "SELECT run_id FROM mlflow_do_run WHERE status = 'completed' AND artifact_uri IS NOT NULL AND artifact_uri <> ''"
+        ).fetchall()
+    registered = 0
+    for row in rows:
+        try:
+            if _register_kaggle_candidate(str(row[0])):
+                registered += 1
+        except (HTTPException, OSError):
+            continue
+    return registered
 
 
 def _production_snapshot(model_family: str) -> Dict[str, Any]:
@@ -9376,6 +10147,17 @@ def analyze(request: AnalyzeRequest) -> Dict[str, Any]:
         job_id = uuid.uuid4().hex
         out_dir = BASE_DIR / "data" / "processed" / f"job_{job_id}"
         out_dir.mkdir(parents=True, exist_ok=True)
+        analysis_started_at = time.perf_counter()
+
+        def log_analysis_stage(stage: str, **fields: Any) -> None:
+            detail = " ".join(f"{key}={value}" for key, value in fields.items())
+            logger.info(
+                "[analysis:%s] %s elapsed_ms=%d%s",
+                job_id,
+                stage,
+                int((time.perf_counter() - analysis_started_at) * 1000),
+                f" {detail}" if detail else "",
+            )
 
         model_root = resolve_model_root()
         try:
@@ -9427,6 +10209,7 @@ def analyze(request: AnalyzeRequest) -> Dict[str, Any]:
 
         logger.info("Job %s: start analyze for %s urls", job_id, len(urls))
         logger.info("Job %s: using model '%s' (%s) from %s", job_id, model_id, model_type, model_path)
+        log_analysis_stage("crawl:start", urls=len(urls))
 
         crawl_results = crawl_urls(
             urls,
@@ -9434,6 +10217,11 @@ def analyze(request: AnalyzeRequest) -> Dict[str, Any]:
             timeout=options.crawl_timeout_sec,
             max_load_more=options.max_load_more_clicks,
             max_comments_per_url=options.max_comments_per_url,
+        )
+        log_analysis_stage(
+            "crawl:done",
+            ok_urls=sum(1 for result in crawl_results if result.get("status") == "ok"),
+            segments=sum(int(result.get("num_segments") or 0) for result in crawl_results),
         )
 
         for r in crawl_results:
@@ -9466,6 +10254,7 @@ def analyze(request: AnalyzeRequest) -> Dict[str, Any]:
 
         if ok_hashes:
             logger.info("Job %s: running inference on %s crawled urls", job_id, len(ok_hashes))
+            log_analysis_stage("inference:start", model=model_id, urls=len(ok_hashes))
             infer_crawled(
                 model_path=str(model_path),
                 model_type=model_type,
@@ -9484,6 +10273,7 @@ def analyze(request: AnalyzeRequest) -> Dict[str, Any]:
                 learned_feedback=load_learned_segments(),
                 html_dir=str(DATA_DIR),
             )
+            log_analysis_stage("inference:done", model=model_id)
         else:
             logger.warning("Job %s: no successful crawls to run inference", job_id)
 
@@ -9506,6 +10296,7 @@ def analyze(request: AnalyzeRequest) -> Dict[str, Any]:
             seg_by_hash,
             seg_by_url,
         )
+        log_analysis_stage("aggregate:done", results=len(response_results))
 
         mlflow_collection: Dict[str, Any] = {
             "enabled": bool(options.collect_for_mlflow),
@@ -9520,6 +10311,7 @@ def analyze(request: AnalyzeRequest) -> Dict[str, Any]:
             "counts": {"accepted": 0, "candidate": 0, "discarded": 0, "total": 0},
         }
         if options.collect_for_mlflow:
+            log_analysis_stage("persistence:start")
             collection_created_at = datetime.utcnow().isoformat() + "Z"
             collection_batch_id = f"mlf_auto_{uuid.uuid4().hex[:12]}"
             mlflow_options_json = json.dumps(
@@ -9550,8 +10342,10 @@ def analyze(request: AnalyzeRequest) -> Dict[str, Any]:
                 created_at=collection_created_at,
                 batch_created=False,
             )
+            log_analysis_stage("persistence:done", inserted=mlflow_collection.get("inserted", 0))
 
         logger.info("Job %s: completed", job_id)
+        log_analysis_stage("response:done")
         production_manifest = _load_model_json(model_path, "production_manifest.json")
         family_production_model = get_family_default_model_id(model_root, model_type)
         return {

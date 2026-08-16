@@ -88,6 +88,15 @@ export function SystemSettingsPage({ adminToken, onAdminUnauthorized }: SystemSe
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const activeGroup = groups.find((group) => group.id === activeTab) || groups[0];
+  const automationDryRunSetting = groups
+    .find((group) => group.id === "mlflow_automation")
+    ?.settings.find((setting) => setting.key === "MLFLOW_AUTOMATION_DRY_RUN");
+  const automationDryRunEffective = automationDryRunSetting
+    ? String(automationDryRunSetting.value ?? automationDryRunSetting.default ?? "false").toLowerCase() === "true"
+    : false;
+  const automationDryRunDraft = automationDryRunSetting
+    ? Boolean(drafts[automationDryRunSetting.key])
+    : automationDryRunEffective;
 
   const authHeaders = useMemo(
     () => ({
@@ -386,11 +395,41 @@ export function SystemSettingsPage({ adminToken, onAdminUnauthorized }: SystemSe
             </div>
 
             {group.id === "mlflow_automation" && (
-              <Card className="border-amber-500/40 bg-amber-500/10 p-4 text-sm text-muted-foreground">
-                Chỉ bật công tắc toàn cục khi Kaggle bundle endpoint đã public và kiểm tra preflight đạt. `train_only`
-                tạo candidate để admin duyệt; `full_auto` chỉ promote candidate do automation tạo và đã qua production gate.
-                Dữ liệu mới vẫn phải vượt ngưỡng số dòng và cooldown bên dưới.
-              </Card>
+              <>
+                <Card className="border-amber-500/40 bg-amber-500/10 p-4 text-sm text-muted-foreground">
+                  Chỉ bật công tắc toàn cục khi Kaggle bundle endpoint đã public và kiểm tra preflight đạt. `train_only`
+                  tạo candidate để admin duyệt; `full_auto` chỉ promote candidate do automation tạo và đã qua production gate.
+                  Dữ liệu mới vẫn phải vượt ngưỡng số dòng và cooldown bên dưới.
+                </Card>
+                {automationDryRunSetting && (
+                  <Card className="border-primary/30 bg-primary/5 p-4">
+                    <div className="flex flex-wrap items-start justify-between gap-4">
+                      <div className="space-y-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <p className="font-medium text-foreground">Dry run</p>
+                          <Badge variant={sourceVariant(automationDryRunSetting.source)}>{automationDryRunSetting.source}</Badge>
+                          {dirtyKeys.has(automationDryRunSetting.key) && <Badge variant="outline">Unsaved</Badge>}
+                        </div>
+                        <p className="font-mono text-xs text-muted-foreground">MLFLOW_AUTOMATION_DRY_RUN</p>
+                        <p className="text-sm text-muted-foreground">When enabled, automation validates and prepares the bundle but does not submit a real Kaggle job.</p>
+                        <p className="text-xs text-muted-foreground">
+                          Effective: <b>{automationDryRunEffective ? "On" : "Off"}</b>
+                          {dirtyKeys.has(automationDryRunSetting.key) && <> · Will save: <b>{automationDryRunDraft ? "On" : "Off"}</b></>}
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-medium text-foreground">{automationDryRunDraft ? "On" : "Off"}</span>
+                        <Switch
+                          checked={automationDryRunDraft}
+                          onCheckedChange={(checked) => markDraft(automationDryRunSetting.key, checked)}
+                          disabled={saving}
+                          aria-label="Toggle automation dry run"
+                        />
+                      </div>
+                    </div>
+                  </Card>
+                )}
+              </>
             )}
 
             {group.id === "mlflow_dataset" && (
@@ -410,7 +449,7 @@ export function SystemSettingsPage({ adminToken, onAdminUnauthorized }: SystemSe
             )}
 
             <div className="grid gap-3">
-              {group.settings.map((setting) => (
+              {group.settings.filter((setting) => setting.key !== "MLFLOW_AUTOMATION_DRY_RUN").map((setting) => (
                 <Card key={setting.key} className="border bg-card p-4 shadow-sm">
                   <div className="grid gap-3 lg:grid-cols-[minmax(220px,0.8fr)_minmax(280px,1.2fr)] lg:items-start">
                     <div className="space-y-2">

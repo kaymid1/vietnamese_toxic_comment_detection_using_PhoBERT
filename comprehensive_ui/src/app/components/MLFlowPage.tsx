@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent, type ComponentProps, type MouseEvent, type ReactNode } from "react";
 import { AnimatePresence, motion } from "motion/react";
-import { BarChart3, Check, CircleHelp, EyeOff, GripHorizontal, History, Lock, MessageCircle, MoreHorizontal, Plus, RotateCcw, Sparkles, ThumbsUp, Unlock } from "lucide-react";
+import { AlertTriangle, BarChart3, Check, CircleHelp, EyeOff, GripHorizontal, History, Lock, MessageCircle, MoreHorizontal, Plus, RefreshCw, RotateCcw, Sparkles, ThumbsUp, Unlock } from "lucide-react";
 import { Bar, BarChart, CartesianGrid, Cell, Legend, Pie, PieChart, ResponsiveContainer, Tooltip as RechartTooltip, XAxis, YAxis } from "recharts";
 import { toast } from "sonner";
 import { Card } from "@/app/components/ui/card";
@@ -51,6 +51,7 @@ import {
   useMlflowStore,
   type MlflowCandidate,
   type MlflowGeminiReviewSuggestion,
+  type MlflowModelReEvaluationResponse,
   type MlflowPrediction,
   type MlflowUnusedScope,
 } from "../../hooks/useMlflowStore";
@@ -112,6 +113,15 @@ function SectionInfoTooltip({ label, children }: { label: string; children: Reac
   );
 }
 
+function formatInferenceTime(timestamp: string): string {
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return timestamp;
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(date);
+}
+
 function PredictionBadges({ prediction }: { prediction: MlflowPrediction }) {
   const hasPredictedLabel = prediction.predicted_label === 0 || prediction.predicted_label === 1;
   const isLegacyBackfill = prediction.record_origin === "legacy_backfill";
@@ -124,7 +134,7 @@ function PredictionBadges({ prediction }: { prediction: MlflowPrediction }) {
         <Badge variant="outline">Label unavailable</Badge>
       )}
       {prediction.raw_toxicity_score != null && isLegacyBackfill && (
-        <Badge variant="outline">Legacy score {prediction.raw_toxicity_score.toFixed(3)}</Badge>
+        <Badge variant="outline">Toxicity score {prediction.raw_toxicity_score.toFixed(3)}</Badge>
       )}
       {prediction.raw_toxicity_score != null && !isLegacyBackfill && (
         <MlflowBadge presentation={getScorePresentation(prediction.raw_toxicity_score, DEFAULT_MLFLOW_GATE_THRESHOLDS)} />
@@ -135,16 +145,88 @@ function PredictionBadges({ prediction }: { prediction: MlflowPrediction }) {
       {prediction.seg_threshold_used != null && (
         <Badge variant="outline">Threshold {prediction.seg_threshold_used.toFixed(3)}</Badge>
       )}
-      {prediction.created_at && <Badge variant="outline">Observed {prediction.created_at}</Badge>}
-      {isLegacyBackfill && <Badge variant="secondary">Legacy backfill</Badge>}
+      {prediction.created_at && <Badge variant="outline">Inference time: {formatInferenceTime(prediction.created_at)}</Badge>}
+      {isLegacyBackfill && <Badge variant="secondary">Legacy record</Badge>}
+      {prediction.record_origin === "model_re_evaluation" && <Badge variant="secondary">Model re-evaluation</Badge>}
+      {prediction.constructiveness_label != null && (
+        <MlflowBadge presentation={getConstructivenessPresentation(prediction.constructiveness_label)} />
+      )}
       {prediction.agreement_with_human === true && <Badge variant="default">Agreement with human</Badge>}
       {prediction.agreement_with_human === false && <Badge variant="destructive">Disagreement with human</Badge>}
     </div>
   );
 }
 
-function PredictionEvidence({ item }: { item: MlflowCandidate }) {
+function PredictionSummary({ prediction }: { prediction: MlflowPrediction }) {
+  const hasPredictedLabel = prediction.predicted_label === 0 || prediction.predicted_label === 1;
+  return (
+    <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
+      <span className="font-medium text-foreground">{getModelLabel(prediction.model_id)}</span>
+      {hasPredictedLabel ? (
+        <MlflowBadge presentation={getToxicityPresentation(prediction.predicted_label)} />
+      ) : (
+        <Badge variant="outline">Label unavailable</Badge>
+      )}
+      {prediction.raw_toxicity_score != null && (
+        <span className="text-muted-foreground">Toxicity score {prediction.raw_toxicity_score.toFixed(3)}</span>
+      )}
+      {prediction.constructiveness_label != null && (
+        <MlflowBadge presentation={getConstructivenessPresentation(prediction.constructiveness_label)} />
+      )}
+      {prediction.agreement_with_human === true && <Badge variant="default">Agreement with human</Badge>}
+      {prediction.agreement_with_human === false && <Badge variant="destructive">Disagreement with human</Badge>}
+    </div>
+  );
+}
+
+function PredictionDetails({ prediction }: { prediction: MlflowPrediction }) {
+  const isLegacyBackfill = prediction.record_origin === "legacy_backfill";
+  const origin = isLegacyBackfill
+    ? "Legacy record"
+    : prediction.record_origin === "model_re_evaluation"
+      ? "Model re-evaluation"
+      : prediction.record_origin;
+  return (
+    <details className="text-xs text-muted-foreground">
+      <summary className="cursor-pointer font-medium text-foreground">Prediction details</summary>
+      <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 rounded-md bg-muted/35 p-2">
+        {prediction.raw_toxicity_score != null && <><dt>Raw toxicity score</dt><dd>{prediction.raw_toxicity_score.toFixed(3)}</dd></>}
+        {prediction.adjusted_toxicity_score != null && <><dt>Adjusted toxicity score</dt><dd>{prediction.adjusted_toxicity_score.toFixed(3)}</dd></>}
+        {prediction.seg_threshold_used != null && <><dt>Threshold</dt><dd>{prediction.seg_threshold_used.toFixed(3)}</dd></>}
+        {prediction.created_at && <><dt>Inference time</dt><dd>{formatInferenceTime(prediction.created_at)}</dd></>}
+        {origin && <><dt>Origin</dt><dd>{origin}</dd></>}
+      </dl>
+    </details>
+  );
+}
+
+function PredictionEvidence({ item, compact = false }: { item: MlflowCandidate; compact?: boolean }) {
   if (!item.latest_prediction) return null;
+  if (compact) {
+    const previousPredictions = item.previous_predictions ?? [];
+    return (
+      <div className="space-y-2 rounded-md border bg-muted/15 p-3">
+        <div className="space-y-1">
+          <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Latest Prediction</p>
+          <PredictionSummary prediction={item.latest_prediction} />
+          <PredictionDetails prediction={item.latest_prediction} />
+        </div>
+        {previousPredictions.length > 0 && (
+          <details className="border-t pt-2 text-xs">
+            <summary className="cursor-pointer font-medium text-foreground">Previous predictions ({previousPredictions.length})</summary>
+            <div className="mt-2 space-y-3">
+              {previousPredictions.map((prediction) => (
+                <div key={prediction.id} className="space-y-1 rounded-md bg-muted/35 p-2">
+                  <PredictionSummary prediction={prediction} />
+                  <PredictionDetails prediction={prediction} />
+                </div>
+              ))}
+            </div>
+          </details>
+        )}
+      </div>
+    );
+  }
   return (
     <div className="space-y-2 rounded-md border bg-muted/20 p-2">
       <div className="space-y-1">
@@ -163,22 +245,32 @@ function PredictionEvidence({ item }: { item: MlflowCandidate }) {
   );
 }
 
-function HumanReviewEvidence({ item }: { item: MlflowCandidate }) {
+function HumanReviewEvidence({ item, embedded = false }: { item: MlflowCandidate; embedded?: boolean }) {
   const hasVerifiedHumanLabel =
     item.verification_status === "manual_accepted" && (item.human_label === 0 || item.human_label === 1);
+  if (!hasVerifiedHumanLabel && !item.requires_human_review) return null;
+
+  const label = item.human_label === 1 ? "Toxic" : "Clean";
+  const escalationReason = item.review_reason === "model_conflict" ? "Model conflict" : "Model uncertain";
+  const containerClassName = embedded
+    ? "flex min-w-0 items-center gap-1.5 text-xs font-medium"
+    : hasVerifiedHumanLabel
+      ? "flex items-center gap-1.5 rounded-md border border-emerald-200/70 bg-emerald-50/40 p-2 text-xs font-medium dark:border-emerald-900/50 dark:bg-emerald-950/15"
+      : "flex items-center gap-1.5 rounded-md border border-amber-200/70 bg-amber-50/40 p-2 text-xs font-medium dark:border-amber-900/50 dark:bg-amber-950/15";
   return (
-    <div className="space-y-1 rounded-md border border-amber-200/70 bg-amber-50/40 p-2 dark:border-amber-900/50 dark:bg-amber-950/15">
-      <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Human Review</p>
-      <div className="flex flex-wrap items-center gap-1.5 text-xs">
-        {hasVerifiedHumanLabel ? (
-          <>
-            <MlflowBadge presentation={getToxicityPresentation(item.human_label)} />
-            <Badge variant="secondary">Manually verified</Badge>
-          </>
-        ) : (
-          <Badge variant="outline">Not verified</Badge>
-        )}
-      </div>
+    <div className={containerClassName}>
+      {hasVerifiedHumanLabel ? (
+        <>
+          <Check className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" aria-hidden="true" />
+          <span className="text-emerald-800 dark:text-emerald-200">Human verified · {label}</span>
+        </>
+      ) : (
+        <>
+          <AlertTriangle className="h-3.5 w-3.5 text-amber-600 dark:text-amber-400" aria-hidden="true" />
+          <span className="text-amber-800 dark:text-amber-200">Human review required</span>
+          <span className="text-muted-foreground">· {escalationReason}</span>
+        </>
+      )}
     </div>
   );
 }
@@ -234,9 +326,12 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
     crawlHistoryTotal,
     crawlHistoryPage,
     comparePayload,
+    registryModels,
     lastBundlePath,
     doStatus,
     doPreflight,
+    automationStatus,
+    automationStatusError,
     ingest,
     refreshOverview,
     refreshCandidates,
@@ -245,6 +340,7 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
     reviewTrainingPreview,
     geminiReviewTrainingPreview,
     geminiReviewCandidates,
+    reEvaluateWithModel,
     refreshReviewHistory,
     refreshCrawlHistory,
     reviewCandidates,
@@ -255,9 +351,13 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
     triggerDO,
     refreshDOPreflight,
     refreshDOStatus,
+    refreshAutomationStatus,
+    openDORun,
     geminiEvaluateKaggleRun,
     clearDOSession,
     refreshCompare,
+    refreshModelRegistry,
+    updateModelRegistryLifecycle,
     promote,
     rollback,
   } = useMlflowStore({ adminToken, onUnauthorized: onAdminUnauthorized });
@@ -279,6 +379,10 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
   const [geminiReviewing, setGeminiReviewing] = useState(false);
   const [geminiApplying, setGeminiApplying] = useState(false);
   const [bulkPreviewUpdating, setBulkPreviewUpdating] = useState(false);
+  const [modelReEvaluating, setModelReEvaluating] = useState(false);
+  const [reEvaluationModel, setReEvaluationModel] = useState(() => availableModels[0] || "");
+  const [reEvaluationScope, setReEvaluationScope] = useState<"selected" | "all_auto_eligible">("selected");
+  const [lastReEvaluation, setLastReEvaluation] = useState<MlflowModelReEvaluationResponse | null>(null);
   const [crawlHistoryOpen, setCrawlHistoryOpen] = useState(false);
   const [importModelName, setImportModelName] = useState("");
   const [importModelZipFile, setImportModelZipFile] = useState<File | null>(null);
@@ -305,6 +409,7 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
   const [kaggleTriggerPending, setKaggleTriggerPending] = useState(false);
   const [geminiEvaluating, setGeminiEvaluating] = useState(false);
   const prevDoStatusRef = useRef<string>("idle");
+  const announcedAutomationEventRef = useRef<number | null>(null);
   const kaggleTriggerPendingRef = useRef(false);
   const trainingPreviewResizeRef = useRef<{ pointerId: number; startY: number; startHeight: number } | null>(null);
 
@@ -314,8 +419,15 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
     void refreshThresholdStatus(activeBatchId);
     void refreshTrainingPreview(1, "all_batches");
     void refreshCompare();
+    void refreshModelRegistry();
     void refreshDOPreflight();
+    void refreshAutomationStatus();
   }, []);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => void refreshAutomationStatus(), 15000);
+    return () => window.clearInterval(timer);
+  }, [refreshAutomationStatus]);
 
   useEffect(() => {
     const firstSelectable = availableModels.find((model) => !isDeprecatedModel(model)) || availableModels[0] || "";
@@ -327,6 +439,12 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
       setSelectedModel(firstSelectable);
     }
   }, [availableModels, selectedModel]);
+
+  useEffect(() => {
+    if (!reEvaluationModel || !availableModels.includes(reEvaluationModel)) {
+      setReEvaluationModel(availableModels.find((model) => !isDeprecatedModel(model)) || availableModels[0] || "");
+    }
+  }, [availableModels, reEvaluationModel]);
 
   useEffect(() => {
     if (reviewHistoryOpen) void refreshReviewHistory(undefined, historyDecision, 1, "all_batches");
@@ -395,6 +513,13 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
   const availableGeminiSuggestions = Object.values(geminiSuggestions);
   const availableCandidateGeminiSuggestions = Object.values(candidateGeminiSuggestions);
   const visibleTrainingPreviewItems = trainingPreview?.items || [];
+  const selectedAutoEligibleCount = visibleTrainingPreviewItems.filter(
+    (item) =>
+      selectedPreviewIds.includes(item.id) &&
+      item.verification_status === "auto_accepted" &&
+      item.gate_bucket === "accepted" &&
+      Boolean(item.selected_for_training),
+  ).length;
   const toxicityDistribution = useMemo(
     () => [
       { name: "Độc hại", value: trainingPreview?.counts.selected_toxic ?? 0, color: "#ef4444" },
@@ -464,6 +589,14 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
     setSelectedCandidateIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
   };
 
+  const handleCandidateRowToggle = (event: MouseEvent<HTMLDivElement>, id: number) => {
+    const target = event.target as HTMLElement;
+    if (target.closest("button, input, textarea, select, option, a, details, summary, [role='button'], [role='link'], [data-row-interactive]")) {
+      return;
+    }
+    toggleCandidate(id);
+  };
+
   const handleSelectAllCandidates = () => {
     const ids = candidates.map((item) => item.id);
     setSelectedCandidateIds(ids);
@@ -483,14 +616,6 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
 
   const handleUnselectAllPreviewRows = () => {
     setSelectedPreviewIds([]);
-  };
-
-  const handleCandidateRowToggle = (event: MouseEvent<HTMLDivElement>, id: number) => {
-    const target = event.target as HTMLElement;
-    if (target.closest("button, input, textarea, select, option, a")) {
-      return;
-    }
-    toggleCandidate(id);
   };
 
   const handlePreviewRowToggle = (event: MouseEvent<HTMLDivElement>, id: number) => {
@@ -554,6 +679,7 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
       } else {
         toast.success(`Ingest thành công: ${total} segments, ${candidateCount} candidates.`);
       }
+      return true;
     } catch {
       failProgress("mlflow-ingest", { message: "Ingest thất bại. Kiểm tra URL hoặc log backend." });
       setStatusText("Ingest thất bại.");
@@ -561,9 +687,10 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
     }
   };
 
-  const handleBulkReview = async (action: "include_toxic" | "include_clean" | "drop") => {
-    if (selectedCandidateIds.length === 0) return;
-    const selectedItems = candidates.filter((item) => selectedCandidateIds.includes(item.id));
+  const reviewCandidateItems = async (
+    selectedItems: MlflowCandidate[],
+    action: "include_toxic" | "include_clean" | "drop",
+  ) => {
     if (selectedItems.length === 0) return;
 
     try {
@@ -584,7 +711,6 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
                     : undefined,
         })),
       );
-      setSelectedCandidateIds([]);
       void refreshTrainingPreview(1, "all_batches");
       const skippedLocked = payload.skipped_locked || 0;
 
@@ -606,6 +732,67 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
       toast.error("Lưu review vào DB thất bại.");
     }
   };
+
+  const handleBulkReview = async (action: "include_toxic" | "include_clean" | "drop") => {
+    if (selectedCandidateIds.length === 0) return;
+    const selectedItems = candidates.filter((item) => selectedCandidateIds.includes(item.id));
+    if (await reviewCandidateItems(selectedItems, action)) setSelectedCandidateIds([]);
+  };
+
+  const handleModelReEvaluation = async (
+    selection: "selected" | "all_auto_eligible",
+    sampleIds: number[] = [],
+  ) => {
+    if (!reEvaluationModel) {
+      toast.warning("Chọn project model trước khi re-evaluate.");
+      return;
+    }
+    if (selection === "selected" && sampleIds.length === 0) {
+      toast.warning("Chọn ít nhất một sample để re-evaluate.");
+      return;
+    }
+    const requestedCount = selection === "selected" ? sampleIds.length : trainingPreview?.counts.auto_eligible ?? 0;
+    if (selection === "all_auto_eligible") {
+      const confirmed = window.confirm(
+        `Re-evaluate ${requestedCount} auto-labelled training-eligible samples với ${getModelLabel(reEvaluationModel)}?`,
+      );
+      if (!confirmed) return;
+    }
+
+    setModelReEvaluating(true);
+    startProgress("mlflow-model-reevaluation", {
+      title: "Re-evaluate with Model",
+      message: `Đang chạy ${getModelLabel(reEvaluationModel)} trên ${requestedCount} sample...`,
+      value: 12,
+    });
+    try {
+      const payload = await reEvaluateWithModel({
+        modelId: reEvaluationModel,
+        selection,
+        sampleIds,
+        trainingScope: "all_batches",
+      });
+      setLastReEvaluation(payload);
+      const summary = payload.summary;
+      const message = `Evaluated ${summary.evaluated} · Agreement ${summary.agreement} · Conflict ${summary.conflict} · Uncertain ${summary.uncertain} · Skipped ${summary.skipped} · Failed ${summary.failed}`;
+      setStatusText(message);
+      if (summary.failed > 0) {
+        failProgress("mlflow-model-reevaluation", { message });
+        toast.error(message);
+      } else {
+        succeedProgress("mlflow-model-reevaluation", { message });
+        toast.success(message);
+      }
+      setSelectedPreviewIds([]);
+      setSelectedCandidateIds([]);
+    } catch {
+      failProgress("mlflow-model-reevaluation", { message: "Model re-evaluation thất bại." });
+      toast.error("Model re-evaluation thất bại.");
+    } finally {
+      setModelReEvaluating(false);
+    }
+  };
+
   const handleBulkLock = async (lockState: boolean) => {
     if (selectedCandidateIds.length === 0) return;
     const selectedItems = candidates.filter((item) => selectedCandidateIds.includes(item.id));
@@ -1136,8 +1323,12 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
   const doBatchId = (doStatus?.batch_id as string | undefined) || "-";
   const doGpuProfile = (doStatus?.gpu_profile as string | undefined) || "-";
   const doComputeMode = ((doStatus?.compute_mode as string | undefined) || "kaggle").toLowerCase();
-  const doTrainingMode = ((doStatus?.training_mode as string | undefined) || selectedTrainingMode || "retrain").toLowerCase();
-  const doBaseModel = (doStatus?.base_model as string | undefined) || (selectedTrainingMode === "finetune" ? finetuneBaseModel : "");
+  const doTrainingMode = ((doStatus?.training_mode as string | undefined) || "unknown").toLowerCase();
+  const doModelKind = String(doStatus?.model_kind || "").toLowerCase();
+  const doModelLabel = doModelKind === "lr_smoke" ? "TF-IDF + LR" : doModelKind === "phobert" ? "PhoBERT" : "Unknown model";
+  const doAutomationEvent = automationStatus?.events.find((event) => event.source_run_id === doRunId);
+  const doAutomationMode = doAutomationEvent?.detail?.match(/mode=([^;]+)/)?.[1] || null;
+  const doBaseModel = (doStatus?.base_model as string | undefined) || "";
   const doDropletProfile = (doStatus?.droplet_profile as string | undefined) || doGpuProfile;
   const doEtaEstimate = Number(doStatus?.eta_estimate_minutes);
   const doTrainDuration = Number(doStatus?.train_duration_minutes);
@@ -1212,6 +1403,7 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
           : "CÓ TRADE-OFF";
   const doErrorMessage = (doStatus?.error_message as string | undefined) || "";
   const doRunMode = ((doStatus?.run_mode as string | undefined) || "unknown").toLowerCase();
+  const doIsDryRun = doStatusValue === "dry_run";
   const doStatusSource = ((doStatus?.status_source as string | undefined) || "local_db").toLowerCase();
   const doStageTimestamps =
     doStatus?.stage_timestamps && typeof doStatus.stage_timestamps === "object"
@@ -1254,6 +1446,27 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
     void downloadAdminFile(doArtifactDownloadUrl, doArtifactUri.split("/").pop() || "kaggle_exported_model.zip");
   };
 
+  // Terminal/status-refresh entries are bookkeeping. Prefer the event that
+  // actually represents the most recent automation attempt in the summary.
+  const latestAutomationEvent = automationStatus?.events?.find(
+    (event) => event.action === "train_started" || event.action === "train_start",
+  ) || automationStatus?.events?.[0];
+  const latestAutomationFamily = automationStatus?.families?.find((family) => family.model_family === (latestAutomationEvent?.model_family || "tfidf_lr"));
+  useEffect(() => {
+    if (!latestAutomationEvent || announcedAutomationEventRef.current === latestAutomationEvent.id) return;
+    announcedAutomationEventRef.current = latestAutomationEvent.id;
+    if (latestAutomationEvent.action === "train_started" && latestAutomationEvent.status === "running" && latestAutomationEvent.source_run_id) {
+      toast.success(`Automatic ${latestAutomationEvent.model_family === "tfidf_lr" ? "TF-IDF training" : "PhoBERT training"} started`, {
+        description: latestAutomationEvent.detail || "Automation threshold reached.",
+        action: { label: "View run", onClick: () => void openDORun(latestAutomationEvent.source_run_id!) },
+      });
+    } else if (latestAutomationEvent.action === "train_started" && latestAutomationEvent.status === "dry_run") {
+      toast.info("Automation dry run completed", { description: latestAutomationEvent.detail || "Kaggle submission was skipped." });
+    } else if (latestAutomationEvent.status === "failed") {
+      toast.error("Automatic training failed to start", { description: latestAutomationEvent.detail || "See automation details." });
+    }
+  }, [latestAutomationEvent, openDORun]);
+
   useEffect(() => {
     const prev = prevDoStatusRef.current;
     if (prev === doStatusValue) return;
@@ -1286,7 +1499,7 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
   const doCompletedIndex = doStages.findIndex((s) => s === doCurrentStage);
   const doHasStageProgress = ["running", "failed", "completed", "dry_run"].includes(doStatusValue);
   const doProgress =
-    doStatusValue === "completed"
+    doStatusValue === "completed" || doStatusValue === "dry_run"
       ? 100
       : doStatusValue === "queued" || doStatusValue === "placeholder"
         ? 0
@@ -1356,7 +1569,7 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
         <TabsList className="w-full grid grid-cols-3 h-auto">
           <TabsTrigger value="step1">Data & Review</TabsTrigger>
           <TabsTrigger value="step4">Kaggle Retrain</TabsTrigger>
-          <TabsTrigger value="step5">Results & Gate</TabsTrigger>
+          <TabsTrigger value="step5">Results, Gate & Registry</TabsTrigger>
         </TabsList>
 
         <TabsContent value="step1" className="space-y-4">
@@ -1602,6 +1815,12 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-1.5">
                 <h3 className="font-medium">Training Preview</h3>
+                {(trainingPreview?.counts.requires_human_review ?? 0) > 0 && (
+                  <Badge variant="destructive">
+                    <AlertTriangle className="mr-1 h-3.5 w-3.5" />
+                    {trainingPreview?.counts.requires_human_review} require human review
+                  </Badge>
+                )}
                 <SectionInfoTooltip label="Thông tin chi tiết Training Preview">
                   <p>
                     Danh sách chỉ hiển thị comment accepted đã qua gate; candidate chưa xác minh chỉ hiển thị trong Manual Verify.
@@ -1806,6 +2025,64 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
                 </IconButtonWithTooltip>
               </div>
             </div>
+            <div className="rounded-xl border border-sky-200/70 bg-sky-50/40 p-3 dark:border-sky-900/40 dark:bg-sky-950/15">
+              <div className="flex flex-wrap items-end gap-3">
+                <div className="min-w-64 flex-1">
+                  <label className="text-xs font-medium text-muted-foreground">Re-evaluate with Model</label>
+                  <select
+                    className="mt-1 w-full rounded-md border bg-background px-3 py-2 text-sm"
+                    value={reEvaluationModel}
+                    onChange={(event) => setReEvaluationModel(event.target.value)}
+                    disabled={modelReEvaluating}
+                  >
+                    {availableModels.filter((model) => !isDeprecatedModel(model)).map((model) => (
+                      <option key={`reevaluate-${model}`} value={model}>{getModelLabel(model)}</option>
+                    ))}
+                  </select>
+                </div>
+                <div className="min-w-56">
+                  <label className="text-xs font-medium text-muted-foreground">Scope</label>
+                  <select
+                    className="mt-1 w-full rounded-md border bg-background px-3 py-2 text-sm"
+                    value={reEvaluationScope}
+                    onChange={(event) => setReEvaluationScope(event.target.value as "selected" | "all_auto_eligible")}
+                    disabled={modelReEvaluating}
+                  >
+                    <option value="selected">Selected auto labels ({selectedAutoEligibleCount})</option>
+                    <option value="all_auto_eligible">All auto training-eligible ({trainingPreview?.counts.auto_eligible ?? 0})</option>
+                  </select>
+                </div>
+                <Button
+                  onClick={() => void handleModelReEvaluation(reEvaluationScope, selectedPreviewIds)}
+                  disabled={
+                    modelReEvaluating ||
+                    !reEvaluationModel ||
+                    (reEvaluationScope === "selected"
+                      ? selectedAutoEligibleCount === 0
+                      : (trainingPreview?.counts.auto_eligible ?? 0) === 0)
+                  }
+                >
+                  <RefreshCw className={`h-4 w-4 ${modelReEvaluating ? "animate-spin" : ""}`} />
+                  {modelReEvaluating ? "Đang re-evaluate..." : "Re-evaluate Auto Labels"}
+                </Button>
+              </div>
+              <p className="mt-2 text-xs text-muted-foreground">
+                Chỉ auto-labelled samples đang training-eligible được bulk evaluate. Human-reviewed labels không được thay đổi.
+              </p>
+              <div className="mt-2 grid gap-2 text-xs sm:grid-cols-3">
+                <Badge variant="secondary">Ready for training: {trainingPreview?.counts.selected ?? 0}</Badge>
+                <Badge variant={(trainingPreview?.counts.requires_human_review ?? 0) > 0 ? "destructive" : "outline"}>
+                  Requires human review: {trainingPreview?.counts.requires_human_review ?? 0}
+                </Badge>
+                <Badge variant="outline">Excluded / removed: {trainingPreview?.counts.removed ?? 0}</Badge>
+              </div>
+              {lastReEvaluation && (
+                <p className="mt-2 text-xs font-medium">
+                  Last run: Evaluated {lastReEvaluation.summary.evaluated} · Agreement {lastReEvaluation.summary.agreement} · Conflict {lastReEvaluation.summary.conflict} · Needs review {lastReEvaluation.summary.needs_review} · Skipped {lastReEvaluation.summary.skipped} · Failed {lastReEvaluation.summary.failed}
+                </p>
+              )}
+            </div>
+
             <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
               <div className="relative overflow-hidden rounded-xl border border-primary/20 bg-gradient-to-br from-primary/10 via-background to-background p-4 shadow-sm">
                 <div className="absolute -right-5 -top-5 h-20 w-20 rounded-full bg-primary/10" aria-hidden="true" />
@@ -1891,6 +2168,7 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
                   const trainingSelection = getTrainingSelectionPresentation(item.selected_for_training, exportEligible);
                   const lockPresentation = getLockPresentation(item.is_locked);
                   const finetuneStatus = trainingPlan?.row_statuses[String(item.id)];
+                  const requiresHumanReview = Boolean(item.requires_human_review);
                   return (
                     <motion.div
                       key={`preview-${item.id}`}
@@ -1898,7 +2176,7 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
                       animate={{ opacity: 1, y: 0 }}
                       exit={{ opacity: 0, y: -8 }}
                       transition={{ duration: 0.18, delay: Math.min(index * 0.015, 0.12) }}
-                      className="cursor-pointer rounded-md border border-border/70 p-2.5 transition-colors hover:border-primary/35 hover:bg-muted/30"
+                      className={`cursor-pointer rounded-md border p-2.5 transition-colors hover:bg-muted/30 ${requiresHumanReview ? "border-amber-500/70 bg-amber-50/50 dark:bg-amber-950/15" : "border-border/70 hover:border-primary/35"}`}
                       onClick={(event) => handlePreviewRowToggle(event, item.id)}
                     >
                       <div className="flex flex-wrap items-start justify-between gap-2">
@@ -1909,6 +2187,25 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
                         />
                         <div className="min-w-0 flex-1 space-y-2">
                           <p className="whitespace-pre-wrap break-words text-sm leading-relaxed">{item.text}</p>
+                          {requiresHumanReview && (
+                            <div className="rounded-md border border-amber-500/50 bg-amber-100/60 p-2 text-xs dark:bg-amber-950/30">
+                              <div className="flex flex-wrap items-center gap-2 font-medium text-amber-900 dark:text-amber-200">
+                                <AlertTriangle className="h-4 w-4" />
+                                {item.review_reason === "model_conflict" ? "Model Conflict" : "Uncertain Re-evaluation"}
+                                <Badge variant="destructive">Human review required</Badge>
+                              </div>
+                              <p className="mt-1">Temporarily excluded from the next fine-tuning run.</p>
+                              <Button
+                                className="mt-2"
+                                size="sm"
+                                variant="outline"
+                                onClick={() => document.getElementById("mlflow-manual-verify")?.scrollIntoView({ behavior: "smooth" })}
+                              >
+                                Review in Manual Verify
+                              </Button>
+                            </div>
+                          )}
+                          <PredictionEvidence item={item} />
                           <div className="flex flex-wrap gap-1 text-xs">
                             <MlflowBadge presentation={getToxicityPresentation(item.pseudo_label)} />
                             <MlflowBadge
@@ -2061,10 +2358,13 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
             </div>
           </Card>
 
-          <Card className="p-4 space-y-3">
+          <Card id="mlflow-manual-verify" className="p-4 space-y-3">
             <div className="flex items-center justify-between gap-2">
               <div className="flex items-center gap-1.5">
                 <h3 className="font-medium">Manual Verify (DB persisted pool)</h3>
+                {(trainingPreview?.counts.model_conflicts ?? 0) > 0 && (
+                  <Badge variant="destructive">Model Conflicts: {trainingPreview?.counts.model_conflicts}</Badge>
+                )}
                 <SectionInfoTooltip label="Thông tin chi tiết Manual Verify">
                   <p>
                     Danh sách chỉ hiển thị candidate/unverified chưa qua gate; comment accepted trong Training Preview không xuất hiện lại ở đây.
@@ -2077,7 +2377,25 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
               </div>
             </div>
 
+            {(trainingPreview?.counts.requires_human_review ?? 0) > 0 && (
+              <div className="flex items-center gap-2 rounded-md border border-amber-500/50 bg-amber-50 p-3 text-sm dark:bg-amber-950/20">
+                <AlertTriangle className="h-5 w-5 text-amber-600" />
+                <span><b>{trainingPreview?.counts.requires_human_review}</b> samples require human review after cross-model re-evaluation.</span>
+              </div>
+            )}
+
             <div className="flex flex-wrap gap-2">
+              <select
+                aria-label="Model dùng để re-evaluate Manual Verify sample"
+                className="rounded-md border bg-background px-3 py-2 text-sm"
+                value={reEvaluationModel}
+                onChange={(event) => setReEvaluationModel(event.target.value)}
+                disabled={modelReEvaluating}
+              >
+                {availableModels.filter((model) => !isDeprecatedModel(model)).map((model) => (
+                  <option key={`manual-reevaluate-${model}`} value={model}>{getModelLabel(model)}</option>
+                ))}
+              </select>
               <Button size="sm" variant="outline" onClick={handleSelectAllCandidates} disabled={candidates.length === 0}>
                 Chọn tạm thời tất cả
               </Button>
@@ -2115,41 +2433,61 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
             <div className="space-y-1.5 max-h-[34rem] overflow-auto pr-1">
               {candidates.map((item) => {
                 const suggestion = candidateGeminiSuggestions[item.id];
-                const hasPredictionEvidence = Boolean(
-                  item.latest_prediction || (item.prediction_history?.length ?? 0) > 0,
-                );
+                const isSelected = selectedCandidateIds.includes(item.id);
                 return (
                   <div
                     key={item.id}
-                    className="flex cursor-pointer items-start gap-2 rounded-md border border-border/70 p-2.5 transition-colors hover:border-primary/35 hover:bg-muted/30"
+                    className={`flex cursor-pointer items-start gap-2 rounded-md border p-2.5 transition-colors ${
+                      isSelected
+                        ? "border-primary/60 bg-primary/5"
+                        : "border-border/70 hover:border-primary/35 hover:bg-muted/30"
+                    }`}
                     onClick={(event) => handleCandidateRowToggle(event, item.id)}
                   >
-                    <Checkbox
-                      checked={selectedCandidateIds.includes(item.id)}
-                      onCheckedChange={() => toggleCandidate(item.id)}
-                      aria-label="Chọn tạm thời hàng này để thao tác Manual Verify"
-                    />
-                    <div className="min-w-0 flex-1 space-y-1">
-                      <p className="whitespace-pre-wrap break-words text-sm leading-relaxed">{item.text}</p>
-                      <PredictionEvidence item={item} />
-                      <HumanReviewEvidence item={item} />
-                      <div className="flex flex-wrap gap-1.5 text-xs text-muted-foreground">
-                        <Badge variant="outline">domain={resolveDomainTag(item)}</Badge>
-                        {!hasPredictionEvidence && (
-                          <>
-                            <MlflowBadge presentation={getScorePresentation(item.score, DEFAULT_MLFLOW_GATE_THRESHOLDS)} />
-                            <MlflowBadge presentation={getToxicityPresentation(item.pseudo_label)} />
-                          </>
-                        )}
-                        <MlflowBadge presentation={getConstructivenessPresentation(item.constructiveness_label)} />
-                        <MlflowBadge presentation={getLockPresentation(item.is_locked)} />
-                        <MlflowBadge presentation={getVerificationStatusPresentation(item.verification_status)} />
-                        <Badge variant="outline">source={item.label_source ?? "-"}</Badge>
-                        <Badge variant="outline">conf={item.label_confidence ?? "-"}</Badge>
+                    <div data-row-interactive onClick={(event) => event.stopPropagation()}>
+                      <Checkbox
+                        checked={selectedCandidateIds.includes(item.id)}
+                        onCheckedChange={() => toggleCandidate(item.id)}
+                        aria-label="Chọn tạm thời hàng này để thao tác Manual Verify"
+                      />
+                    </div>
+                    <div className="min-w-0 flex-1 space-y-3">
+                      <p className="whitespace-pre-wrap break-words py-1 text-[15px] font-medium leading-6 text-foreground">{item.text}</p>
+                      {item.requires_human_review && (
+                        <div data-row-interactive onClick={(event) => event.stopPropagation()}>
+                          <HumanReviewEvidence item={item} embedded />
+                        </div>
+                      )}
+                      {item.latest_prediction ? (
+                        <div data-row-interactive onClick={(event) => event.stopPropagation()}>
+                          <PredictionEvidence item={item} compact />
+                        </div>
+                      ) : (
+                        <p className="text-xs text-muted-foreground">No model prediction history is available.</p>
+                      )}
+                      <div data-row-interactive onClick={(event) => event.stopPropagation()}>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => void handleModelReEvaluation("selected", [item.id])}
+                          disabled={modelReEvaluating || !reEvaluationModel}
+                        >
+                          <RefreshCw className={`h-4 w-4 ${modelReEvaluating ? "animate-spin" : ""}`} />
+                          Re-evaluate with Model
+                        </Button>
                       </div>
-                      <p className="text-xs text-muted-foreground break-all">{item.url}</p>
+                      <details data-row-interactive className="text-xs text-muted-foreground" onClick={(event) => event.stopPropagation()}>
+                        <summary className="cursor-pointer">Secondary metadata</summary>
+                        <div className="mt-2 space-y-1 rounded-md bg-muted/35 p-2">
+                          <p className="break-all">{item.url}</p>
+                          <p>Domain: {resolveDomainTag(item)}</p>
+                          {item.label_confidence && <p>Gate confidence: {formatMlflowConfidence(item.label_confidence)}</p>}
+                          {item.label_source && <p>Gate source: {item.label_source === "auto_gate" ? "Automatic gate" : item.label_source}</p>}
+                          {item.is_locked && <p>Locked</p>}
+                        </div>
+                      </details>
                       {suggestion && (
-                        <div className="mt-2 space-y-2 rounded-md border border-primary/25 bg-primary/5 p-2 text-xs">
+                        <div data-row-interactive className="mt-2 space-y-2 rounded-md border border-primary/25 bg-primary/5 p-2 text-xs" onClick={(event) => event.stopPropagation()}>
                           <div className="flex flex-wrap items-center gap-1.5">
                             <Badge variant="outline">Gemini · {suggestion.model}</Badge>
                             <MlflowBadge presentation={getToxicityPresentation(suggestion.toxicity_label)} />
@@ -2178,7 +2516,10 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
               )}
             </div>
 
-            <div className="flex flex-wrap gap-2">
+            <div className="flex flex-wrap items-center gap-2 rounded-md border bg-muted/20 p-2">
+              <span className="px-1 text-xs font-medium text-muted-foreground" aria-live="polite">
+                {selectedCandidateIds.length} selected
+              </span>
               <Button disabled={selectedCandidateIds.length === 0} onClick={() => void handleBulkReview("include_toxic")}>
                 Toxic
               </Button>
@@ -2271,6 +2612,32 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
         </TabsContent>
 
         <TabsContent value="step4" className="space-y-4">
+          <Card className="p-4">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <h3 className="font-medium">Automation</h3>
+                {latestAutomationFamily ? (
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    {latestAutomationFamily.policy.enabled ? "Enabled" : "Blocked: global automation disabled"} · {latestAutomationFamily.model_family === "tfidf_lr" ? "TF-IDF + LR" : "PhoBERT"} · {latestAutomationFamily.policy.mode}
+                  </p>
+                ) : automationStatusError ? <div className="mt-1 flex items-center gap-2 text-xs text-destructive"><span>Unable to load automation status</span><Button size="sm" variant="outline" onClick={() => void refreshAutomationStatus()}>Retry</Button></div> : <p className="mt-1 text-xs text-muted-foreground">Loading automation state…</p>}
+              </div>
+              {latestAutomationFamily && <Badge variant={latestAutomationFamily.ready ? "secondary" : "outline"}>{latestAutomationFamily.ready ? "Ready to trigger" : latestAutomationFamily.blocked_reason || "Blocked"}</Badge>}
+            </div>
+            {latestAutomationFamily && (
+              <div className="mt-3 grid gap-2 text-xs sm:grid-cols-3">
+                <span>New eligible: <b>{latestAutomationFamily.new_eligible_rows} / {latestAutomationFamily.policy.min_new_rows}</b></span>
+                <span>Cooldown: <b>{latestAutomationFamily.policy.cooldown_minutes ? `${latestAutomationFamily.policy.cooldown_minutes} min` : "Ready"}</b></span>
+                <span>Dry run: <b>{latestAutomationFamily.policy.dry_run ? "On" : "Off"}</b></span>
+              </div>
+            )}
+            {latestAutomationEvent && (
+              <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-md border bg-muted/20 p-2 text-xs">
+                <span><b>Latest automation</b> · {latestAutomationEvent.model_family === "tfidf_lr" ? "TF-IDF + LR" : "PhoBERT"} · {latestAutomationEvent.status} · {formatIsoTs(latestAutomationEvent.created_at)}</span>
+                {latestAutomationEvent.source_run_id ? <Button size="sm" variant="outline" onClick={() => void openDORun(latestAutomationEvent.source_run_id!)}>{latestAutomationEvent.status === "dry_run" ? "View details" : "View run"}</Button> : <span className="text-muted-foreground">{latestAutomationEvent.detail || "No Kaggle run was created."}</span>}
+              </div>
+            )}
+          </Card>
           <Card className="p-4 space-y-3">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="min-w-0">
@@ -2471,7 +2838,10 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
               <div className="rounded-xl border bg-background p-3 md:col-span-2">
                 <div className="flex items-center justify-between gap-2">
                   <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Run hiện tại</p>
-                  <Badge variant={doBadgeVariant as "default" | "secondary" | "destructive" | "outline"}>{doStatusValue}</Badge>
+                  <div className="flex items-center gap-1">
+                    {doStatus?.trigger_source && <Badge variant="outline">{doStatus.trigger_source === "automation" ? "Automation" : "Manual"}</Badge>}
+                    <Badge variant={doBadgeVariant as "default" | "secondary" | "destructive" | "outline"}>{doStatusValue}</Badge>
+                  </div>
                 </div>
                 <p className="mt-2 break-all text-sm font-medium">{doRunId}</p>
                 <div className="mt-3 flex items-center gap-3">
@@ -2481,17 +2851,21 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
                 <p className="mt-2 text-xs text-muted-foreground">{doCurrentStage ? doStageLabels[doCurrentStage] || doCurrentStage : "Chưa có run đang hoạt động"}</p>
               </div>
               <div className="rounded-xl border bg-background p-3">
-                <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Cấu hình đã chọn</p>
-                <p className="mt-2 text-sm font-medium">{selectedModelKind === "lr_smoke" ? "TF-IDF + LR" : "PhoBERT"}</p>
-                <p className="mt-1 text-xs text-muted-foreground uppercase">{doTrainingMode}</p>
+                <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Cấu hình của run</p>
+                <p className="mt-2 text-sm font-medium">{doModelLabel}</p>
+                <p className="mt-1 text-xs text-muted-foreground">Training operation: {doTrainingMode}</p>
+                {doAutomationMode && <p className="mt-1 text-xs text-muted-foreground">Automation mode: {doAutomationMode}</p>}
+                <p className="mt-1 text-xs text-muted-foreground">Execution: {doStatusValue}</p>
               </div>
               <div className="rounded-xl border bg-background p-3">
                 <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Artifact</p>
                 <Badge className="mt-2" variant={doIsMockArtifact ? "destructive" : doHasRealArtifact ? "secondary" : "outline"}>
-                  {doIsMockArtifact ? "PLACEHOLDER" : doHasRealArtifact ? "SẴN SÀNG" : "CHƯA CÓ"}
+                  {doIsDryRun ? "NOT APPLICABLE" : doIsMockArtifact ? "PLACEHOLDER" : doHasRealArtifact ? "SẴN SÀNG" : "CHƯA CÓ"}
                 </Badge>
                 <p className="mt-2 text-xs text-muted-foreground">
-                  {doHasEvidenceDuration ? `${doEvidenceDurationSeconds.toFixed(2)} giây train` : hasDoTrainDuration ? `${doTrainDuration.toFixed(2)} phút train` : "Chưa có thời lượng"}
+                  {doIsDryRun
+                    ? "Kaggle submission skipped; no model artifact is expected."
+                    : doHasEvidenceDuration ? `${doEvidenceDurationSeconds.toFixed(2)} giây train` : hasDoTrainDuration ? `${doTrainDuration.toFixed(2)} phút train` : "Chưa có thời lượng"}
                 </p>
               </div>
             </div>
@@ -2752,7 +3126,7 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
             <div className="rounded-md border p-3 bg-background/70 space-y-1">
               <p className="text-sm font-medium">Run provenance</p>
               <p className="text-xs text-muted-foreground">
-                Đây là <b>{doIsMockRun ? "mock/test run" : "real run"}</b>. Nguồn cập nhật status: <b>{doStatusSource}</b>.
+                {doIsDryRun ? <>Đây là <b>automation simulation record</b>. Execution: <b>Dry run</b> · Kaggle submission: <b>Skipped</b>.</> : <>Đây là <b>{doIsMockRun ? "mock/test run" : "real run"}</b>.</>} Nguồn cập nhật status: <b>{doStatusSource}</b>.
               </p>
               <p className="text-xs text-muted-foreground">
                 Created: {formatIsoTs((doStatus?.created_at as string | undefined) || null)} | Updated:{" "}
@@ -2827,13 +3201,17 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
 
             <div className="rounded-md border p-3 text-sm space-y-2">
               <p className="font-medium">Artifact</p>
-              {doIsMockArtifact && (
+              {doIsDryRun ? (
+                <p className="text-xs text-muted-foreground">Not applicable for dry run. Kaggle submission was skipped, so no trained model artifact or checksum is expected.</p>
+              ) : doIsMockArtifact && (
                 <p className="text-xs text-amber-700 dark:text-amber-300">
                   Artifact này là placeholder từ mock webhook, không phải model ZIP thật từ Kaggle.
                 </p>
               )}
-              <p className="text-xs break-all">URI: {doArtifactUri || "-"}</p>
-              <p className="text-xs break-all">Checksum (sha256): {doChecksum || "-"}</p>
+              {!doIsDryRun && <>
+                <p className="text-xs break-all">URI: {doArtifactUri || "-"}</p>
+                <p className="text-xs break-all">Checksum (sha256): {doChecksum || "-"}</p>
+              </>}
               {doErrorMessage && <p className="text-xs text-destructive break-all">Error: {doErrorMessage}</p>}
             </div>
 
@@ -2973,6 +3351,55 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
               </p>
             </Card>
           </div>
+
+          <Card className="p-4 space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <h3 className="font-medium">Model Registry</h3>
+                <p className="text-xs text-muted-foreground">Completed Kaggle artifacts are retained as candidates until an explicit lifecycle action.</p>
+              </div>
+              <Button size="sm" variant="outline" onClick={() => void refreshModelRegistry()}>Refresh registry</Button>
+            </div>
+            <div className="space-y-2">
+              {registryModels.map((model) => (
+                <div key={model.model_id} className="flex flex-wrap items-center justify-between gap-3 rounded-md border p-3 text-sm">
+                  <div className="min-w-56 flex-1">
+                    <p className="break-all font-medium">{model.model_id}</p>
+                    <p className="text-xs text-muted-foreground">
+                      {model.model_family} · {model.training_mode || "retrain"} · {formatIsoTs(model.created_at || null)}
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
+                    <span>Macro-F1 {formatMetric(model.metrics?.macro_f1)}</span>
+                    <span>F1 Toxic {formatMetric(model.metrics?.f1_toxic)}</span>
+                    <span>Accuracy {formatMetric(model.metrics?.accuracy)}</span>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Badge variant={model.status === "production" ? "default" : model.status === "archived" ? "secondary" : "outline"}>{model.status}</Badge>
+                    {!model.artifact_available && <Badge variant="destructive">Artifact unavailable</Badge>}
+                    <details className="text-xs text-muted-foreground">
+                      <summary className="cursor-pointer">Details</summary>
+                      <div className="mt-2 max-w-sm space-y-1 rounded-md bg-muted/35 p-2">
+                        <p className="break-all">Run: {model.source_run_id}</p>
+                        <p className="break-all">Base: {model.base_model || "-"}</p>
+                        <p className="break-all">SHA-256: {model.artifact_checksum || "-"}</p>
+                      </div>
+                    </details>
+                    <Button size="sm" variant="outline" onClick={() => void refreshCompare(model.source_run_id)}>Compare</Button>
+                    <Button size="sm" variant="outline" disabled={!model.artifact_available} onClick={() => window.open(buildApiUrl(`/api/mlflow/registry/download?model_id=${encodeURIComponent(model.model_id)}`), "_blank", "noopener,noreferrer")}>Download</Button>
+                    {model.status !== "production" && model.status !== "deleted" && (
+                      <Button size="sm" variant="outline" onClick={() => void promote(model.source_run_id, model.artifact_checksum).then(() => Promise.all([refreshModelRegistry(), refreshCompare(model.source_run_id)]))}>Promote</Button>
+                    )}
+                    {model.status === "candidate" && <Button size="sm" variant="outline" onClick={() => void updateModelRegistryLifecycle(model.model_id, "archive")}>Archive</Button>}
+                    {model.status !== "production" && model.status !== "deleted" && (
+                      <Button size="sm" variant="destructive" onClick={() => { if (window.confirm(`Delete registry entry ${model.model_id}? The original training run and artifact are retained.`)) void updateModelRegistryLifecycle(model.model_id, "delete"); }}>Delete</Button>
+                    )}
+                  </div>
+                </div>
+              ))}
+              {registryModels.length === 0 && <p className="rounded-md border border-dashed p-3 text-sm text-muted-foreground">No completed Kaggle model artifacts have been registered yet.</p>}
+            </div>
+          </Card>
         </TabsContent>
       </Tabs>
     </div>

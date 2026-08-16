@@ -1093,6 +1093,12 @@ class NewsSiteCommentCrawler:
                 should_expand = False
 
             if should_expand and self.max_load_more_clicks > 0:
+                logger.info(
+                    "Load-more expansion start: initial_comments=%d click_budget=%d url=%s",
+                    len(comments),
+                    self.max_load_more_clicks,
+                    url,
+                )
                 self._click_load_more(driver, selectors)
                 _raise_if_deadline_passed("load-more expansion")
 
@@ -1336,47 +1342,30 @@ class NewsSiteCommentCrawler:
         return total
 
     def _find_text_load_more_candidate(self, driver, selectors: dict[str, str]):
-        from selenium.webdriver.common.by import By
-
         container_css = selectors.get("container", "")
-        searchable_selectors = ["button", "a", "[role='button']"]
-
-        candidates = []
-        if container_css:
-            try:
-                containers = driver.find_elements(By.CSS_SELECTOR, container_css)
-                for container in containers:
-                    for selector in searchable_selectors:
-                        candidates.extend(container.find_elements(By.CSS_SELECTOR, selector))
-            except Exception:
-                pass
-
-        if not candidates:
-            for selector in searchable_selectors:
-                try:
-                    candidates.extend(driver.find_elements(By.CSS_SELECTOR, selector))
-                except Exception:
-                    continue
-
-        for element in candidates:
-            try:
-                if not element.is_displayed():
-                    continue
-                raw_text = _normalize_text((element.text or "").lower())
-                if not raw_text:
-                    continue
-                folded_text = unicodedata.normalize("NFD", raw_text)
-                folded_text = "".join(
-                    ch for ch in folded_text if unicodedata.category(ch) != "Mn"
-                )
-                if any(
-                    keyword in raw_text or keyword in folded_text
-                    for keyword in _NEWS_LOAD_MORE_TEXT_KEYWORDS
-                ):
-                    return element
-            except Exception:
-                continue
-        return None
+        # Do this in one browser round-trip.  The old implementation inspected
+        # every control through separate WebDriver RPCs; the Vietnamnet iframe
+        # can stop responding after the first extraction, leaving one of those
+        # RPCs unbounded even though the crawl-level deadline has elapsed.
+        return driver.execute_script(
+            """
+            const containerCss = arguments[0];
+            const keywords = arguments[1];
+            const root = containerCss ? document.querySelector(containerCss) : document;
+            if (!root) return null;
+            const fold = (value) => (value || "").toLowerCase().normalize("NFD")
+              .replace(/[\\u0300-\\u036f]/g, "").replace(/\\s+/g, " ").trim();
+            for (const element of root.querySelectorAll("button, a, [role='button']")) {
+              const style = window.getComputedStyle(element);
+              if (style.display === "none" || style.visibility === "hidden" || element.disabled) continue;
+              const text = fold(element.innerText || element.textContent);
+              if (text && keywords.some((keyword) => text.includes(keyword))) return element;
+            }
+            return null;
+            """,
+            container_css,
+            _NEWS_LOAD_MORE_TEXT_KEYWORDS,
+        )
 
     def _click_load_more(
         self,
@@ -1405,9 +1394,15 @@ class NewsSiteCommentCrawler:
                         source = "selector"
 
                 if target is None:
+                    logger.info("Load-more candidate lookup start: iteration=%d", idx)
                     target = self._find_text_load_more_candidate(driver, selectors)
                     if target is not None:
                         source = "text"
+                    logger.info(
+                        "Load-more candidate lookup done: iteration=%d found=%s",
+                        idx,
+                        target is not None,
+                    )
 
                 if target is None:
                     logger.info(

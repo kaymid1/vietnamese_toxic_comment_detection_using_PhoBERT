@@ -1526,6 +1526,254 @@ def test_mlflow_active_candidate_prediction_reopens_only_unreviewed_auto_sample(
     assert state == ("candidate", "unverified", 0)
 
 
+def test_mlflow_model_reevaluation_agreement_conflict_uncertain_and_human_resolution(
+    qa_env, client, admin_headers, monkeypatch
+):
+    app_module = qa_env["app_module"]
+    for suffix in ("agree", "conflict", "uncertain"):
+        persisted = _persist_prediction(
+            app_module,
+            batch_id=f"batch_reeval_{suffix}",
+            model_id="tfidf_lr/v1",
+            context_hash=f"ctx_reeval_{suffix}",
+            score=0.95,
+            predicted_label=1,
+        )
+        assert persisted["counts"]["accepted"] == 1
+
+    with sqlite3.connect(qa_env["feedback_db"]) as conn:
+        ids = {
+            row[1].rsplit("_", 1)[-1]: int(row[0])
+            for row in conn.execute("SELECT id, context_segment_hash FROM mlflow_comment_item")
+        }
+
+    monkeypatch.setattr(
+        app_module,
+        "resolve_model_path",
+        lambda _root, _model_id: ("phobert", "v2", qa_env["base_dir"] / "fake-model"),
+    )
+
+    def fake_re_evaluate(rows, model_id):
+        by_id = {
+            ids["agree"]: (0.94, 1),
+            ids["conflict"]: (0.08, 0),
+            ids["uncertain"]: (0.55, 0),
+        }
+        return model_id, {
+            int(row["id"]): {
+                "raw_toxicity_score": by_id[int(row["id"])][0],
+                "adjusted_toxicity_score": by_id[int(row["id"])][0],
+                "predicted_label": by_id[int(row["id"])][1],
+                "constructiveness_score": None,
+                "constructiveness_label": None,
+                "constructiveness_confidence": "missing",
+                "seg_threshold_used": 0.4,
+            }
+            for row in rows
+        }
+
+    monkeypatch.setattr(app_module, "run_mlflow_model_re_evaluation", fake_re_evaluate)
+    response = client.post(
+        "/api/mlflow/re-evaluate",
+        headers=admin_headers,
+        json={
+            "model_id": "phobert/v2",
+            "selection": "selected",
+            "sample_ids": list(ids.values()),
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["summary"] == {
+        "requested": 3,
+        "evaluated": 3,
+        "agreement": 1,
+        "conflict": 1,
+        "uncertain": 1,
+        "needs_review": 2,
+        "skipped": 0,
+        "failed": 0,
+    }
+
+    with sqlite3.connect(qa_env["feedback_db"]) as conn:
+        conn.row_factory = sqlite3.Row
+        states = {
+            int(row[0]): tuple(row[1:])
+            for row in conn.execute(
+                "SELECT id, pseudo_label, gate_bucket, verification_status, selected_for_training, training_review_status, review_reason FROM mlflow_comment_item"
+            )
+        }
+        origins = conn.execute(
+            "SELECT sample_item_id, record_origin FROM mlflow_comment_prediction WHERE model_id = 'phobert/v2'"
+        ).fetchall()
+        training_ids = {int(row["id"]) for row in app_module.select_mlflow_training_rows(conn, None, "all")[0]}
+    assert states[ids["agree"]] == (1, "accepted", "auto_accepted", 1, "auto", None)
+    assert states[ids["conflict"]] == (1, "candidate", "unverified", 0, "pending", "model_conflict")
+    assert states[ids["uncertain"]] == (1, "candidate", "unverified", 0, "pending", "model_uncertain")
+    assert {tuple(row) for row in origins} == {
+        (ids["agree"], "model_re_evaluation"),
+        (ids["conflict"], "model_re_evaluation"),
+        (ids["uncertain"], "model_re_evaluation"),
+    }
+    assert training_ids == {ids["agree"]}
+
+    preview = client.get("/api/mlflow/training-preview", headers=admin_headers, params={"scope": "all_batches"})
+    assert preview.status_code == 200
+    assert preview.json()["counts"]["selected"] == 1
+    assert preview.json()["counts"]["requires_human_review"] == 2
+    assert preview.json()["counts"]["model_conflicts"] == 1
+    assert {int(item["id"]) for item in preview.json()["items"]} == set(ids.values())
+
+    reviewed = client.post(
+        "/api/mlflow/candidates/review",
+        headers=admin_headers,
+        json={"updates": [{"id": ids["conflict"], "action": "include_toxic"}]},
+    )
+    assert reviewed.status_code == 200
+    with sqlite3.connect(qa_env["feedback_db"]) as conn:
+        state = conn.execute(
+            "SELECT pseudo_label, gate_bucket, verification_status, selected_for_training, review_reason FROM mlflow_comment_item WHERE id = ?",
+            (ids["conflict"],),
+        ).fetchone()
+        history_count = conn.execute(
+            "SELECT COUNT(1) FROM mlflow_comment_prediction WHERE sample_item_id = ?",
+            (ids["conflict"],),
+        ).fetchone()[0]
+    assert state == (1, "accepted", "manual_accepted", 1, "model_conflict_resolved")
+    assert history_count == 2
+
+    duplicate = client.post(
+        "/api/mlflow/re-evaluate",
+        headers=admin_headers,
+        json={"model_id": "phobert/v2", "selection": "selected", "sample_ids": [ids["conflict"]]},
+    )
+    assert duplicate.status_code == 200
+    assert duplicate.json()["summary"]["skipped"] == 1
+    assert duplicate.json()["results"][0]["message"] == "Already evaluated with this model version"
+
+
+def test_mlflow_model_reevaluation_preserves_human_authority_and_bulk_excludes_human(
+    qa_env, client, admin_headers, monkeypatch
+):
+    app_module = qa_env["app_module"]
+    manual_seed = _persist_prediction(
+        app_module,
+        batch_id="batch_reeval_manual",
+        model_id="tfidf_lr/v1",
+        context_hash="ctx_reeval_manual",
+        score=0.55,
+        predicted_label=0,
+    )
+    assert manual_seed["counts"]["candidate"] == 1
+    auto_seed = _persist_prediction(
+        app_module,
+        batch_id="batch_reeval_auto",
+        model_id="tfidf_lr/v1",
+        context_hash="ctx_reeval_auto",
+        score=0.95,
+        predicted_label=1,
+    )
+    assert auto_seed["counts"]["accepted"] == 1
+    with sqlite3.connect(qa_env["feedback_db"]) as conn:
+        manual_id = int(conn.execute("SELECT id FROM mlflow_comment_item WHERE context_segment_hash = 'ctx_reeval_manual'").fetchone()[0])
+        auto_id = int(conn.execute("SELECT id FROM mlflow_comment_item WHERE context_segment_hash = 'ctx_reeval_auto'").fetchone()[0])
+
+    reviewed = client.post(
+        "/api/mlflow/candidates/review",
+        headers=admin_headers,
+        json={"updates": [{"id": manual_id, "action": "include_toxic"}]},
+    )
+    assert reviewed.status_code == 200
+    monkeypatch.setattr(
+        app_module,
+        "resolve_model_path",
+        lambda _root, _model_id: ("phobert", "v2", qa_env["base_dir"] / "fake-model"),
+    )
+
+    seen_ids = []
+
+    def fake_re_evaluate(rows, model_id):
+        seen_ids.extend(int(row["id"]) for row in rows)
+        return model_id, {
+            int(row["id"]): {
+                "raw_toxicity_score": 0.08,
+                "adjusted_toxicity_score": 0.08,
+                "predicted_label": 0,
+                "constructiveness_score": None,
+                "constructiveness_label": None,
+                "constructiveness_confidence": "missing",
+                "seg_threshold_used": 0.4,
+            }
+            for row in rows
+        }
+
+    monkeypatch.setattr(app_module, "run_mlflow_model_re_evaluation", fake_re_evaluate)
+    explicit = client.post(
+        "/api/mlflow/re-evaluate",
+        headers=admin_headers,
+        json={"model_id": "phobert/v2", "selection": "selected", "sample_ids": [manual_id]},
+    )
+    assert explicit.status_code == 200
+    assert explicit.json()["results"][0]["status"] == "human_disagreement"
+    with sqlite3.connect(qa_env["feedback_db"]) as conn:
+        state = conn.execute(
+            "SELECT pseudo_label, verification_status, selected_for_training FROM mlflow_comment_item WHERE id = ?",
+            (manual_id,),
+        ).fetchone()
+    assert state == (1, "manual_accepted", 1)
+
+    seen_ids.clear()
+    bulk = client.post(
+        "/api/mlflow/re-evaluate",
+        headers=admin_headers,
+        json={"model_id": "phobert/v2", "selection": "all_auto_eligible"},
+    )
+    assert bulk.status_code == 200
+    assert seen_ids == [auto_id]
+    assert bulk.json()["summary"]["conflict"] == 1
+    with sqlite3.connect(qa_env["feedback_db"]) as conn:
+        manual_state = conn.execute(
+            "SELECT pseudo_label, verification_status, selected_for_training FROM mlflow_comment_item WHERE id = ?",
+            (manual_id,),
+        ).fetchone()
+    assert manual_state == (1, "manual_accepted", 1)
+
+
+def test_mlflow_batch_scoped_preview_and_export_include_reused_canonical_sample(qa_env, client, admin_headers):
+    app_module = qa_env["app_module"]
+    first = _persist_prediction(
+        app_module,
+        batch_id="batch_scope_original",
+        model_id="tfidf_lr/v1",
+        context_hash="ctx_scope_reused",
+        score=0.95,
+        predicted_label=1,
+    )
+    second = _persist_prediction(
+        app_module,
+        batch_id="batch_scope_latest",
+        model_id="phobert/v2",
+        context_hash="ctx_scope_reused",
+        score=0.94,
+        predicted_label=1,
+    )
+    assert first["samples_inserted"] == 1
+    assert second["samples_reused"] == 1
+
+    preview = client.get(
+        "/api/mlflow/training-preview",
+        headers=admin_headers,
+        params={"scope": "batch", "batch_id": "batch_scope_latest", "strict_batch": "true"},
+    )
+    assert preview.status_code == 200
+    assert preview.json()["counts"]["selected"] == 1
+    assert len(preview.json()["items"][0]["prediction_history"]) == 2
+
+    with sqlite3.connect(qa_env["feedback_db"]) as conn:
+        conn.row_factory = sqlite3.Row
+        scoped_rows = app_module.select_mlflow_training_rows(conn, "batch_scope_latest", "all")[0]
+    assert len(scoped_rows) == 1
+
+
 def test_feedback_schema_is_initialized_during_fastapi_startup(monkeypatch, tmp_path):
     import backend.app as app_module
 
