@@ -35,6 +35,9 @@ comprehensive_ui/dist/
 # MLflow & Experiment runs
 mlruns_smoke_mlflow/
 mlruns_smoke_mlflow_v2/
+data/mlflow/mlflow.db
+data/mlflow/mlflow.db-*
+data/mlflow/artifacts/
 
 # Generated/Output data
 data/pseudo_labels/

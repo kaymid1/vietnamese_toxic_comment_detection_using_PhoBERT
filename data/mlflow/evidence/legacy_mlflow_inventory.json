@@ -1,0 +1,432 @@
+{
+  "database": {
+    "alembic_revision": "1bd49d398cd23",
+    "integrity_result": "ok",
+    "read_only": true,
+    "sha256": "338dbb3693f55b02cc454ec1a3d55763d4f3b04599191ef8e4da64aa9a53516f",
+    "size_bytes": 540672,
+    "source_ref": "repository://mlflow.db"
+  },
+  "experiments": [
+    {
+      "artifact_location": "/Users/mac/git/Thesis/mlruns/0",
+      "creation_time": 1766938503512,
+      "creation_time_iso": "2025-12-28T16:15:03.512000Z",
+      "experiment_id": 0,
+      "last_update_time": 1766938503512,
+      "last_update_time_iso": "2025-12-28T16:15:03.512000Z",
+      "lifecycle_stage": "active",
+      "name": "Default"
+    },
+    {
+      "artifact_location": "/Users/mac/git/Thesis/mlruns/1",
+      "creation_time": 1766938503515,
+      "creation_time_iso": "2025-12-28T16:15:03.515000Z",
+      "experiment_id": 1,
+      "last_update_time": 1766938503515,
+      "last_update_time_iso": "2025-12-28T16:15:03.515000Z",
+      "lifecycle_stage": "active",
+      "name": "Vietnamese Toxic Comment Detection"
+    }
+  ],
+  "export_policy": {
+    "artifact_substitution": false,
+    "legacy_database_role": "immutable_historical_evidence",
+    "legacy_run_default_classification": "UNCERTAIN",
+    "reconstruct_runs": false
+  },
+  "mlflow_version": "3.8.1",
+  "model_registry": {
+    "model_version_tags": [],
+    "model_versions": [],
+    "registered_model_aliases": [],
+    "registered_model_tags": [],
+    "registered_models": []
+  },
+  "runs": [
+    {
+      "artifact_uri": "/Users/mac/git/Thesis/mlruns/1/90d6b31e05fc46ffaeefd3ae2634624d/artifacts",
+      "classification": "UNCERTAIN",
+      "classification_reason": "Legacy metadata contains no metrics or recoverable run artifacts; repository evidence does not prove thesis-evidence status.",
+      "end_time": 1766938606013,
+      "end_time_iso": "2025-12-28T16:16:46.013000Z",
+      "experiment_id": 1,
+      "latest_metrics": [],
+      "lifecycle_stage": "active",
+      "metrics": [],
+      "name": "phobert_base_victsd_v1",
+      "params": [
+        {
+          "key": "batch_size",
+          "value": "16"
+        },
+        {
+          "key": "dataset_version",
+          "value": "victsd_v1"
+        },
+        {
+          "key": "epochs",
+          "value": "5"
+        },
+        {
+          "key": "learning_rate",
+          "value": "2e-05"
+        },
+        {
+          "key": "max_length",
+          "value": "128"
+        },
+        {
+          "key": "model",
+          "value": "vinai/phobert-base"
+        }
+      ],
+      "run_uuid": "90d6b31e05fc46ffaeefd3ae2634624d",
+      "start_time": 1766938503641,
+      "start_time_iso": "2025-12-28T16:15:03.641000Z",
+      "status": "FINISHED",
+      "tags": [
+        {
+          "key": "mlflow.runName",
+          "value": "phobert_base_victsd_v1"
+        },
+        {
+          "key": "mlflow.source.git.commit",
+          "value": "1a64bd2639db5557951a5f1a8abecd8c0425bb96"
+        },
+        {
+          "key": "mlflow.source.name",
+          "value": "./scripts/05_train_phobert.py"
+        },
+        {
+          "key": "mlflow.source.type",
+          "value": "LOCAL"
+        },
+        {
+          "key": "mlflow.user",
+          "value": "mac"
+        }
+      ]
+    },
+    {
+      "artifact_uri": "/Users/mac/git/Thesis/mlruns/1/e3b3b436767a4325b076bb3fe0af47de/artifacts",
+      "classification": "UNCERTAIN",
+      "classification_reason": "Legacy metadata contains no metrics or recoverable run artifacts; repository evidence does not prove thesis-evidence status.",
+      "end_time": 1766938838063,
+      "end_time_iso": "2025-12-28T16:20:38.063000Z",
+      "experiment_id": 1,
+      "latest_metrics": [],
+      "lifecycle_stage": "active",
+      "metrics": [],
+      "name": "phobert_base_victsd_v1",
+      "params": [
+        {
+          "key": "batch_size",
+          "value": "16"
+        },
+        {
+          "key": "dataset_version",
+          "value": "victsd_v1"
+        },
+        {
+          "key": "epochs",
+          "value": "5"
+        },
+        {
+          "key": "learning_rate",
+          "value": "2e-05"
+        },
+        {
+          "key": "max_length",
+          "value": "128"
+        },
+        {
+          "key": "model",
+          "value": "vinai/phobert-base"
+        }
+      ],
+      "run_uuid": "e3b3b436767a4325b076bb3fe0af47de",
+      "start_time": 1766938829783,
+      "start_time_iso": "2025-12-28T16:20:29.783000Z",
+      "status": "FINISHED",
+      "tags": [
+        {
+          "key": "mlflow.runName",
+          "value": "phobert_base_victsd_v1"
+        },
+        {
+          "key": "mlflow.source.git.commit",
+          "value": "1a64bd2639db5557951a5f1a8abecd8c0425bb96"
+        },
+        {
+          "key": "mlflow.source.name",
+          "value": "./scripts/05_train_phobert.py"
+        },
+        {
+          "key": "mlflow.source.type",
+          "value": "LOCAL"
+        },
+        {
+          "key": "mlflow.user",
+          "value": "mac"
+        }
+      ]
+    },
+    {
+      "artifact_uri": "/Users/mac/git/Thesis/mlruns/1/eb0d559c927848d4af4c0e1f27d7840c/artifacts",
+      "classification": "UNCERTAIN",
+      "classification_reason": "Legacy metadata contains no metrics or recoverable run artifacts; repository evidence does not prove thesis-evidence status.",
+      "end_time": 1766939498021,
+      "end_time_iso": "2025-12-28T16:31:38.021000Z",
+      "experiment_id": 1,
+      "latest_metrics": [],
+      "lifecycle_stage": "active",
+      "metrics": [],
+      "name": "phobert_base_victsd_v1",
+      "params": [
+        {
+          "key": "batch_size",
+          "value": "16"
+        },
+        {
+          "key": "dataset_version",
+          "value": "victsd_v1"
+        },
+        {
+          "key": "epochs",
+          "value": "5"
+        },
+        {
+          "key": "learning_rate",
+          "value": "2e-05"
+        },
+        {
+          "key": "max_length",
+          "value": "128"
+        },
+        {
+          "key": "model",
+          "value": "vinai/phobert-base"
+        }
+      ],
+      "run_uuid": "eb0d559c927848d4af4c0e1f27d7840c",
+      "start_time": 1766939052185,
+      "start_time_iso": "2025-12-28T16:24:12.185000Z",
+      "status": "FINISHED",
+      "tags": [
+        {
+          "key": "mlflow.runName",
+          "value": "phobert_base_victsd_v1"
+        },
+        {
+          "key": "mlflow.source.git.commit",
+          "value": "1a64bd2639db5557951a5f1a8abecd8c0425bb96"
+        },
+        {
+          "key": "mlflow.source.name",
+          "value": "./scripts/05_train_phobert.py"
+        },
+        {
+          "key": "mlflow.source.type",
+          "value": "LOCAL"
+        },
+        {
+          "key": "mlflow.user",
+          "value": "mac"
+        }
+      ]
+    },
+    {
+      "artifact_uri": "/Users/mac/git/Thesis/mlruns/1/3384080ba87c4f2685f10020edb7efd6/artifacts",
+      "classification": "UNCERTAIN",
+      "classification_reason": "Legacy metadata contains no metrics or recoverable run artifacts; repository evidence does not prove thesis-evidence status.",
+      "end_time": 1768136735366,
+      "end_time_iso": "2026-01-11T13:05:35.366000Z",
+      "experiment_id": 1,
+      "latest_metrics": [],
+      "lifecycle_stage": "active",
+      "metrics": [],
+      "name": "phobert_base_victsd_v1",
+      "params": [
+        {
+          "key": "batch_size",
+          "value": "16"
+        },
+        {
+          "key": "dataset_version",
+          "value": "victsd_v1"
+        },
+        {
+          "key": "epochs",
+          "value": "4"
+        },
+        {
+          "key": "learning_rate",
+          "value": "2e-05"
+        },
+        {
+          "key": "max_length",
+          "value": "128"
+        },
+        {
+          "key": "model",
+          "value": "vinai/phobert-base"
+        }
+      ],
+      "run_uuid": "3384080ba87c4f2685f10020edb7efd6",
+      "start_time": 1768136724695,
+      "start_time_iso": "2026-01-11T13:05:24.695000Z",
+      "status": "FINISHED",
+      "tags": [
+        {
+          "key": "mlflow.runName",
+          "value": "phobert_base_victsd_v1"
+        },
+        {
+          "key": "mlflow.source.git.commit",
+          "value": "8ed8afca5aa0bdc530cfcc0fdf1b0bb3c753bfaa"
+        },
+        {
+          "key": "mlflow.source.name",
+          "value": "./scripts/05_train_phobert.py"
+        },
+        {
+          "key": "mlflow.source.type",
+          "value": "LOCAL"
+        },
+        {
+          "key": "mlflow.user",
+          "value": "mac"
+        }
+      ]
+    },
+    {
+      "artifact_uri": "/Users/mac/git/Thesis/mlruns/1/1e59ff3beaa94a5fa305b4d40c814952/artifacts",
+      "classification": "UNCERTAIN",
+      "classification_reason": "Legacy metadata contains no metrics or recoverable run artifacts; repository evidence does not prove thesis-evidence status.",
+      "end_time": 1768136787753,
+      "end_time_iso": "2026-01-11T13:06:27.753000Z",
+      "experiment_id": 1,
+      "latest_metrics": [],
+      "lifecycle_stage": "active",
+      "metrics": [],
+      "name": "phobert_base_victsd_v1",
+      "params": [
+        {
+          "key": "batch_size",
+          "value": "16"
+        },
+        {
+          "key": "dataset_version",
+          "value": "victsd_v1"
+        },
+        {
+          "key": "epochs",
+          "value": "4"
+        },
+        {
+          "key": "learning_rate",
+          "value": "2e-05"
+        },
+        {
+          "key": "max_length",
+          "value": "128"
+        },
+        {
+          "key": "model",
+          "value": "vinai/phobert-base"
+        }
+      ],
+      "run_uuid": "1e59ff3beaa94a5fa305b4d40c814952",
+      "start_time": 1768136776602,
+      "start_time_iso": "2026-01-11T13:06:16.602000Z",
+      "status": "FINISHED",
+      "tags": [
+        {
+          "key": "mlflow.runName",
+          "value": "phobert_base_victsd_v1"
+        },
+        {
+          "key": "mlflow.source.git.commit",
+          "value": "8ed8afca5aa0bdc530cfcc0fdf1b0bb3c753bfaa"
+        },
+        {
+          "key": "mlflow.source.name",
+          "value": "./scripts/05_train_phobert.py"
+        },
+        {
+          "key": "mlflow.source.type",
+          "value": "LOCAL"
+        },
+        {
+          "key": "mlflow.user",
+          "value": "mac"
+        }
+      ]
+    },
+    {
+      "artifact_uri": "/Users/mac/git/Thesis/mlruns/1/bc3513db4253445ca6f97af050215726/artifacts",
+      "classification": "UNCERTAIN",
+      "classification_reason": "Legacy metadata contains no metrics or recoverable run artifacts; repository evidence does not prove thesis-evidence status.",
+      "end_time": 1768136838280,
+      "end_time_iso": "2026-01-11T13:07:18.280000Z",
+      "experiment_id": 1,
+      "latest_metrics": [],
+      "lifecycle_stage": "active",
+      "metrics": [],
+      "name": "phobert_base_victsd_v1",
+      "params": [
+        {
+          "key": "batch_size",
+          "value": "16"
+        },
+        {
+          "key": "dataset_version",
+          "value": "victsd_v1"
+        },
+        {
+          "key": "epochs",
+          "value": "4"
+        },
+        {
+          "key": "learning_rate",
+          "value": "2e-05"
+        },
+        {
+          "key": "max_length",
+          "value": "128"
+        },
+        {
+          "key": "model",
+          "value": "vinai/phobert-base"
+        }
+      ],
+      "run_uuid": "bc3513db4253445ca6f97af050215726",
+      "start_time": 1768136820673,
+      "start_time_iso": "2026-01-11T13:07:00.673000Z",
+      "status": "FINISHED",
+      "tags": [
+        {
+          "key": "mlflow.runName",
+          "value": "phobert_base_victsd_v1"
+        },
+        {
+          "key": "mlflow.source.git.commit",
+          "value": "8ed8afca5aa0bdc530cfcc0fdf1b0bb3c753bfaa"
+        },
+        {
+          "key": "mlflow.source.name",
+          "value": "./scripts/05_train_phobert.py"
+        },
+        {
+          "key": "mlflow.source.type",
+          "value": "LOCAL"
+        },
+        {
+          "key": "mlflow.user",
+          "value": "mac"
+        }
+      ]
+    }
+  ]
+}

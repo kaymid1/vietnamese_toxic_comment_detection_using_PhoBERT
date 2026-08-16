@@ -1,0 +1,87 @@
+{
+  "artifact_recovery_attempted": false,
+  "artifact_substitution_attempted": false,
+  "references": [
+    {
+      "classification": "machine_specific_macos",
+      "exists": false,
+      "experiment_id": 0,
+      "kind": "experiment",
+      "resolved_path_if_applicable": null,
+      "run_id": null,
+      "status": "missing",
+      "stored_uri": "/Users/mac/git/Thesis/mlruns/0"
+    },
+    {
+      "classification": "machine_specific_macos",
+      "exists": false,
+      "experiment_id": 1,
+      "kind": "experiment",
+      "resolved_path_if_applicable": null,
+      "run_id": null,
+      "status": "missing",
+      "stored_uri": "/Users/mac/git/Thesis/mlruns/1"
+    },
+    {
+      "classification": "machine_specific_macos",
+      "exists": false,
+      "experiment_id": 1,
+      "kind": "run",
+      "resolved_path_if_applicable": null,
+      "run_id": "1e59ff3beaa94a5fa305b4d40c814952",
+      "status": "missing",
+      "stored_uri": "/Users/mac/git/Thesis/mlruns/1/1e59ff3beaa94a5fa305b4d40c814952/artifacts"
+    },
+    {
+      "classification": "machine_specific_macos",
+      "exists": false,
+      "experiment_id": 1,
+      "kind": "run",
+      "resolved_path_if_applicable": null,
+      "run_id": "3384080ba87c4f2685f10020edb7efd6",
+      "status": "missing",
+      "stored_uri": "/Users/mac/git/Thesis/mlruns/1/3384080ba87c4f2685f10020edb7efd6/artifacts"
+    },
+    {
+      "classification": "machine_specific_macos",
+      "exists": false,
+      "experiment_id": 1,
+      "kind": "run",
+      "resolved_path_if_applicable": null,
+      "run_id": "90d6b31e05fc46ffaeefd3ae2634624d",
+      "status": "missing",
+      "stored_uri": "/Users/mac/git/Thesis/mlruns/1/90d6b31e05fc46ffaeefd3ae2634624d/artifacts"
+    },
+    {
+      "classification": "machine_specific_macos",
+      "exists": false,
+      "experiment_id": 1,
+      "kind": "run",
+      "resolved_path_if_applicable": null,
+      "run_id": "bc3513db4253445ca6f97af050215726",
+      "status": "missing",
+      "stored_uri": "/Users/mac/git/Thesis/mlruns/1/bc3513db4253445ca6f97af050215726/artifacts"
+    },
+    {
+      "classification": "machine_specific_macos",
+      "exists": false,
+      "experiment_id": 1,
+      "kind": "run",
+      "resolved_path_if_applicable": null,
+      "run_id": "e3b3b436767a4325b076bb3fe0af47de",
+      "status": "missing",
+      "stored_uri": "/Users/mac/git/Thesis/mlruns/1/e3b3b436767a4325b076bb3fe0af47de/artifacts"
+    },
+    {
+      "classification": "machine_specific_macos",
+      "exists": false,
+      "experiment_id": 1,
+      "kind": "run",
+      "resolved_path_if_applicable": null,
+      "run_id": "eb0d559c927848d4af4c0e1f27d7840c",
+      "status": "missing",
+      "stored_uri": "/Users/mac/git/Thesis/mlruns/1/eb0d559c927848d4af4c0e1f27d7840c/artifacts"
+    }
+  ],
+  "source_database_sha256": "338dbb3693f55b02cc454ec1a3d55763d4f3b04599191ef8e4da64aa9a53516f"
+}
