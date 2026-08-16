@@ -9,6 +9,7 @@ from urllib.request import urlopen
 import mlflow
 from mlflow.tracking import MlflowClient
 
+from backend.mlflow_client_config import configure_mlflow_client
 from backend.mlflow_legacy_export import sha256_file
 from backend.mlflow_server import (
     build_mlflow_server_command,
@@ -79,13 +80,24 @@ def test_fresh_server_logs_and_recovers_portable_artifacts(monkeypatch, tmp_path
 
     first_server, _ = _start_server(command, config.backend_db_path.parent)
     try:
-        mlflow.set_tracking_uri(config.client_tracking_uri)
-        experiment_id = mlflow.create_experiment("portable-smoke")
-        with mlflow.start_run(experiment_id=experiment_id, run_name="phase-2b1-smoke") as active_run:
-            run_id = active_run.info.run_id
+        configured = configure_mlflow_client(
+            enabled=True,
+            experiment_name="portable-local-client-smoke",
+            run_name="phase-2b2a-smoke",
+            tags={"viettoxic.execution": "local"},
+            timeout=5.0,
+        )
+        assert configured is mlflow
+        active_run = mlflow.active_run()
+        assert active_run is not None
+        run_id = active_run.info.run_id
+        experiment_id = active_run.info.experiment_id
+        try:
             mlflow.log_param("portable_param", "ok")
             mlflow.log_metric("portable_metric", 0.75)
             mlflow.log_text("portable artifact\n", "smoke.txt")
+        finally:
+            mlflow.end_run()
 
         client = MlflowClient(tracking_uri=config.client_tracking_uri)
         run = client.get_run(run_id)

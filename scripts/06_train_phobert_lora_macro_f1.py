@@ -10,7 +10,21 @@ Refactored to match the LoRA script data source + export layout.
 
 import argparse
 import os, json, random, shutil, time, uuid
+import sys
 from datetime import datetime, timezone
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from backend.mlflow_client_config import (
+    build_local_training_tags,
+    configure_mlflow_client,
+    get_local_experiment_name,
+    is_mlflow_enabled,
+)
+
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -36,9 +50,8 @@ from sklearn.metrics import (
 # -----------------------
 t0 = time.time()
 
-MLFLOW_ENABLED = os.environ.get("MLFLOW_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
-MLFLOW_TRACKING_URI = os.environ.get("MLFLOW_TRACKING_URI", "mlruns/")
-MLFLOW_EXPERIMENT_NAME = os.environ.get("MLFLOW_EXPERIMENT_NAME", "viettoxic-phobert-lora-macro-f1")
+MLFLOW_ENABLED = is_mlflow_enabled()
+MLFLOW_EXPERIMENT_NAME = get_local_experiment_name("phobert_v2_macro_f1")
 POLICY_VERSION = os.environ.get("POLICY_VERSION", "policy-v1")
 MODEL_VERSION = os.environ.get("MODEL_VERSION", "phobert/v2-macro-f1")
 RUN_TIMESTAMP = time.strftime("%Y%m%d_%H%M%S")
@@ -114,16 +127,19 @@ OUTPUT_BASE = OUTPUT_BASE_ENV if OUTPUT_BASE_ENV else f"models/options/phobert/{
 RESULTS_BASE = os.environ.get("RESULTS_BASE", f"results/phobert/{run_dataset_tag}")
 
 if MLFLOW_ENABLED and not args.dry_run:
-    try:
-        import mlflow as _mlflow
-
-        mlflow = _mlflow
-        mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
-        mlflow.set_experiment(MLFLOW_EXPERIMENT_NAME)
-        mlflow.start_run(run_name=RUN_ID)
-        mlflow_active = True
-    except Exception as exc:
-        print(f"MLflow logging disabled: {exc}", flush=True)
+    mlflow = configure_mlflow_client(
+        enabled=True,
+        experiment_name=MLFLOW_EXPERIMENT_NAME,
+        run_name=RUN_ID,
+        tags=build_local_training_tags(
+            training_mode="full_finetune",
+            dataset=run_dataset_tag,
+            script=Path(__file__).name,
+            run_config_id=RUN_ID,
+            base_model=MODEL_NAME,
+        ),
+    )
+    mlflow_active = True
 
 PRIMARY_METRIC = os.environ.get("PRIMARY_METRIC", "eval_macro_f1")
 
