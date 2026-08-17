@@ -44,53 +44,11 @@ logger = logging.getLogger("viet-toxic-backend")
 # Resolve the project root and load environment files before importing local
 # modules that materialize environment-dependent defaults at import time.
 BASE_DIR = get_project_root()
-ENV_FILES = [
-    BASE_DIR / ".env",
-    BASE_DIR / ".env.local",
-    BASE_DIR / "backend" / ".env",
-    BASE_DIR / "backend" / ".env.local",
-]
 
+from backend.env_loader import load_env_files
 
-def load_env_files() -> None:
-    def _load_env_fallback(path: Path) -> None:
-        for raw_line in path.read_text(encoding="utf-8").splitlines():
-            line = raw_line.strip()
-            if not line or line.startswith("#"):
-                continue
-            if line.startswith("export "):
-                line = line[len("export ") :].strip()
-            if "=" not in line:
-                continue
-            key, value = line.split("=", 1)
-            key = key.strip()
-            value = value.strip()
-            if not key:
-                continue
-            if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
-                value = value[1:-1]
-            os.environ[key] = value
-
-    loaded_any = False
-    try:
-        from dotenv import load_dotenv
-
-        for env_path in ENV_FILES:
-            if env_path.exists():
-                load_dotenv(env_path, override=True)
-                loaded_any = True
-    except ImportError:
-        logger.warning("python-dotenv not installed; using basic .env parser fallback")
-        for env_path in ENV_FILES:
-            if env_path.exists():
-                _load_env_fallback(env_path)
-                loaded_any = True
-
-    if loaded_any:
-        logger.info("Loaded environment variables from .env files")
-
-
-load_env_files()
+if load_env_files():
+    logger.info("Loaded environment variables from .env files")
 
 
 from domain_classifier import CATEGORY_THRESHOLDS

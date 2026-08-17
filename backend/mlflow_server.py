@@ -14,6 +14,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
+from backend.env_loader import load_env_files
+
+load_env_files()
+
 from backend.runtime_paths import (
     get_legacy_mlflow_db_path,
     get_mlflow_artifact_destination_uri,

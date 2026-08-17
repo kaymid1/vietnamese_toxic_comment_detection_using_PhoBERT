@@ -128,8 +128,25 @@ fi
 echo "[INFO] Services started."
 echo "[INFO] Backend:   http://127.0.0.1:$BACKEND_PORT"
 echo "[INFO] Frontend:  http://127.0.0.1:$FRONTEND_PORT"
-echo "[INFO] Webhook:   http://127.0.0.1:$WEBHOOK_PORT"
-echo "[INFO] Ngrok URL: $WEBHOOK_NGROK_URL"
+
+if [[ "$START_WEBHOOK" == "1" ]]; then
+  echo "[INFO] Webhook:   http://127.0.0.1:$WEBHOOK_PORT"
+else
+  echo "[INFO] Webhook:   disabled"
+fi
+
+if [[ "$START_WEBHOOK" == "1" && "$START_WEBHOOK_NGROK" == "1" ]]; then
+  echo "[INFO] Ngrok webhook: $WEBHOOK_NGROK_URL"
+else
+  echo "[INFO] Ngrok webhook: disabled"
+fi
+
+if [[ "$START_FRONTEND_NGROK" == "1" ]]; then
+  echo "[INFO] Frontend ngrok: enabled"
+else
+  echo "[INFO] Frontend ngrok: disabled"
+fi
+
 echo "[INFO] Logs dir:  $RUNTIME_DIR"
 
 SERVICE_PIDS=("$BACKEND_PID" "$FRONTEND_PID")
