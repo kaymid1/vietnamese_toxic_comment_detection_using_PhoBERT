@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Sequence
+from urllib.parse import urlsplit, urlunsplit
 
 from backend.artifact_refs import inspect_artifact_ref
 from backend.mlflow_legacy_export import (
@@ -90,6 +91,7 @@ COUNT_TABLES = (
 )
 WINDOWS_ABSOLUTE_RE = re.compile(r"^[A-Za-z]:[\\/]")
 MACHINE_PATH_RE = re.compile(r"(?:^[A-Za-z]:[\\/]|^/Users/|^file:(?://)?(?:/[A-Za-z]:|/Users/))", re.IGNORECASE)
+PORTABLE_REFERENCE_PREFIXES = ("data://", "runtime://", "model://")
 
 
 class StateBundleError(RuntimeError):
@@ -176,6 +178,52 @@ def _write_json(path: Path, payload: Any) -> None:
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     temporary.write_bytes(_json_bytes(payload))
     temporary.replace(path)
+
+
+def _safe_display_reference(value: object) -> str:
+    """Return a diagnostic-only reference value that cannot disclose URI credentials.
+
+    Application references remain unchanged in the private SQLite payload.  This
+    function is only for CLI reports and non-DB bundle metadata.
+    """
+    raw = str(value or "").strip()
+    if not raw or raw.startswith(PORTABLE_REFERENCE_PREFIXES):
+        return raw
+    try:
+        parsed = urlsplit(raw)
+    except ValueError:
+        return "<redacted>"
+    scheme = parsed.scheme.lower()
+    if scheme in {"http", "https"}:
+        if not parsed.hostname:
+            return "<redacted>"
+        try:
+            host = parsed.hostname
+            if parsed.port is not None:
+                host = f"{host}:{parsed.port}"
+        except ValueError:
+            return "<redacted>"
+        netloc = f"<redacted>@{host}" if parsed.username is not None or parsed.password is not None else host
+        display = urlunsplit((scheme, netloc, parsed.path, "", ""))
+        return f"{display}?<redacted>" if parsed.query or parsed.fragment else display
+    if scheme and "://" in raw:
+        return f"{scheme}://<redacted>"
+    return raw
+
+
+def _safe_reference_record(record: Mapping[str, Any]) -> dict[str, Any]:
+    """Copy a reference record for diagnostics without retaining a raw URI."""
+    safe = dict(record)
+    display = _safe_display_reference(record.get("logical_reference", record.get("reference", "")))
+    safe["display_value"] = display
+    for key in ("reference", "logical_reference"):
+        if key in safe:
+            safe[key] = display
+    return safe
+
+
+def _safe_reference_records(records: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    return [_safe_reference_record(record) for record in records]
 
 
 def _sha256_file(path: Path) -> str:
@@ -547,14 +595,28 @@ def _active_mlflow_analysis(db_path: Path, artifact_root: Path) -> dict[str, Any
             for run_id, uri in connection.execute("SELECT run_uuid, artifact_uri FROM runs WHERE artifact_uri IS NOT NULL"):
                 value = str(uri)
                 if MACHINE_PATH_RE.search(value) or ("://" not in value and not value.startswith("mlflow-artifacts:/")):
-                    unsafe.append({"kind": "run", "identity": str(run_id), "reference": value})
+                    unsafe.append(
+                        {
+                            "kind": "run",
+                            "identity": str(run_id),
+                            "reference": _safe_display_reference(value),
+                            "display_value": _safe_display_reference(value),
+                        }
+                    )
         if "experiments" in tables:
             for experiment_id, uri in connection.execute(
                 "SELECT experiment_id, artifact_location FROM experiments WHERE artifact_location IS NOT NULL"
             ):
                 value = str(uri)
                 if MACHINE_PATH_RE.search(value) or ("://" not in value and not value.startswith("mlflow-artifacts:/")):
-                    unsafe.append({"kind": "experiment", "identity": str(experiment_id), "reference": value})
+                    unsafe.append(
+                        {
+                            "kind": "experiment",
+                            "identity": str(experiment_id),
+                            "reference": _safe_display_reference(value),
+                            "display_value": _safe_display_reference(value),
+                        }
+                    )
         if "alembic_version" in tables:
             row = connection.execute("SELECT version_num FROM alembic_version LIMIT 1").fetchone()
             alembic_revision = str(row[0]) if row else None
@@ -827,7 +889,7 @@ def _inventory_only(paths: SourcePaths, workspace: Path) -> tuple[dict[str, Any]
             "issues": issues,
             "feedback": feedback,
             "models": {key: value for key, value in models.items() if key != "files"},
-            "persistent_references": references,
+            "persistent_references": _safe_reference_records(references),
             "active_mlflow": active_mlflow,
             "legacy_mlflow_evidence": legacy,
             "environment_requirements": _environment_requirements(),
@@ -904,7 +966,7 @@ def export_bundle(
             "issues": issues,
             "feedback": feedback,
             "models": models,
-            "persistent_references": references,
+            "persistent_references": _safe_reference_records(references),
             "active_mlflow": active_mlflow,
             "legacy_mlflow_evidence": legacy,
             "runtime_exclusions": [
@@ -1397,6 +1459,8 @@ def verify_target(bundle: Path, *, target_paths: TargetPaths | None = None) -> d
         and active_valid
         and legacy_present
     )
+    safe_stale_managed = _safe_reference_records(stale_managed)
+    safe_missing_required = _safe_reference_records(missing_required)
     return {
         "valid": valid,
         "feedback_db_integrity": application["integrity"],
@@ -1405,8 +1469,8 @@ def verify_target(bundle: Path, *, target_paths: TargetPaths | None = None) -> d
         "expected_state_counts": expected_counts,
         "actual_state_counts": application["state_counts"],
         "portable_reference_count": sum(1 for item in references if item["classification"] == "portable"),
-        "stale_managed_references": stale_managed,
-        "missing_required_artifacts": missing_required,
+        "stale_managed_references": safe_stale_managed,
+        "missing_required_artifacts": safe_missing_required,
         "model_contracts": model_contracts,
         "models_valid": models_valid,
         "active_mlflow": active_analysis,

@@ -401,3 +401,55 @@ def test_metadata_never_contains_secret_values_and_automation_warns(source_state
     assert manifest["sensitivity"]["contains_sensitive_application_state"] is True
     report = state_bundle.import_dry_run(bundle, target_paths=_target(tmp_path))
     assert any("enabled automation" in warning for warning in report["warnings"])
+
+
+@pytest.mark.parametrize(
+    "sensitive_uri",
+    [
+        "https://example.test/model.zip?token=PHASE2C_SECRET_SENTINEL_DO_NOT_LEAK",
+        "https://example.test/model.zip?sig=PHASE2C_SECRET_SENTINEL_DO_NOT_LEAK&expires=123",
+        "https://user:PHASE2C_SECRET_SENTINEL_DO_NOT_LEAK@example.test/file",
+        "https://example.test/file#PHASE2C_SECRET_SENTINEL_DO_NOT_LEAK",
+    ],
+)
+def test_sensitive_reference_diagnostics_are_redacted_everywhere(
+    source_state, tmp_path, monkeypatch, capsys, sensitive_uri
+):
+    sentinel = "PHASE2C_SECRET_SENTINEL_DO_NOT_LEAK"
+    run_id = f"secret-{abs(hash(sensitive_uri))}"
+    with closing(sqlite3.connect(source_state.feedback_db)) as connection:
+        connection.execute(
+            """
+            INSERT INTO mlflow_do_run (run_id, provider, status, created_at, updated_at, bundle_url)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (run_id, "fixture", "completed", "2026-08-17T00:00:00Z", "2026-08-17T00:00:00Z", sensitive_uri),
+        )
+        connection.commit()
+
+    source_before = source_state.feedback_db.read_bytes()
+    report = state_bundle.export_bundle(dry_run=True, source_paths=source_state)
+    assert source_state.feedback_db.read_bytes() == source_before
+    assert sentinel not in json.dumps(report)
+    matching = [item for item in report["persistent_references"] if item["row_identity"] == run_id]
+    assert matching and matching[0]["classification"] == "protected_uri"
+    assert "<redacted>" in matching[0]["display_value"]
+
+    bundle = _export(source_state, tmp_path, f"bundle-{abs(hash(sensitive_uri))}")
+    source_inventory = (bundle / "metadata" / "source_inventory.json").read_text(encoding="utf-8")
+    manifest = (bundle / "manifest.json").read_text(encoding="utf-8")
+    assert sentinel not in source_inventory
+    assert sentinel not in manifest
+    assert sentinel in (bundle / "application" / "feedback.db").read_bytes().decode("utf-8", errors="ignore")
+    assert sentinel not in json.dumps(state_bundle.inspect_bundle(bundle))
+    assert sentinel not in json.dumps(state_bundle.verify_bundle(bundle))
+    target = _target(tmp_path / f"target-{abs(hash(sensitive_uri))}")
+    assert sentinel not in json.dumps(state_bundle.import_dry_run(bundle, target_paths=target))
+    state_bundle.import_bundle(bundle, target_paths=target, apply=True)
+    assert sentinel not in json.dumps(state_bundle.verify_target(bundle, target_paths=target))
+
+    monkeypatch.setenv("APP_DATA_DIR", str(source_state.data_dir))
+    monkeypatch.setenv("APP_RUNTIME_DIR", str(source_state.runtime_dir))
+    monkeypatch.setenv("VIETTOXIC_MODEL_OPTIONS_DIR", str(source_state.model_options_dir))
+    assert state_bundle.main(["export", "--dry-run"]) == 0
+    assert sentinel not in capsys.readouterr().out
