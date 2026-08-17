@@ -52,6 +52,7 @@ if load_env_files():
 
 
 from domain_classifier import CATEGORY_THRESHOLDS
+from backend.article_discovery import DiscoveredArticle, fetch_vnexpress_rss
 from backend.crawl_adapter import crawl_urls
 from backend.system_settings import (
     ensure_system_settings_table,
@@ -78,6 +79,12 @@ from backend.mlflow_kaggle_ingest import (
     get_kaggle_ingestion_record,
     ingest_kaggle_evidence,
     validate_kaggle_evidence,
+)
+from backend.scheduled_tasks import (
+    ScheduledTaskConflict,
+    ScheduledTaskNotFound,
+    ScheduledTaskService,
+    ensure_scheduled_task_tables,
 )
 from infer_crawled_local import infer_crawled, build_segment_hash, build_context_segment_hash
 
@@ -114,6 +121,10 @@ AUTOMATION_WATCHER_LOCK = threading.Lock()
 AUTOMATION_WATCH_RUN_IDS: set[str] = set()
 GEMINI_REQUEST_SLOT_LOCK = threading.Lock()
 GEMINI_NEXT_REQUEST_AT = 0.0
+SCHEDULED_TASK_SERVICE = ScheduledTaskService(
+    FEEDBACK_DB_PATH,
+    lambda task, run_id: run_scheduled_task(task, run_id),
+)
 
 DO_API_BASE = "https://api.digitalocean.com/v2"
 DO_DEFAULT_REGION = "sgp1"
@@ -475,6 +486,17 @@ def require_admin(authorization: Optional[str] = Header(default=None)) -> str:
 
 
 app = FastAPI(title="VietComment Analyzer Local API")
+
+
+@app.on_event("startup")
+def start_scheduled_task_service() -> None:
+    init_feedback_db()
+    SCHEDULED_TASK_SERVICE.start()
+
+
+@app.on_event("shutdown")
+def stop_scheduled_task_service() -> None:
+    SCHEDULED_TASK_SERVICE.stop()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -555,6 +577,14 @@ class SystemSettingRevealRequest(BaseModel):
     key: str = Field(min_length=1)
 
 
+class ScheduledTaskUpdateRequest(BaseModel):
+    enabled: Optional[bool] = None
+    interval_minutes: Optional[int] = Field(default=None, ge=1, le=10080)
+    timezone: Optional[str] = None
+    max_articles_per_run: Optional[int] = Field(default=None, ge=1, le=100)
+    rss_url: Optional[str] = None
+
+
 @app.post("/api/admin/login", response_model=AdminLoginResponse)
 def admin_login(request: AdminLoginRequest) -> Dict[str, str]:
     username, password, secret, ttl_seconds = _admin_config()
@@ -623,6 +653,72 @@ def admin_reveal_system_setting_secret(
         raise HTTPException(status_code=404, detail=f"Unknown system setting key: {request.key}") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/admin/scheduled-tasks", dependencies=[Depends(require_admin)])
+def scheduled_tasks_list() -> Dict[str, Any]:
+    init_feedback_db()
+    return {"items": SCHEDULED_TASK_SERVICE.list_tasks()}
+
+
+@app.get("/api/admin/scheduled-tasks/{task_id}", dependencies=[Depends(require_admin)])
+def scheduled_task_detail(task_id: str) -> Dict[str, Any]:
+    init_feedback_db()
+    try:
+        task = SCHEDULED_TASK_SERVICE.get_task(task_id)
+        return {
+            "task": task,
+            "runs": SCHEDULED_TASK_SERVICE.list_runs(task_id, 20),
+            "articles": SCHEDULED_TASK_SERVICE.list_articles(task_id, limit=100),
+        }
+    except ScheduledTaskNotFound as exc:
+        raise HTTPException(status_code=404, detail=f"Scheduled task not found: {task_id}") from exc
+
+
+@app.patch("/api/admin/scheduled-tasks/{task_id}", dependencies=[Depends(require_admin)])
+def scheduled_task_update(task_id: str, request: ScheduledTaskUpdateRequest, admin_username: str = Depends(require_admin)) -> Dict[str, Any]:
+    init_feedback_db()
+    values = request.model_dump(exclude_unset=True)
+    try:
+        task = SCHEDULED_TASK_SERVICE.update_task(task_id, values, admin_username)
+        return {"task": task}
+    except ScheduledTaskNotFound as exc:
+        raise HTTPException(status_code=404, detail=f"Scheduled task not found: {task_id}") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/admin/scheduled-tasks/{task_id}/run-now", dependencies=[Depends(require_admin)])
+def scheduled_task_run_now(task_id: str) -> Dict[str, Any]:
+    init_feedback_db()
+    try:
+        run = SCHEDULED_TASK_SERVICE.run_now(task_id)
+        return {"run": run}
+    except ScheduledTaskNotFound as exc:
+        raise HTTPException(status_code=404, detail=f"Scheduled task not found: {task_id}") from exc
+    except ScheduledTaskConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.get("/api/admin/scheduled-tasks/{task_id}/runs", dependencies=[Depends(require_admin)])
+def scheduled_task_runs(task_id: str, limit: int = Query(default=50, ge=1, le=200)) -> Dict[str, Any]:
+    init_feedback_db()
+    try:
+        return {"items": SCHEDULED_TASK_SERVICE.list_runs(task_id, limit)}
+    except ScheduledTaskNotFound as exc:
+        raise HTTPException(status_code=404, detail=f"Scheduled task not found: {task_id}") from exc
+
+
+@app.get("/api/admin/scheduled-tasks/{task_id}/runs/{run_id}", dependencies=[Depends(require_admin)])
+def scheduled_task_run_detail(task_id: str, run_id: str) -> Dict[str, Any]:
+    init_feedback_db()
+    try:
+        return {
+            "run": SCHEDULED_TASK_SERVICE.get_run(task_id, run_id),
+            "articles": SCHEDULED_TASK_SERVICE.list_articles(task_id, run_id=run_id, limit=500),
+        }
+    except ScheduledTaskNotFound as exc:
+        raise HTTPException(status_code=404, detail=f"Scheduled task run not found: {run_id}") from exc
 
 
 class FeedbackPageItem(BaseModel):
@@ -2414,6 +2510,7 @@ def init_feedback_db() -> None:
     with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
         conn.execute("PRAGMA foreign_keys = ON")
         ensure_system_settings_table(conn)
+        ensure_scheduled_task_tables(conn)
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS feedback_page (
@@ -10495,244 +10592,375 @@ def mlflow_rollback(request: MlflowRollbackRequest) -> Dict[str, Any]:
     }
 
 
+def run_analysis_pipeline(
+    urls: List[str],
+    options: AnalyzeOptions,
+    *,
+    source: str = "user_analyze",
+    crawl_results_override: Optional[List[Dict[str, Any]]] = None,
+    stage_callback: Optional[Callable[[str, Dict[str, Any]], None]] = None,
+) -> Dict[str, Any]:
+    """Run the shared crawl → inference → MLflow persistence workflow.
+
+    ``crawl_results_override`` is used by scheduled inference retries so a
+    successful crawl artifact is not needlessly crawled again.
+    """
+    mlflow_accept_threshold = float(options.mlflow_gate_accept_threshold)
+    mlflow_discard_threshold = float(options.mlflow_gate_discard_threshold)
+    if mlflow_discard_threshold > mlflow_accept_threshold:
+        raise HTTPException(status_code=400, detail="mlflow_gate_discard_threshold must be <= mlflow_gate_accept_threshold")
+
+    job_id = uuid.uuid4().hex
+    out_dir = PROCESSED_DATA_DIR / f"job_{job_id}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    analysis_started_at = time.perf_counter()
+
+    def log_analysis_stage(stage: str, **fields: Any) -> None:
+        detail = " ".join(f"{key}={value}" for key, value in fields.items())
+        logger.info(
+            "[analysis:%s] %s elapsed_ms=%d%s",
+            job_id,
+            stage,
+            int((time.perf_counter() - analysis_started_at) * 1000),
+            f" {detail}" if detail else "",
+        )
+
+    def notify(stage: str, **fields: Any) -> None:
+        if stage_callback is not None:
+            stage_callback(stage, {"job_id": job_id, **fields})
+
+    model_root = resolve_model_root()
+    try:
+        if options.model_path:
+            requested_model_path = Path(options.model_path).expanduser().resolve()
+            model_root_resolved = model_root.resolve()
+            try:
+                requested_model_path.relative_to(model_root_resolved)
+            except ValueError as exc:
+                raise ValueError(
+                    f"Model path must be under {model_root_resolved}: {requested_model_path}"
+                ) from exc
+            relative_parts = requested_model_path.relative_to(model_root_resolved).parts
+            if len(relative_parts) < 2:
+                raise ValueError(f"Model path must point to a model directory under {model_root_resolved}")
+            model_type = relative_parts[0]
+            model_name = requested_model_path.name
+            _, _, model_path = resolve_model_path(model_root, f"{model_type}/{model_name}")
+            model_id = f"{model_type}/{model_name}"
+        else:
+            model_type, model_name, model_path = resolve_model_path(model_root, options.model_name)
+            model_id = f"{model_type}/{model_name}"
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except (PermissionError, OSError) as exc:
+        raise HTTPException(status_code=500, detail=f"Unable to access model directory: {exc}") from exc
+
+    save_job_meta(
+        out_dir,
+        build_job_meta(
+            job_id=job_id,
+            urls=urls,
+            url_hashes=[],
+            model_ids=[model_id],
+            enable_video=False,
+            merged_used=False,
+        ),
+    )
+
+    model_root = resolve_model_root()
+    try:
+        model_type, model_name, model_path = resolve_model_path(model_root, model_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except (PermissionError, OSError) as exc:
+        raise HTTPException(status_code=500, detail=f"Unable to access model directory: {exc}") from exc
+
+    thresholds_by_domain = get_effective_thresholds(model_id)
+    logger.info("Job %s: start analyze for %s urls", job_id, len(urls))
+    logger.info("Job %s: using model '%s' (%s) from %s", job_id, model_id, model_type, model_path)
+    log_analysis_stage("crawl:start", urls=len(urls), reused=bool(crawl_results_override is not None))
+    notify("crawl:start", urls=urls, model_id=model_id, reused=bool(crawl_results_override is not None))
+
+    crawl_results = list(crawl_results_override) if crawl_results_override is not None else crawl_urls(
+        urls,
+        out_dir=str(DATA_DIR),
+        timeout=options.crawl_timeout_sec,
+        max_load_more=options.max_load_more_clicks,
+        max_comments_per_url=options.max_comments_per_url,
+    )
+    log_analysis_stage(
+        "crawl:done",
+        ok_urls=sum(1 for result in crawl_results if result.get("status") == "ok"),
+        segments=sum(int(result.get("num_segments") or 0) for result in crawl_results),
+    )
+    notify("crawl:done", crawl_results=crawl_results)
+
+    for r in crawl_results:
+        logger.info(
+            "Job %s: crawl result url=%s status=%s method=%s segments_path=%s error=%s",
+            job_id,
+            r.get("url"),
+            r.get("status"),
+            r.get("method"),
+            r.get("segments_path"),
+            r.get("error"),
+        )
+
+    ok_hashes = [r["url_hash"] for r in crawl_results if r.get("status") == "ok"]
+    infer_data_dir = DATA_DIR
+    merged_used = False
+    save_job_meta(
+        out_dir,
+        build_job_meta(
+            job_id=job_id,
+            urls=urls,
+            url_hashes=ok_hashes,
+            model_ids=[model_id],
+            enable_video=False,
+            merged_used=merged_used,
+        ),
+    )
+
+    if ok_hashes:
+        logger.info("Job %s: running inference on %s crawled urls", job_id, len(ok_hashes))
+        log_analysis_stage("inference:start", model=model_id, urls=len(ok_hashes))
+        notify("inference:start", model_id=model_id, urls=ok_hashes)
+        infer_crawled(
+            model_path=str(model_path),
+            model_type=model_type,
+            data_dir=str(infer_data_dir),
+            out_dir=str(out_dir),
+            batch_size=options.batch_size,
+            max_length=options.max_length,
+            page_threshold=options.page_threshold,
+            seg_threshold=options.seg_threshold,
+            threshold_news=thresholds_by_domain.get("news"),
+            threshold_social=thresholds_by_domain.get("social"),
+            threshold_forum=thresholds_by_domain.get("forum"),
+            threshold_unknown=thresholds_by_domain.get("unknown"),
+            only_url_hashes=ok_hashes,
+            quiet=True,
+            learned_feedback=load_learned_segments(),
+            html_dir=str(DATA_DIR),
+        )
+        log_analysis_stage("inference:done", model=model_id)
+        notify("inference:done", model_id=model_id, urls=ok_hashes)
+    else:
+        logger.warning("Job %s: no successful crawls to run inference", job_id)
+
+    segment_results = load_segment_results(out_dir)
+    page_by_hash, page_by_url = load_page_results_map(out_dir)
+    seg_by_hash: Dict[str, List[Dict[str, Any]]] = {}
+    seg_by_url: Dict[str, List[Dict[str, Any]]] = {}
+    for seg in segment_results:
+        if seg.get("url_hash"):
+            seg_by_hash.setdefault(seg["url_hash"], []).append(seg)
+        if seg.get("url"):
+            seg_by_url.setdefault(seg["url"], []).append(seg)
+
+    response_results = map_results_to_response(crawl_results, page_by_hash, page_by_url, seg_by_hash, seg_by_url)
+    log_analysis_stage("aggregate:done", results=len(response_results))
+    mlflow_collection: Dict[str, Any] = {
+        "enabled": bool(options.collect_for_mlflow),
+        "batch_id": None,
+        "candidate_rows": 0,
+        "inserted": 0,
+        "samples_inserted": 0,
+        "samples_reused": 0,
+        "predictions_inserted": 0,
+        "skipped_existing_url": 0,
+        "skipped_duplicate_item": 0,
+        "counts": {"accepted": 0, "candidate": 0, "discarded": 0, "total": 0},
+    }
+    if options.collect_for_mlflow:
+        log_analysis_stage("persistence:start")
+        collection_created_at = datetime.utcnow().isoformat() + "Z"
+        collection_batch_id = f"mlf_auto_{uuid.uuid4().hex[:12]}"
+        mlflow_options_json = json.dumps(
+            {
+                "source": source,
+                "batch_size": options.batch_size,
+                "max_length": options.max_length,
+                "page_threshold": options.page_threshold,
+                "seg_threshold": options.seg_threshold,
+                "gate_accept_threshold": mlflow_accept_threshold,
+                "gate_discard_threshold": mlflow_discard_threshold,
+            },
+            ensure_ascii=False,
+        )
+        mlflow_collection = insert_mlflow_comment_rows(
+            batch_id=collection_batch_id,
+            model_id=model_id,
+            source_job_id=job_id,
+            rows=build_mlflow_comment_rows(
+                response_results,
+                collection_batch_id,
+                job_id,
+                mlflow_accept_threshold,
+                mlflow_discard_threshold,
+                collection_created_at,
+            ),
+            options_json=mlflow_options_json,
+            created_at=collection_created_at,
+            batch_created=False,
+        )
+        log_analysis_stage("persistence:done", inserted=mlflow_collection.get("inserted", 0))
+
+    logger.info("Job %s: completed", job_id)
+    log_analysis_stage("response:done")
+    production_manifest = _load_model_json(model_path, "production_manifest.json")
+    family_production_model = get_family_default_model_id(model_root, model_type)
+    return {
+        "job_id": job_id,
+        "flow_state": "completed",
+        "model_name": model_id,
+        "serving_evidence": {
+            "model_family": model_type,
+            "model_version": model_id,
+            "production_slot": model_type if family_production_model == model_id else None,
+            "artifact_checksum": production_manifest.get("artifact_checksum"),
+            "source_run_id": production_manifest.get("source_run_id"),
+        },
+        "thresholds": {"seg_threshold": options.seg_threshold, "page_threshold": options.page_threshold},
+        "thresholds_by_domain": thresholds_by_domain,
+        "mlflow_collection": mlflow_collection,
+        "results": response_results,
+    }
+
+
+def _load_existing_crawl_result(url: str) -> Optional[Dict[str, Any]]:
+    """Reconstruct a crawl result from the existing URL-hash artifact."""
+    url_hash = hash_url(url)
+    output_dir = DATA_DIR / url_hash
+    meta_path = output_dir / "meta.json"
+    segments_path = output_dir / "segments.jsonl"
+    if not meta_path.is_file() or not segments_path.is_file():
+        return None
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if str(meta.get("status") or "") != "ok":
+        return None
+    return {
+        "url": url,
+        "url_hash": url_hash,
+        "status": "ok",
+        "crawl_status": str(meta.get("status") or "ok"),
+        "blocked": bool(meta.get("blocked") or False),
+        "block_reason": meta.get("block_reason"),
+        "from_cache": True,
+        "attempts": int(meta.get("attempts") or 1),
+        "error": None,
+        "output_dir": str(output_dir),
+        "segments_path": str(segments_path),
+        "num_segments": int(meta.get("total_comments") or 0),
+        "comment_cap_hit": bool(meta.get("comment_cap_hit") or False),
+        "max_comments_per_url": int(meta.get("max_comments_per_url") or 0),
+        "method": "scheduled_reused_crawl",
+        "duration_sec": 0,
+        "warnings": meta.get("warnings") or [],
+    }
+
+
+def run_scheduled_task(task: Dict[str, Any], run_id: str) -> Dict[str, Any]:
+    """Execute the built-in VnExpress task through the shared pipeline."""
+    if task.get("task_type") != "vnexpress_rss":
+        raise ValueError(f"Unsupported scheduled task type: {task.get('task_type')}")
+
+    rss_url = str(task.get("rss_url") or "")
+    max_articles = int(task.get("max_articles_per_run") or 10)
+    articles: List[DiscoveredArticle] = fetch_vnexpress_rss(rss_url)
+    SCHEDULED_TASK_SERVICE.upsert_articles(task["id"], articles)
+    candidates = SCHEDULED_TASK_SERVICE.list_processable_articles(task["id"], max_articles)
+    results: List[Dict[str, Any]] = []
+    processed_count = 0
+    failed_count = 0
+
+    for article_row in candidates:
+        discovery_key = str(article_row["discovery_key"])
+        url = str(article_row["canonical_url"])
+        previous_stage = str(article_row.get("stage") or "discovered")
+        reuse_crawl = previous_stage in {"crawled", "failed_inference"}
+        crawl_override = _load_existing_crawl_result(url) if reuse_crawl else None
+        if reuse_crawl and crawl_override is None:
+            reuse_crawl = False
+
+        active_stage = "inferring" if reuse_crawl else "crawling"
+        attempt = SCHEDULED_TASK_SERVICE.begin_article_stage(discovery_key, run_id, active_stage)
+        if attempt is None:
+            results.append({"url": url, "status": "skipped", "reason": "stage_attempt_limit"})
+            continue
+
+        crawl_succeeded = reuse_crawl
+
+        def stage_callback(stage: str, payload: Dict[str, Any]) -> None:
+            nonlocal crawl_succeeded
+            if stage != "crawl:done":
+                return
+            crawl_results = payload.get("crawl_results") or []
+            crawl_succeeded = any(result.get("status") == "ok" for result in crawl_results)
+            if not reuse_crawl:
+                if crawl_succeeded:
+                    SCHEDULED_TASK_SERVICE.mark_article_crawled(discovery_key, run_id)
+                    if SCHEDULED_TASK_SERVICE.begin_article_stage(discovery_key, run_id, "inferring") is None:
+                        raise RuntimeError("Inference stage attempt limit reached")
+                else:
+                    reason = "; ".join(
+                        str(result.get("error") or result.get("crawl_status") or "crawl failed")
+                        for result in crawl_results
+                    ) or "No successful crawl result"
+                    SCHEDULED_TASK_SERVICE.mark_article_failed(discovery_key, run_id, "crawl", reason)
+
+        try:
+            pipeline_result = run_analysis_pipeline(
+                [url],
+                AnalyzeOptions(collect_for_mlflow=True),
+                source="scheduled_vnexpress",
+                crawl_results_override=crawl_override,
+                stage_callback=stage_callback,
+            )
+            if not crawl_succeeded:
+                results.append({"url": url, "status": "failed_crawl"})
+                failed_count += 1
+                continue
+            SCHEDULED_TASK_SERVICE.mark_article_completed(discovery_key, run_id)
+            processed_count += 1
+            results.append(
+                {
+                    "url": url,
+                    "status": "completed",
+                    "job_id": pipeline_result.get("job_id"),
+                    "mlflow_inserted": (pipeline_result.get("mlflow_collection") or {}).get("inserted", 0),
+                }
+            )
+        except Exception as exc:
+            failed_count += 1
+            failure_stage = "inference" if crawl_succeeded else "crawl"
+            SCHEDULED_TASK_SERVICE.mark_article_failed(discovery_key, run_id, failure_stage, str(exc))
+            results.append({"url": url, "status": f"failed_{failure_stage}", "error": str(exc)})
+
+    return {
+        "rss_url": rss_url,
+        "discovered_count": len(articles),
+        "selected_count": len(candidates),
+        "processed_count": processed_count,
+        "failed_count": failed_count,
+        "skipped_count": max(0, len(articles) - len(candidates)),
+        "partial_success": processed_count > 0 and failed_count > 0,
+        "articles": results,
+    }
+
+
 @app.post("/api/analyze")
 def analyze(request: AnalyzeRequest) -> Dict[str, Any]:
     try:
         cleanup_old_jobs(float(os.getenv("JOB_RETENTION_HOURS", "24")))
-
         options = request.options or AnalyzeOptions()
-
         urls = normalize_input_urls(request.urls)
         if not urls:
             raise HTTPException(status_code=400, detail="No valid URLs provided.")
-        mlflow_accept_threshold = float(options.mlflow_gate_accept_threshold)
-        mlflow_discard_threshold = float(options.mlflow_gate_discard_threshold)
-        if mlflow_discard_threshold > mlflow_accept_threshold:
-            raise HTTPException(status_code=400, detail="mlflow_gate_discard_threshold must be <= mlflow_gate_accept_threshold")
-
-        job_id = uuid.uuid4().hex
-        out_dir = PROCESSED_DATA_DIR / f"job_{job_id}"
-        out_dir.mkdir(parents=True, exist_ok=True)
-        analysis_started_at = time.perf_counter()
-
-        def log_analysis_stage(stage: str, **fields: Any) -> None:
-            detail = " ".join(f"{key}={value}" for key, value in fields.items())
-            logger.info(
-                "[analysis:%s] %s elapsed_ms=%d%s",
-                job_id,
-                stage,
-                int((time.perf_counter() - analysis_started_at) * 1000),
-                f" {detail}" if detail else "",
-            )
-
-        model_root = resolve_model_root()
-        try:
-            if options.model_path:
-                requested_model_path = Path(options.model_path).expanduser().resolve()
-                model_root_resolved = model_root.resolve()
-                try:
-                    requested_model_path.relative_to(model_root_resolved)
-                except ValueError as exc:
-                    raise ValueError(
-                        f"Model path must be under {model_root_resolved}: {requested_model_path}"
-                    ) from exc
-                relative_parts = requested_model_path.relative_to(model_root_resolved).parts
-                if len(relative_parts) < 2:
-                    raise ValueError(f"Model path must point to a model directory under {model_root_resolved}")
-                model_type = relative_parts[0]
-                model_name = requested_model_path.name
-                _, _, model_path = resolve_model_path(model_root, f"{model_type}/{model_name}")
-                model_id = f"{model_type}/{model_name}"
-            else:
-                model_type, model_name, model_path = resolve_model_path(model_root, options.model_name)
-                model_id = f"{model_type}/{model_name}"
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        except (PermissionError, OSError) as exc:
-            raise HTTPException(status_code=500, detail=f"Unable to access model directory: {exc}") from exc
-
-        save_job_meta(
-            out_dir,
-            build_job_meta(
-                job_id=job_id,
-                urls=urls,
-                url_hashes=[],
-                model_ids=[model_id],
-                enable_video=False,
-                merged_used=False,
-            ),
-        )
-
-        model_root = resolve_model_root()
-        try:
-            model_type, model_name, model_path = resolve_model_path(model_root, model_id)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        except (PermissionError, OSError) as exc:
-            raise HTTPException(status_code=500, detail=f"Unable to access model directory: {exc}") from exc
-
-        thresholds_by_domain = get_effective_thresholds(model_id)
-
-        logger.info("Job %s: start analyze for %s urls", job_id, len(urls))
-        logger.info("Job %s: using model '%s' (%s) from %s", job_id, model_id, model_type, model_path)
-        log_analysis_stage("crawl:start", urls=len(urls))
-
-        crawl_results = crawl_urls(
-            urls,
-            out_dir=str(DATA_DIR),
-            timeout=options.crawl_timeout_sec,
-            max_load_more=options.max_load_more_clicks,
-            max_comments_per_url=options.max_comments_per_url,
-        )
-        log_analysis_stage(
-            "crawl:done",
-            ok_urls=sum(1 for result in crawl_results if result.get("status") == "ok"),
-            segments=sum(int(result.get("num_segments") or 0) for result in crawl_results),
-        )
-
-        for r in crawl_results:
-            logger.info(
-                "Job %s: crawl result url=%s status=%s method=%s segments_path=%s error=%s",
-                job_id,
-                r.get("url"),
-                r.get("status"),
-                r.get("method"),
-                r.get("segments_path"),
-                r.get("error"),
-            )
-
-        ok_hashes = [r["url_hash"] for r in crawl_results if r.get("status") == "ok"]
-
-        infer_data_dir = DATA_DIR
-        merged_used = False
-
-        save_job_meta(
-            out_dir,
-            build_job_meta(
-                job_id=job_id,
-                urls=urls,
-                url_hashes=ok_hashes,
-                model_ids=[model_id],
-                enable_video=False,
-                merged_used=merged_used,
-            ),
-        )
-
-        if ok_hashes:
-            logger.info("Job %s: running inference on %s crawled urls", job_id, len(ok_hashes))
-            log_analysis_stage("inference:start", model=model_id, urls=len(ok_hashes))
-            infer_crawled(
-                model_path=str(model_path),
-                model_type=model_type,
-                data_dir=str(infer_data_dir),
-                out_dir=str(out_dir),
-                batch_size=options.batch_size,
-                max_length=options.max_length,
-                page_threshold=options.page_threshold,
-                seg_threshold=options.seg_threshold,
-                threshold_news=thresholds_by_domain.get("news"),
-                threshold_social=thresholds_by_domain.get("social"),
-                threshold_forum=thresholds_by_domain.get("forum"),
-                threshold_unknown=thresholds_by_domain.get("unknown"),
-                only_url_hashes=ok_hashes,
-                quiet=True,
-                learned_feedback=load_learned_segments(),
-                html_dir=str(DATA_DIR),
-            )
-            log_analysis_stage("inference:done", model=model_id)
-        else:
-            logger.warning("Job %s: no successful crawls to run inference", job_id)
-
-        segment_results = load_segment_results(out_dir)
-
-        page_by_hash, page_by_url = load_page_results_map(out_dir)
-
-        seg_by_hash: Dict[str, List[Dict[str, Any]]] = {}
-        seg_by_url: Dict[str, List[Dict[str, Any]]] = {}
-        for seg in segment_results:
-            if seg.get("url_hash"):
-                seg_by_hash.setdefault(seg["url_hash"], []).append(seg)
-            if seg.get("url"):
-                seg_by_url.setdefault(seg["url"], []).append(seg)
-
-        response_results = map_results_to_response(
-            crawl_results,
-            page_by_hash,
-            page_by_url,
-            seg_by_hash,
-            seg_by_url,
-        )
-        log_analysis_stage("aggregate:done", results=len(response_results))
-
-        mlflow_collection: Dict[str, Any] = {
-            "enabled": bool(options.collect_for_mlflow),
-            "batch_id": None,
-            "candidate_rows": 0,
-            "inserted": 0,
-            "samples_inserted": 0,
-            "samples_reused": 0,
-            "predictions_inserted": 0,
-            "skipped_existing_url": 0,
-            "skipped_duplicate_item": 0,
-            "counts": {"accepted": 0, "candidate": 0, "discarded": 0, "total": 0},
-        }
-        if options.collect_for_mlflow:
-            log_analysis_stage("persistence:start")
-            collection_created_at = datetime.utcnow().isoformat() + "Z"
-            collection_batch_id = f"mlf_auto_{uuid.uuid4().hex[:12]}"
-            mlflow_options_json = json.dumps(
-                {
-                    "source": "user_analyze",
-                    "batch_size": options.batch_size,
-                    "max_length": options.max_length,
-                    "page_threshold": options.page_threshold,
-                    "seg_threshold": options.seg_threshold,
-                    "gate_accept_threshold": mlflow_accept_threshold,
-                    "gate_discard_threshold": mlflow_discard_threshold,
-                },
-                ensure_ascii=False,
-            )
-            mlflow_collection = insert_mlflow_comment_rows(
-                batch_id=collection_batch_id,
-                model_id=model_id,
-                source_job_id=job_id,
-                rows=build_mlflow_comment_rows(
-                    response_results,
-                    collection_batch_id,
-                    job_id,
-                    mlflow_accept_threshold,
-                    mlflow_discard_threshold,
-                    collection_created_at,
-                ),
-                options_json=mlflow_options_json,
-                created_at=collection_created_at,
-                batch_created=False,
-            )
-            log_analysis_stage("persistence:done", inserted=mlflow_collection.get("inserted", 0))
-
-        logger.info("Job %s: completed", job_id)
-        log_analysis_stage("response:done")
-        production_manifest = _load_model_json(model_path, "production_manifest.json")
-        family_production_model = get_family_default_model_id(model_root, model_type)
-        return {
-            "job_id": job_id,
-            "flow_state": "completed",
-            "model_name": model_id,
-            "serving_evidence": {
-                "model_family": model_type,
-                "model_version": model_id,
-                "production_slot": model_type if family_production_model == model_id else None,
-                "artifact_checksum": production_manifest.get("artifact_checksum"),
-                "source_run_id": production_manifest.get("source_run_id"),
-            },
-            "thresholds": {
-                "seg_threshold": options.seg_threshold,
-                "page_threshold": options.page_threshold,
-            },
-            "thresholds_by_domain": thresholds_by_domain,
-            "mlflow_collection": mlflow_collection,
-            "results": response_results,
-        }
+        return run_analysis_pipeline(urls, options)
     except HTTPException:
         raise
     except Exception as exc:

@@ -8,6 +8,7 @@ import { DatasetPage } from "@/app/components/DatasetPage";
 import { SyntheticGenerationPage } from "@/app/components/SyntheticGenerationPage";
 import { ModelPage } from "@/app/components/ModelPage";
 import { TechnicalQAPage } from "@/app/components/TechnicalQAPage";
+import { ScheduledTasksPage } from "@/app/components/ScheduledTasksPage";
 import { ContactPage } from "@/app/components/ContactPage";
 import { MLFlowPage } from "@/app/components/MLFlowPage";
 import { SystemSettingsPage } from "@/app/components/SystemSettingsPage";
@@ -718,7 +719,7 @@ export default function App() {
     clearAdminSession();
     setMlflowMounted(false);
     setCurrentPage((page) =>
-      page === "admin_mlflow" || page === "mlflow" || page === "admin_system_settings" || page === "dataset_synthetic"
+      page === "admin_mlflow" || page === "mlflow" || page === "admin_system_settings" || page === "admin_scheduled_tasks" || page === "dataset_synthetic"
         ? "admin_login"
         : page,
     );
@@ -755,7 +756,7 @@ export default function App() {
 
   const handleNavigate = (page: string) => {
     if (
-      (page === "admin_mlflow" || page === "mlflow" || page === "admin_system_settings" || page === "dataset_synthetic")
+      (page === "admin_mlflow" || page === "mlflow" || page === "admin_system_settings" || page === "admin_scheduled_tasks" || page === "dataset_synthetic")
       && !adminSession?.token
     ) {
       setCurrentPage("admin_login");
@@ -1147,6 +1148,13 @@ export default function App() {
 
             {currentPage === "admin_system_settings" && adminSession?.token && (
               <SystemSettingsPage
+                adminToken={adminSession.token}
+                onAdminUnauthorized={handleAdminUnauthorized}
+              />
+            )}
+
+            {currentPage === "admin_scheduled_tasks" && adminSession?.token && (
+              <ScheduledTasksPage
                 adminToken={adminSession.token}
                 onAdminUnauthorized={handleAdminUnauthorized}
               />

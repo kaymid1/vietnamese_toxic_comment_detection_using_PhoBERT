@@ -1,6 +1,7 @@
 ﻿import { useMemo, useState } from "react";
 import {
   BarChart3,
+  CalendarClock,
   ChevronRight,
   Cpu,
   Database,
@@ -73,6 +74,11 @@ export function Navigation({
             name: t("nav.adminSystemSettings"),
             id: "admin_system_settings",
             icon: Settings,
+          },
+          {
+            name: t("nav.adminScheduledTasks"),
+            id: "admin_scheduled_tasks",
+            icon: CalendarClock,
           },
         ]
       : []),
