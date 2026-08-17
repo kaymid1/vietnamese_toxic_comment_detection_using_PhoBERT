@@ -197,7 +197,7 @@ def test_kaggle_trigger_dry_run(client, admin_headers):
         headers=admin_headers,
         json={
             "dry_run": True,
-            "training_mode": "finetune",
+            "training_mode": "retrain",
             "training_scope": "light_only",
             "provider": "kaggle",
             "compute_mode": "kaggle",
@@ -358,7 +358,7 @@ def test_kaggle_trigger_real_mode_requires_credentials(client, admin_headers, mo
         headers=admin_headers,
         json={
             "dry_run": False,
-            "training_mode": "finetune",
+            "training_mode": "retrain",
             "training_scope": "light_only",
             "provider": "kaggle",
             "compute_mode": "kaggle",
@@ -398,7 +398,7 @@ def test_kaggle_trigger_real_mode_rejects_mock_job_id(client, admin_headers, qa_
         headers=admin_headers,
         json={
             "dry_run": False,
-            "training_mode": "finetune",
+            "training_mode": "retrain",
             "training_scope": "light_only",
             "provider": "kaggle",
             "compute_mode": "kaggle",
@@ -480,7 +480,7 @@ def test_kaggle_trigger_webhook_failed_status_returns_502(client, admin_headers,
         headers=admin_headers,
         json={
             "dry_run": False,
-            "training_mode": "finetune",
+            "training_mode": "retrain",
             "training_scope": "light_only",
             "provider": "kaggle",
             "compute_mode": "kaggle",
