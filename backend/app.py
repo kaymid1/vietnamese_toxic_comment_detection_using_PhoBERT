@@ -51,6 +51,15 @@ from backend.runtime_paths import (
     get_project_root,
 )
 from backend.artifact_refs import encode_artifact_ref, resolve_artifact_ref
+from backend.mlflow_kaggle_ingest import (
+    KaggleEvidenceConflictError,
+    KaggleEvidenceIngestionUnavailable,
+    KaggleEvidenceNotFound,
+    KaggleEvidenceValidationError,
+    get_kaggle_ingestion_record,
+    ingest_kaggle_evidence,
+    validate_kaggle_evidence,
+)
 from infer_crawled_local import infer_crawled, build_segment_hash, build_context_segment_hash
 
 BASE_DIR = get_project_root()
@@ -9036,6 +9045,23 @@ def mlflow_kaggle_status(run_id: str = Query(..., min_length=1)) -> Dict[str, An
         if row["status"] == "completed" and artifact_kind == "real" and kaggle_metrics
         else None
     )
+    mlflow_ingestion: Optional[Dict[str, Any]] = None
+    if cloud_job_id:
+        existing_ingestion = get_kaggle_ingestion_record(
+            FEEDBACK_DB_PATH,
+            source_job_id=cloud_job_id,
+            source_run_id=str(row["run_id"]),
+        )
+        if existing_ingestion:
+            mlflow_ingestion = {
+                "ingestion_status": existing_ingestion.get("ingestion_status"),
+                "canonical_mlflow_run_id": existing_ingestion.get("canonical_mlflow_run_id"),
+                "evidence_sha256": existing_ingestion.get("evidence_sha256"),
+                "tracking_status": existing_ingestion.get("tracking_status"),
+                "artifact_status": existing_ingestion.get("artifact_status"),
+                "retriable": bool(existing_ingestion.get("retriable")),
+                "detail": existing_ingestion.get("error_message"),
+            }
     if row["status"] == "completed" and artifact_kind == "real":
         _record_kaggle_training_artifact(
             row["run_id"],
@@ -9043,6 +9069,16 @@ def mlflow_kaggle_status(run_id: str = Query(..., min_length=1)) -> Dict[str, An
             kaggle_metrics,
             notes="Kaggle retrain artifact",
         )
+        candidate = _load_kaggle_candidate(str(row["run_id"]))
+        try:
+            mlflow_ingestion = _ingest_kaggle_mlflow_evidence(row, candidate)
+        except Exception as exc:
+            logger.exception("Kaggle MLflow evidence ingestion failed for %s", row["run_id"])
+            mlflow_ingestion = {
+                "ingestion_status": "failed",
+                "retriable": True,
+                "detail": f"Unexpected ingestion failure: {type(exc).__name__}",
+            }
         try:
             _register_kaggle_candidate(str(row["run_id"]))
         except Exception:
@@ -9079,6 +9115,7 @@ def mlflow_kaggle_status(run_id: str = Query(..., min_length=1)) -> Dict[str, An
         "metrics": kaggle_metrics,
         "previous_run": previous_run,
         "gemini_evaluation": gemini_evaluation,
+        "mlflow_ingestion": mlflow_ingestion,
         "error_message": row["error_message"],
         "run_mode": run_mode,
         "status_source": status_source,
@@ -9351,6 +9388,91 @@ def _load_kaggle_candidate(run_id: str) -> Optional[Dict[str, Any]]:
         "test_fingerprint": test_fingerprint,
         "test_size": test_size,
     }
+
+
+def _kaggle_candidate_artifact_is_verified(candidate: Optional[Dict[str, Any]]) -> bool:
+    if not candidate:
+        return False
+    expected = str(candidate.get("artifact_expected_checksum") or "").lower()
+    actual = str(candidate.get("artifact_actual_checksum") or "").lower()
+    return bool(
+        isinstance(candidate.get("artifact_path"), Path)
+        and expected
+        and actual
+        and hmac.compare_digest(expected, actual)
+        and candidate.get("contract_ok")
+    )
+
+
+def _ingest_kaggle_mlflow_evidence(
+    row: sqlite3.Row,
+    candidate: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    source_job_id = str(row["droplet_id"] or "").strip()
+    source_run_id = str(row["run_id"] or "").strip()
+    if not source_job_id:
+        return {
+            "ingestion_status": "not_available",
+            "retriable": False,
+            "detail": "Kaggle source job identity is unavailable",
+        }
+    if not _kaggle_candidate_artifact_is_verified(candidate):
+        return {
+            "ingestion_status": "not_eligible",
+            "retriable": False,
+            "detail": "Training artifact must pass its existing checksum and serving contract first",
+        }
+    artifact_path = candidate.get("artifact_path")
+    assert isinstance(artifact_path, Path)
+    try:
+        evidence = validate_kaggle_evidence(
+            artifact_path,
+            expected_source_job_id=source_job_id,
+            expected_source_run_id=source_run_id,
+        )
+        result = ingest_kaggle_evidence(evidence, db_path=FEEDBACK_DB_PATH)
+        return {
+            "ingestion_status": result.get("ingestion_status") or result.get("action"),
+            "canonical_mlflow_run_id": result.get("canonical_mlflow_run_id"),
+            "evidence_sha256": evidence.evidence_sha256,
+            "tracking_status": evidence.manifest["status"]["tracking_status"],
+            "artifact_status": evidence.manifest["status"]["artifact_status"],
+            "retriable": bool(result.get("retriable")),
+            "detail": result.get("error_message"),
+        }
+    except KaggleEvidenceNotFound:
+        return {
+            "ingestion_status": "not_available",
+            "retriable": False,
+            "detail": "Portable MLflow evidence is absent (pre-Phase 2B.2B artifact)",
+        }
+    except KaggleEvidenceConflictError as exc:
+        return {
+            "ingestion_status": "conflict",
+            "retriable": False,
+            "detail": str(exc),
+        }
+    except KaggleEvidenceValidationError as exc:
+        return {
+            "ingestion_status": "invalid",
+            "retriable": False,
+            "detail": str(exc),
+        }
+    except KaggleEvidenceIngestionUnavailable as exc:
+        record = get_kaggle_ingestion_record(
+            FEEDBACK_DB_PATH,
+            source_job_id=source_job_id,
+            source_run_id=source_run_id,
+        )
+        return {
+            "ingestion_status": "failed",
+            "canonical_mlflow_run_id": None,
+            "evidence_sha256": (record or {}).get("evidence_sha256"),
+            "tracking_status": (record or {}).get("tracking_status"),
+            "artifact_status": (record or {}).get("artifact_status"),
+            "retriable": True,
+            "detail": str(exc),
+        }
 
 
 def _register_kaggle_candidate(run_id: str) -> Optional[Dict[str, Any]]:

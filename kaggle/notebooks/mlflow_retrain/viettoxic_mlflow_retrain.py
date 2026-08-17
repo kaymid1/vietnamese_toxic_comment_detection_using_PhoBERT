@@ -24,6 +24,29 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+try:
+    from mlflow_evidence import (
+        EVIDENCE_FILENAME,
+        build_directory_artifacts,
+        build_evidence_manifest,
+        build_zip_artifacts,
+        portable_scalar_mapping,
+        safe_relative_path,
+        write_evidence_file,
+        write_evidence_to_zip,
+    )
+except ImportError:  # Repository-local validation path.
+    from kaggle.mlflow_evidence import (
+        EVIDENCE_FILENAME,
+        build_directory_artifacts,
+        build_evidence_manifest,
+        build_zip_artifacts,
+        portable_scalar_mapping,
+        safe_relative_path,
+        write_evidence_file,
+        write_evidence_to_zip,
+    )
+
 WORKDIR = pathlib.Path("/kaggle/working/viettoxic")
 WORKDIR.mkdir(parents=True, exist_ok=True)
 os.environ.setdefault("MLFLOW_ALLOW_FILE_STORE", "true")
@@ -43,6 +66,8 @@ MLFLOW_ENABLED = os.getenv("MLFLOW_ENABLED", "true").strip().lower() in {"1", "t
 MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", f"sqlite:///{WORKDIR / 'mlflow.db'}")
 MLFLOW_EXPERIMENT_NAME = os.getenv("MLFLOW_EXPERIMENT_NAME", "viettoxic-kaggle-retrain-smoke")
 RUN_NAME = os.getenv("VIETTOXIC_RUN_NAME", f"kaggle_smoke_{time.strftime('%Y%m%d_%H%M%S')}")
+SOURCE_JOB_ID = os.getenv("VIETTOXIC_SOURCE_JOB_ID", RUN_NAME).strip() or RUN_NAME
+NOTEBOOK_SHA256 = os.getenv("VIETTOXIC_NOTEBOOK_SHA256", "").strip().lower()
 
 IMPORT_API_URL = os.getenv("VIETTOXIC_IMPORT_API_URL", "").strip()
 IMPORT_API_TOKEN = os.getenv("VIETTOXIC_IMPORT_API_TOKEN", "").strip()
@@ -79,6 +104,137 @@ def ensure_python_package(module_name: str, pip_name: str | None = None) -> None
         run([sys.executable, "-m", "pip", "install", "-q", pkg])
 
 
+def _flatten_numeric_metrics(payload: Any, prefix: str = "") -> dict[str, int | float]:
+    flattened: dict[str, int | float] = {}
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            child_prefix = f"{prefix}.{key}" if prefix else str(key)
+            flattened.update(_flatten_numeric_metrics(value, child_prefix))
+    elif isinstance(payload, (int, float)) and not isinstance(payload, bool) and prefix:
+        flattened[prefix] = payload
+    return flattened
+
+
+def _load_zip_json_by_basename(archive_path: pathlib.Path, basename: str) -> dict[str, Any]:
+    with zipfile.ZipFile(archive_path, "r") as archive:
+        candidates = sorted(
+            info.filename
+            for info in archive.infolist()
+            if not info.is_dir() and pathlib.PurePosixPath(info.filename).name == basename
+        )
+        if not candidates:
+            return {}
+        try:
+            payload = json.loads(archive.read(candidates[0]).decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _isolated_mlflow_evidence(experiment_name: str) -> dict[str, Any]:
+    if not MLFLOW_ENABLED:
+        return {"tracking_status": "disabled", "source_mlflow_run_id": None, "params": {}, "metrics": {}, "tags": {}}
+    try:
+        import mlflow
+
+        mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+        experiment = mlflow.get_experiment_by_name(experiment_name)
+        if experiment is None:
+            return {"tracking_status": "failed", "source_mlflow_run_id": None, "params": {}, "metrics": {}, "tags": {}}
+        client = mlflow.tracking.MlflowClient(tracking_uri=MLFLOW_TRACKING_URI)
+        runs = client.search_runs(
+            [experiment.experiment_id],
+            order_by=["attributes.start_time DESC"],
+            max_results=1,
+        )
+        if not runs:
+            return {"tracking_status": "failed", "source_mlflow_run_id": None, "params": {}, "metrics": {}, "tags": {}}
+        remote_run = runs[0]
+        artifacts = client.list_artifacts(remote_run.info.run_id)
+        params = portable_scalar_mapping(remote_run.data.params)
+        metrics = portable_scalar_mapping(remote_run.data.metrics, numeric_only=True)
+        tags = portable_scalar_mapping(
+            {key: value for key, value in remote_run.data.tags.items() if not str(key).startswith("mlflow.")}
+        )
+        completeness = [bool(params), bool(metrics), bool(artifacts), remote_run.info.status == "FINISHED"]
+        tracking_status = "complete" if all(completeness) else "partial"
+        return {
+            "tracking_status": tracking_status,
+            "source_mlflow_run_id": remote_run.info.run_id,
+            "params": params,
+            "metrics": metrics,
+            "tags": tags,
+        }
+    except Exception as exc:
+        print(f"[WARN] Isolated MLflow evidence inspection failed: {type(exc).__name__}: {exc}")
+        return {"tracking_status": "failed", "source_mlflow_run_id": None, "params": {}, "metrics": {}, "tags": {}}
+
+
+def _write_failure_evidence(error: Exception) -> pathlib.Path:
+    """Preserve failure status without exporting error text, paths, or secrets."""
+    artifact_dir = WORKDIR / "artifacts" / RUN_NAME
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    family = "tfidf_lr" if MODEL_KIND == "lr_smoke" else "phobert"
+    mode = "retrain" if family == "tfidf_lr" else TRAINING_MODE
+    parent_model_id = BASE_MODEL if mode == "finetune" else None
+    manifest = build_evidence_manifest(
+        source_job_id=SOURCE_JOB_ID,
+        source_run_id=RUN_NAME,
+        experiment_name=MLFLOW_EXPERIMENT_NAME,
+        run_name=RUN_NAME,
+        training={
+            "model_family": family,
+            "training_mode": mode,
+            "dataset": "unknown",
+            "script": "viettoxic_mlflow_retrain.py",
+            "base_model": (
+                parent_model_id or PHOBERT_MODEL_FALLBACK
+                if family == "phobert"
+                else "sklearn.LogisticRegression"
+            ),
+            "parent_model_id": parent_model_id,
+            # A failed wrapper cannot prove that model construction completed.
+            "initialization_mode": "unconfirmed" if mode == "finetune" else "pretrained_base",
+            "training_config_id": RUN_NAME,
+        },
+        training_status="failed",
+        tracking_status="failed" if MLFLOW_ENABLED else "disabled",
+        artifact_status="missing",
+        params={},
+        metrics={},
+        tags={"failure_type": type(error).__name__, "model_family": family, "training_mode": mode},
+        artifacts=[],
+        timestamps={"failed_at": datetime.now(timezone.utc).isoformat()},
+        provenance={"notebook_sha256": NOTEBOOK_SHA256 or None},
+    )
+    evidence_path = artifact_dir / EVIDENCE_FILENAME
+    write_evidence_file(evidence_path, manifest)
+    failure_zip = WORKDIR / f"{RUN_NAME}_failure_evidence.zip"
+    with zipfile.ZipFile(failure_zip, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.write(evidence_path, arcname=EVIDENCE_FILENAME)
+    return failure_zip
+
+
+def _safe_extract_zip(archive: zipfile.ZipFile, destination: pathlib.Path) -> None:
+    resolved_root = destination.resolve()
+    for info in archive.infolist():
+        if info.is_dir():
+            continue
+        try:
+            relative = safe_relative_path(info.filename)
+        except ValueError as exc:
+            raise RuntimeError(f"Unsafe bundle member rejected: {info.filename!r}") from exc
+        target = resolved_root.joinpath(*relative.split("/")).resolve()
+        try:
+            target.relative_to(resolved_root)
+        except ValueError as exc:
+            raise RuntimeError(f"Bundle member escaped extraction root: {info.filename!r}") from exc
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with archive.open(info, "r") as source, target.open("wb") as output:
+            while chunk := source.read(1024 * 1024):
+                output.write(chunk)
+
+
 def download_bundle_if_configured() -> None:
     if not BUNDLE_URL:
         print("VIETTOXIC_BUNDLE_URL is empty -> skip bundle download.")
@@ -106,7 +262,7 @@ def download_bundle_if_configured() -> None:
 
         BUNDLE_DIR.mkdir(parents=True, exist_ok=True)
         with zipfile.ZipFile(BUNDLE_ZIP, "r") as zf:
-            zf.extractall(BUNDLE_DIR)
+            _safe_extract_zip(zf, BUNDLE_DIR)
         print(f"Extracted to: {BUNDLE_DIR}")
     except (HTTPError, URLError, zipfile.BadZipFile, RuntimeError) as exc:
         msg = (
@@ -504,6 +660,74 @@ def run_phobert_retrain() -> dict:
         else:
             artifact_zip_path = candidates[0]
 
+    experiment_name = MLFLOW_EXPERIMENT_NAME.replace("smoke", "phobert")
+    isolated_tracking = _isolated_mlflow_evidence(experiment_name)
+    run_config = _load_zip_json_by_basename(artifact_zip_path, "run_config.json")
+    metrics_payload = _load_zip_json_by_basename(artifact_zip_path, "metrics.json")
+    training_manifest = _load_zip_json_by_basename(artifact_zip_path, "training_manifest.json")
+    application_params = portable_scalar_mapping(
+        run_config.get("hyperparameters") if isinstance(run_config.get("hyperparameters"), dict) else {}
+    )
+    application_params.update(isolated_tracking["params"])
+    application_metrics = _flatten_numeric_metrics(metrics_payload)
+    application_metrics.update(isolated_tracking["metrics"])
+    parent_model_id = str(initialization.get("model_id") or "").strip() or None
+    evidence_base_model = (
+        parent_model_id
+        if TRAINING_MODE == "finetune"
+        else str(initialization.get("model_name") or PHOBERT_MODEL_FALLBACK).strip()
+    )
+    artifacts = build_zip_artifacts(artifact_zip_path)
+    artifact_status = (
+        "complete"
+        if any(item["role"] == "model" and item["required"] for item in artifacts)
+        and any(item["role"] == "metrics" for item in artifacts)
+        else "partial"
+    )
+    provenance = {
+        "isolated_mlflow_run_id": isolated_tracking["source_mlflow_run_id"],
+        "bundle_sha256": BUNDLE_CHECKSUM or None,
+        "notebook_sha256": NOTEBOOK_SHA256 or None,
+        "initialization_type": initialization.get("type"),
+        "parent_source_run_id": initialization.get("source_run_id"),
+        "parent_artifact_checksum": initialization.get("artifact_checksum"),
+        "training_manifest_run_id": training_manifest.get("run_id"),
+    }
+    evidence_manifest = build_evidence_manifest(
+        source_job_id=SOURCE_JOB_ID,
+        source_run_id=RUN_NAME,
+        experiment_name=experiment_name,
+        run_name=RUN_NAME,
+        training={
+            "model_family": "phobert",
+            "training_mode": TRAINING_MODE,
+            "dataset": bundle_profile,
+            "script": "train_phobert.py",
+            "base_model": evidence_base_model,
+            "parent_model_id": parent_model_id,
+            "initialization_mode": str(initialization.get("type") or "unknown"),
+            "training_config_id": RUN_NAME,
+        },
+        training_status="success",
+        tracking_status=isolated_tracking["tracking_status"],
+        artifact_status=artifact_status,
+        params=application_params,
+        metrics=application_metrics,
+        tags={
+            **isolated_tracking["tags"],
+            "model_family": "phobert",
+            "training_mode": TRAINING_MODE,
+            "dataset": bundle_profile,
+        },
+        artifacts=artifacts,
+        timestamps={
+            "trained_at": training_manifest.get("trained_at") or training_manifest.get("created_at"),
+            "evidence_created_at": datetime.now(timezone.utc).isoformat(),
+        },
+        provenance=provenance,
+    )
+    evidence_sha256 = write_evidence_to_zip(artifact_zip_path, evidence_manifest)
+
     import_response = maybe_import_artifact(RUN_NAME, str(artifact_zip_path))
     summary = {
         "status": "ok",
@@ -516,6 +740,9 @@ def run_phobert_retrain() -> dict:
         "model_name": env["MODEL_NAME"],
         "initialization": initialization,
         "artifact_zip_local": str(artifact_zip_path),
+        "mlflow_evidence_sha256": evidence_sha256,
+        "tracking_status": isolated_tracking["tracking_status"],
+        "artifact_status": artifact_status,
         "import_response": import_response,
     }
     (artifact_dir / "run_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -757,13 +984,15 @@ def run_smoke_retrain() -> dict:
     evidence_path.write_text(json.dumps(dataset_evidence, ensure_ascii=False, indent=2), encoding="utf-8")
 
     mlflow_logged = False
+    isolated_mlflow_run_id = None
     if MLFLOW_ENABLED:
         try:
             import mlflow
 
             mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
             mlflow.set_experiment(MLFLOW_EXPERIMENT_NAME)
-            with mlflow.start_run(run_name=RUN_NAME):
+            with mlflow.start_run(run_name=RUN_NAME) as active_run:
+                isolated_mlflow_run_id = active_run.info.run_id
                 for key, value in metrics_payload["sizes"].items():
                     mlflow.log_param(f"size_{key}", int(value))
                 mlflow.log_param("bundle_profile", bundle_profile)
@@ -799,7 +1028,76 @@ def run_smoke_retrain() -> dict:
     }
     summary_path.write_text(json.dumps(summary_payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
+    evidence_params = {
+        **{f"size_{key}": int(value) for key, value in metrics_payload["sizes"].items()},
+        "bundle_profile": bundle_profile,
+        "mode": "smoke_retrain_tfidf_lr_multitask",
+        "tasks": "toxicity,constructiveness",
+        "seed": SEED,
+    }
+    evidence_metrics = {
+        **{f"val_toxicity_{key}": value for key, value in val_metrics.items()},
+        **{f"test_toxicity_{key}": value for key, value in test_metrics.items()},
+    }
+    if constructiveness_payload and not constructiveness_payload.get("skipped"):
+        evidence_metrics.update(
+            {f"val_constructiveness_{key}": value for key, value in constructiveness_payload["validation"].items()}
+        )
+        evidence_metrics.update(
+            {f"test_constructiveness_{key}": value for key, value in constructiveness_payload["test"].items()}
+        )
+    artifacts = build_directory_artifacts(artifact_dir)
+    tracking_status = "complete" if mlflow_logged else ("failed" if MLFLOW_ENABLED else "disabled")
+    artifact_status = (
+        "complete"
+        if any(item["role"] == "model" and item["required"] for item in artifacts)
+        and any(item["role"] == "metrics" for item in artifacts)
+        else "partial"
+    )
+    evidence_manifest = build_evidence_manifest(
+        source_job_id=SOURCE_JOB_ID,
+        source_run_id=RUN_NAME,
+        experiment_name=MLFLOW_EXPERIMENT_NAME,
+        run_name=RUN_NAME,
+        training={
+            "model_family": "tfidf_lr",
+            "training_mode": "retrain",
+            "dataset": bundle_profile,
+            "script": "viettoxic_mlflow_retrain.py",
+            "base_model": "sklearn.LogisticRegression",
+            "initialization_mode": "fresh_estimator",
+            "training_config_id": RUN_NAME,
+        },
+        training_status="success",
+        tracking_status=tracking_status,
+        artifact_status=artifact_status,
+        params=evidence_params,
+        metrics=evidence_metrics,
+        tags={
+            "model_family": "tfidf_lr",
+            "training_mode": "retrain",
+            "dataset": bundle_profile,
+        },
+        artifacts=artifacts,
+        timestamps={
+            "started_at": started_at.isoformat(),
+            "finished_at": finished_at.isoformat(),
+        },
+        provenance={
+            "isolated_mlflow_run_id": isolated_mlflow_run_id,
+            "bundle_sha256": BUNDLE_CHECKSUM or None,
+            "notebook_sha256": NOTEBOOK_SHA256 or None,
+            "included_mlflow_ids_sha256": dataset_evidence.get("included_mlflow_ids_sha256"),
+            "expected_mlflow_count": dataset_evidence.get("expected_mlflow_count"),
+            "included_mlflow_count": dataset_evidence.get("included_mlflow_count"),
+        },
+    )
+    evidence_sha256 = write_evidence_file(artifact_dir / EVIDENCE_FILENAME, evidence_manifest)
+
     zip_dir(artifact_dir, artifact_zip_path)
+    summary_payload["mlflow_evidence_sha256"] = evidence_sha256
+    summary_payload["tracking_status"] = tracking_status
+    summary_payload["artifact_status"] = artifact_status
     import_response = maybe_import_artifact(RUN_NAME, str(artifact_zip_path))
     if import_response is not None:
         summary_payload["import_response"] = import_response
@@ -832,13 +1130,13 @@ def main() -> None:
         print(json.dumps(status, ensure_ascii=False, indent=2))
         return
 
-    if TEST_MODE == "smoke":
-        status = run_smoke_retrain()
-        print(json.dumps(status, ensure_ascii=False, indent=2))
-        return
-
-    if TEST_MODE == "phobert":
-        status = run_phobert_retrain()
+    if TEST_MODE in {"smoke", "phobert"}:
+        try:
+            status = run_smoke_retrain() if TEST_MODE == "smoke" else run_phobert_retrain()
+        except Exception as exc:
+            failure_zip = _write_failure_evidence(exc)
+            print(f"Failure evidence written: {failure_zip.name}")
+            raise
         print(json.dumps(status, ensure_ascii=False, indent=2))
         return
 

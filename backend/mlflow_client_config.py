@@ -159,13 +159,8 @@ def configure_mlflow_client(
     if not should_enable:
         return None
 
-    tracking_uri = get_effective_mlflow_tracking_uri()
-    check_mlflow_reachable(tracking_uri, timeout=timeout)
+    mlflow, _ = prepare_mlflow_client(experiment_name=experiment_name, timeout=timeout)
     try:
-        mlflow = importlib.import_module("mlflow")
-        os.environ.setdefault("MLFLOW_SUPPRESS_PRINTING_URL_TO_STDOUT", "true")
-        mlflow.set_tracking_uri(tracking_uri)
-        mlflow.set_experiment(experiment_name)
         mlflow.start_run(run_name=run_name)
         if tags:
             mlflow.set_tags({str(key): str(value) for key, value in tags.items()})
@@ -179,3 +174,19 @@ def configure_mlflow_client(
             _client_initialization_message(f"MLflow client initialization failed: {type(exc).__name__}")
         ) from exc
     return mlflow
+
+
+def prepare_mlflow_client(*, experiment_name: str, timeout: float = 3.0) -> tuple[Any, Any]:
+    """Preflight the HTTP server and select an experiment without starting a run."""
+    tracking_uri = get_effective_mlflow_tracking_uri()
+    check_mlflow_reachable(tracking_uri, timeout=timeout)
+    try:
+        mlflow = importlib.import_module("mlflow")
+        os.environ.setdefault("MLFLOW_SUPPRESS_PRINTING_URL_TO_STDOUT", "true")
+        mlflow.set_tracking_uri(tracking_uri)
+        experiment = mlflow.set_experiment(experiment_name)
+    except Exception as exc:
+        raise MlflowClientConfigurationError(
+            _client_initialization_message(f"MLflow client initialization failed: {type(exc).__name__}")
+        ) from exc
+    return mlflow, experiment

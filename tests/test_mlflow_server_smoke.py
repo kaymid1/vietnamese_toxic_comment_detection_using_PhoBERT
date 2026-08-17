@@ -1,20 +1,37 @@
+import json
 import os
 import socket
+import sqlite3
 import subprocess
 import time
+import zipfile
 from pathlib import Path
 from urllib.error import URLError
 from urllib.request import urlopen
 
 import mlflow
+import pytest
 from mlflow.tracking import MlflowClient
 
 from backend.mlflow_client_config import configure_mlflow_client
+from backend.mlflow_kaggle_ingest import (
+    KaggleEvidenceConflictError,
+    KaggleEvidenceIngestionUnavailable,
+    get_kaggle_ingestion_record,
+    ingest_kaggle_evidence,
+    validate_kaggle_evidence,
+)
 from backend.mlflow_legacy_export import sha256_file
 from backend.mlflow_server import (
     build_mlflow_server_command,
     resolve_mlflow_server_config,
     validate_mlflow_server_config,
+)
+from kaggle.mlflow_evidence import (
+    EVIDENCE_FILENAME,
+    build_directory_artifacts,
+    build_evidence_manifest,
+    write_evidence_file,
 )
 
 
@@ -127,4 +144,122 @@ def test_fresh_server_logs_and_recovers_portable_artifacts(monkeypatch, tmp_path
 
     assert config.backend_db_path.is_file()
     assert config.backend_db_path != config.legacy_db_path
+    assert sha256_file(config.legacy_db_path) == legacy_hash
+
+
+def _build_ingestion_archive(tmp_path: Path, *, macro_f1: float) -> Path:
+    root = tmp_path / f"ingestion-source-{str(macro_f1).replace('.', '-')}"
+    root.mkdir()
+    (root / "model_lr.joblib").write_bytes(b"portable-model")
+    (root / "vectorizer.joblib").write_bytes(b"portable-vectorizer")
+    (root / "metrics.json").write_text(json.dumps({"macro_f1": macro_f1}), encoding="utf-8")
+    manifest = build_evidence_manifest(
+        source_job_id="real_job_ingestion",
+        source_run_id="kaggle_run_ingestion",
+        experiment_name="viettoxic-kaggle-tfidf-lr",
+        run_name="kaggle_run_ingestion",
+        training={
+            "model_family": "tfidf_lr",
+            "training_mode": "retrain",
+            "dataset": "clean_victsd_gold",
+            "script": "viettoxic_mlflow_retrain.py",
+            "base_model": "sklearn.LogisticRegression",
+            "initialization_mode": "fresh_estimator",
+            "training_config_id": "kaggle_run_ingestion",
+        },
+        training_status="success",
+        tracking_status="complete",
+        artifact_status="complete",
+        params={"seed": 42, "size_train": 100},
+        metrics={"macro_f1": macro_f1, "toxic_f1": 0.71},
+        tags={"model_family": "tfidf_lr", "training_mode": "retrain"},
+        artifacts=build_directory_artifacts(root),
+        timestamps={"finished_at": "2026-08-17T00:00:00+00:00"},
+        provenance={"notebook_sha256": "a" * 64},
+    )
+    write_evidence_file(root / EVIDENCE_FILENAME, manifest)
+    archive_path = tmp_path / f"ingestion-{str(macro_f1).replace('.', '-')}.zip"
+    with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for path in sorted(root.iterdir()):
+            archive.write(path, arcname=path.name)
+    return archive_path
+
+
+def test_kaggle_evidence_ingestion_is_retriable_idempotent_and_conflict_safe(
+    monkeypatch, tmp_path: Path
+):
+    port = _available_local_port()
+    monkeypatch.setenv("APP_DATA_DIR", str(tmp_path / "kaggle-ingestion-app-data"))
+    monkeypatch.setenv("MLFLOW_SERVER_HOST", "127.0.0.1")
+    monkeypatch.setenv("MLFLOW_SERVER_PORT", str(port))
+    monkeypatch.setenv("MLFLOW_SUPPRESS_PRINTING_URL_TO_STDOUT", "true")
+    monkeypatch.delenv("MLFLOW_TRACKING_URI", raising=False)
+    monkeypatch.delenv("MLFLOW_ARTIFACT_ROOT", raising=False)
+    config = validate_mlflow_server_config(resolve_mlflow_server_config())
+    command = build_mlflow_server_command(config)
+    legacy_hash = sha256_file(config.legacy_db_path)
+    mapping_db = tmp_path / "operational" / "feedback.db"
+    archive_path = _build_ingestion_archive(tmp_path, macro_f1=0.76)
+    evidence = validate_kaggle_evidence(archive_path)
+
+    with pytest.raises(KaggleEvidenceIngestionUnavailable):
+        ingest_kaggle_evidence(evidence, db_path=mapping_db, timeout=0.2)
+    failed_record = get_kaggle_ingestion_record(
+        mapping_db,
+        source_job_id=evidence.source_job_id,
+        source_run_id=evidence.source_run_id,
+    )
+    assert failed_record["ingestion_status"] == "failed"
+    assert failed_record["retriable"] == 1
+    assert archive_path.is_file()
+
+    previous_tracking_uri = mlflow.get_tracking_uri()
+    server, _ = _start_server(command, config.backend_db_path.parent)
+    try:
+        first = ingest_kaggle_evidence(evidence, db_path=mapping_db, timeout=5.0)
+        second = ingest_kaggle_evidence(evidence, db_path=mapping_db, timeout=5.0)
+        canonical_run_id = first["canonical_mlflow_run_id"]
+        assert first["ingestion_status"] == "completed"
+        assert second["canonical_mlflow_run_id"] == canonical_run_id
+        assert second["action"] == "existing"
+
+        client = MlflowClient(tracking_uri=config.client_tracking_uri)
+        run = client.get_run(canonical_run_id)
+        experiment = client.get_experiment(run.info.experiment_id)
+        assert run.data.params["seed"] == "42"
+        assert run.data.metrics["macro_f1"] == 0.76
+        assert run.data.tags["execution_origin"] == "kaggle"
+        assert run.data.tags["ingestion_mode"] == "post_run"
+        assert run.data.tags["source_job_id"] == "real_job_ingestion"
+        assert run.data.tags["source_run_id"] == "kaggle_run_ingestion"
+        assert run.info.artifact_uri.startswith("mlflow-artifacts:/")
+        assert experiment.artifact_location.startswith("mlflow-artifacts:/")
+        assert str(tmp_path).lower() not in run.info.artifact_uri.lower()
+        artifact_names = {item.path for item in client.list_artifacts(canonical_run_id)}
+        assert {EVIDENCE_FILENAME, "metrics.json", "model_lr.joblib", "vectorizer.joblib"}.issubset(
+            artifact_names
+        )
+        matching_runs = client.search_runs(
+            [run.info.experiment_id],
+            filter_string="tags.`source_job_id` = 'real_job_ingestion'",
+            max_results=10,
+        )
+        assert [item.info.run_id for item in matching_runs] == [canonical_run_id]
+
+        conflicting = validate_kaggle_evidence(_build_ingestion_archive(tmp_path, macro_f1=0.77))
+        with pytest.raises(KaggleEvidenceConflictError):
+            ingest_kaggle_evidence(conflicting, db_path=mapping_db, timeout=5.0)
+        assert len(
+            client.search_runs(
+                [run.info.experiment_id],
+                filter_string="tags.`source_job_id` = 'real_job_ingestion'",
+                max_results=10,
+            )
+        ) == 1
+    finally:
+        _stop_server(server)
+        mlflow.set_tracking_uri(previous_tracking_uri)
+
+    with sqlite3.connect(mapping_db) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM mlflow_kaggle_ingestion").fetchone()[0] == 1
     assert sha256_file(config.legacy_db_path) == legacy_hash

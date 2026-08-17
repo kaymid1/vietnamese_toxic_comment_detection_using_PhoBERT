@@ -587,10 +587,14 @@ def test_kaggle_webhook_receiver_embeds_phobert_train_script(monkeypatch):
     monkeypatch.setattr(receiver, "_setting", lambda key, default="": default)
 
     script = receiver._build_real_script_content(
-        receiver.TriggerRequest(run_id="run_embed", model_kind="phobert", training_mode="finetune")
+        receiver.TriggerRequest(run_id="run_embed", model_kind="phobert", training_mode="finetune"),
+        source_job_id="real_job_embed",
     )
 
     assert "/kaggle/working/viettoxic/scripts/train_phobert.py" in script
+    assert "(_evidence_module_dir / 'mlflow_evidence.py').write_text" in script
+    assert '"VIETTOXIC_SOURCE_JOB_ID": "real_job_embed"' in script
+    assert "mlflow_run_evidence.json" in script
     assert "PhoBERT Fine-tune" in script
     assert "cudaErrorNoKernelImageForDevice" in script
     assert "build_training_arguments" in script
@@ -831,6 +835,109 @@ def test_kaggle_real_local_artifact_download_and_metrics_parsing(client, qa_env,
 
     archive = zipfile.ZipFile(io.BytesIO(download_response.content))
     assert "results/metrics.json" in archive.namelist()
+
+
+def test_completed_kaggle_artifact_ingests_evidence_before_candidate_registration(
+    client, qa_env, admin_headers, monkeypatch
+):
+    from kaggle.mlflow_evidence import (
+        build_evidence_manifest,
+        build_zip_artifacts,
+        write_evidence_to_zip,
+    )
+
+    app_module = qa_env["app_module"]
+    run_id = "run_evidence_lifecycle"
+    job_id = "real_job_evidence_lifecycle"
+    artifact_path = qa_env["kaggle_root"] / run_id / "output" / f"{run_id}.zip"
+    _build_family_serving_zip(artifact_path, model_family="tfidf_lr")
+    evidence_manifest = build_evidence_manifest(
+        source_job_id=job_id,
+        source_run_id=run_id,
+        experiment_name="viettoxic-kaggle-tfidf-lr",
+        run_name=run_id,
+        training={
+            "model_family": "tfidf_lr",
+            "training_mode": "retrain",
+            "dataset": "clean_victsd_gold",
+            "script": "viettoxic_mlflow_retrain.py",
+            "base_model": "sklearn.LogisticRegression",
+            "initialization_mode": "fresh_estimator",
+            "training_config_id": run_id,
+        },
+        training_status="success",
+        tracking_status="complete",
+        artifact_status="complete",
+        params={"seed": 42},
+        metrics={"macro_f1": 0.76},
+        tags={"model_family": "tfidf_lr"},
+        artifacts=build_zip_artifacts(artifact_path),
+        timestamps={"finished_at": "2026-08-17T00:00:00+00:00"},
+        provenance={"notebook_sha256": "a" * 64},
+    )
+    evidence_sha = write_evidence_to_zip(artifact_path, evidence_manifest)
+    artifact_checksum = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+    _insert_kaggle_run(
+        qa_env["feedback_db"],
+        run_id,
+        status="completed",
+        artifact_uri=str(artifact_path),
+    )
+    logs = [{"message": "[META] model_kind=lr_smoke training_mode=retrain", "source": "backend"}]
+    with sqlite3.connect(qa_env["feedback_db"]) as connection:
+        connection.execute(
+            "UPDATE mlflow_do_run SET droplet_id = ?, artifact_checksum = ?, logs_json = ? WHERE run_id = ?",
+            (job_id, artifact_checksum, json.dumps(logs), run_id),
+        )
+        connection.commit()
+
+    calls = []
+
+    def fake_ingest(evidence, *, db_path, timeout=3.0):
+        calls.append((evidence, db_path))
+        if len(calls) == 1:
+            raise app_module.KaggleEvidenceIngestionUnavailable("canonical MLflow unavailable")
+        return {
+            "action": "created",
+            "ingestion_status": "completed",
+            "canonical_mlflow_run_id": "canonical-run-123",
+            "retriable": 0,
+        }
+
+    monkeypatch.setattr(app_module, "ingest_kaggle_evidence", fake_ingest)
+    first_response = client.get(
+        "/api/mlflow/kaggle/status",
+        params={"run_id": run_id},
+        headers=admin_headers,
+    )
+
+    assert first_response.status_code == 200
+    assert first_response.json()["mlflow_ingestion"]["ingestion_status"] == "failed"
+    assert first_response.json()["mlflow_ingestion"]["retriable"] is True
+    with sqlite3.connect(qa_env["feedback_db"]) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM mlflow_model_version WHERE source_run_id = ?", (run_id,)
+        ).fetchone()[0] == 1
+
+    response = client.get(
+        "/api/mlflow/kaggle/status",
+        params={"run_id": run_id},
+        headers=admin_headers,
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["mlflow_ingestion"]["ingestion_status"] == "completed"
+    assert payload["mlflow_ingestion"]["canonical_mlflow_run_id"] == "canonical-run-123"
+    assert payload["mlflow_ingestion"]["evidence_sha256"] == evidence_sha
+    assert len(calls) == 2
+    assert calls[-1][0].source_job_id == job_id
+    assert calls[-1][0].source_run_id == run_id
+    assert calls[-1][1] == qa_env["feedback_db"]
+    with sqlite3.connect(qa_env["feedback_db"]) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM mlflow_model_version WHERE source_run_id = ?", (run_id,)
+        ).fetchone()[0] == 1
 
 
 def test_kaggle_status_includes_previous_completed_run_of_same_model_kind(client, qa_env, admin_headers):
