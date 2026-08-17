@@ -128,6 +128,53 @@ def _build_family_serving_zip(
             zf.writestr("export/model.safetensors", save({"test.weight": torch.zeros(1)}))
 
 
+def _insert_registry_fallback_copy(
+    qa_env: dict,
+    run_id: str,
+    *,
+    model_family: str = "tfidf_lr",
+    checksum_override: str | None = None,
+    uri_override: str | None = None,
+) -> tuple[Path, str]:
+    app_module = qa_env["app_module"]
+    registry_root = qa_env["base_dir"] / ".runtime" / "model_registry"
+    app_module.MODEL_REGISTRY_ARTIFACT_ROOT = registry_root
+    artifact = registry_root / model_family / run_id / "artifact.zip"
+    _build_family_serving_zip(artifact, model_family=model_family)
+    checksum = hashlib.sha256(artifact.read_bytes()).hexdigest()
+    now = datetime.utcnow().isoformat() + "Z"
+    canonical_uri = f"runtime://model_registry/{model_family}/{run_id}/artifact.zip"
+    with sqlite3.connect(qa_env["feedback_db"]) as conn:
+        conn.execute(
+            """
+            INSERT INTO mlflow_model_version (
+                model_family, model_id, source_run_id, artifact_path, artifact_checksum,
+                bundle_checksum, test_fingerprint, metrics_json, status, created_at,
+                model_kind, training_mode, base_model, artifact_uri, bundle_path
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                model_family,
+                f"{model_family}/{run_id}",
+                run_id,
+                canonical_uri,
+                checksum_override or checksum,
+                None,
+                None,
+                "{}",
+                "candidate",
+                now,
+                "lr_smoke" if model_family == "tfidf_lr" else "phobert",
+                "retrain",
+                None,
+                uri_override or canonical_uri,
+                None,
+            ),
+        )
+        conn.commit()
+    return artifact, checksum
+
+
 def _prepare_family_production_flow(qa_env: dict, *, model_family: str) -> tuple[str, str]:
     app_module = qa_env["app_module"]
     run_id = f"run_promote_{model_family}"
@@ -1217,3 +1264,123 @@ def test_system_settings_expose_vietnamese_help_and_ai_instructions(client, admi
     gemini_review = next(item for item in groups["ai_instructions"]["settings"] if item["key"] == "GEMINI_REVIEW_INSTRUCTION")
     assert "Prompt" in gemini_review["description"]
     assert gemini_review["value"]
+
+
+def _prepare_historical_fallback_run(qa_env: dict, run_id: str = "kaggle_historical_fallback") -> tuple[Path, str]:
+    artifact, checksum = _insert_registry_fallback_copy(qa_env, run_id)
+    old_uri = f"file://D:/Code/Thesis/Thesis/.runtime/kaggle_real_jobs/real_job/output/viettoxic/{run_id}.zip"
+    _insert_kaggle_run(qa_env["feedback_db"], run_id, status="completed", artifact_uri=old_uri)
+    logs = [{"message": "[META] model_kind=lr_smoke training_mode=retrain base_model=default"}]
+    with sqlite3.connect(qa_env["feedback_db"]) as conn:
+        conn.execute(
+            "UPDATE mlflow_do_run SET logs_json = ?, artifact_checksum = ? WHERE run_id = ?",
+            (json.dumps(logs), checksum, run_id),
+        )
+        conn.commit()
+    return artifact, checksum
+
+
+def test_compare_recovers_missing_windows_artifact_from_verified_registry_copy(client, qa_env, admin_headers):
+    _, checksum = _prepare_historical_fallback_run(qa_env)
+
+    response = client.get(
+        "/api/mlflow/compare/latest",
+        params={"run_id": "kaggle_historical_fallback"},
+        headers=admin_headers,
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["candidate"]["artifact_source"] == "registry_fallback"
+    assert payload["candidate"]["artifact_actual_checksum"] == checksum
+    assert payload["candidate"]["artifact_verified"] is True
+    assert payload["candidate"]["metrics"]["f1_toxic"] == 0.71
+    assert payload["candidate"]["metrics"]["macro_f1"] == 0.76
+
+
+def test_compare_rejects_registry_fallback_checksum_mismatch(client, qa_env, admin_headers):
+    run_id = "kaggle_fallback_checksum_mismatch"
+    artifact, actual = _insert_registry_fallback_copy(qa_env, run_id, checksum_override="f" * 64)
+    old_uri = f"file://D:/Code/Thesis/Thesis/.runtime/kaggle_real_jobs/real_job/output/viettoxic/{run_id}.zip"
+    _insert_kaggle_run(qa_env["feedback_db"], run_id, status="completed", artifact_uri=old_uri)
+    with sqlite3.connect(qa_env["feedback_db"]) as conn:
+        conn.execute(
+            "UPDATE mlflow_do_run SET logs_json = ?, artifact_checksum = ? WHERE run_id = ?",
+            (json.dumps([{"message": "[META] model_kind=lr_smoke"}]), "f" * 64, run_id),
+        )
+        conn.commit()
+
+    response = client.get("/api/mlflow/compare/latest", params={"run_id": run_id}, headers=admin_headers)
+    payload = response.json()
+
+    assert response.status_code == 200
+    assert payload["candidate"]["metrics"] == {}
+    assert payload["candidate"]["artifact_actual_checksum"] is None
+    assert "checksum mismatch" in payload["candidate"]["artifact_contract"].lower()
+    assert actual != "f" * 64
+
+
+def test_compare_reports_missing_registry_fallback_artifact(client, qa_env, admin_headers):
+    artifact, _ = _prepare_historical_fallback_run(qa_env, "kaggle_fallback_missing")
+    artifact.unlink()
+
+    response = client.get(
+        "/api/mlflow/compare/latest",
+        params={"run_id": "kaggle_fallback_missing"},
+        headers=admin_headers,
+    )
+    payload = response.json()
+
+    assert response.status_code == 200
+    assert payload["candidate"]["metrics"] == {}
+    assert "missing" in payload["candidate"]["artifact_contract"].lower()
+
+
+def test_compare_rejects_wrong_registry_model_family(client, qa_env, admin_headers):
+    run_id = "kaggle_fallback_wrong_family"
+    _insert_registry_fallback_copy(qa_env, run_id, model_family="phobert")
+    old_uri = f"file://D:/Code/Thesis/Thesis/.runtime/kaggle_real_jobs/real_job/output/viettoxic/{run_id}.zip"
+    _insert_kaggle_run(qa_env["feedback_db"], run_id, status="completed", artifact_uri=old_uri)
+    with sqlite3.connect(qa_env["feedback_db"]) as conn:
+        conn.execute(
+            "UPDATE mlflow_do_run SET logs_json = ?, artifact_checksum = ? WHERE run_id = ?",
+            (json.dumps([{"message": "[META] model_kind=lr_smoke"}]), "a" * 64, run_id),
+        )
+        conn.commit()
+
+    response = client.get("/api/mlflow/compare/latest", params={"run_id": run_id}, headers=admin_headers)
+    payload = response.json()
+
+    assert response.status_code == 200
+    assert payload["candidate"]["metrics"] == {}
+    assert "matching historical registry record" in payload["candidate"]["artifact_contract"]
+
+
+def test_compare_history_is_backend_persisted_and_latest_uses_completed_run(client, qa_env, admin_headers):
+    _prepare_historical_fallback_run(qa_env, "kaggle_history_old")
+    _prepare_historical_fallback_run(qa_env, "kaggle_history_new")
+    with sqlite3.connect(qa_env["feedback_db"]) as conn:
+        conn.execute("UPDATE mlflow_do_run SET created_at = ?, updated_at = ? WHERE run_id = ?", ("2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z", "kaggle_history_old"))
+        conn.execute("UPDATE mlflow_do_run SET created_at = ?, updated_at = ? WHERE run_id = ?", ("2026-01-02T00:00:00Z", "2026-01-02T00:00:00Z", "kaggle_history_new"))
+        conn.commit()
+
+    history = client.get("/api/mlflow/compare/history", headers=admin_headers)
+    latest = client.get("/api/mlflow/compare/latest", headers=admin_headers)
+
+    assert history.status_code == 200
+    assert {item["run_id"] for item in history.json()["items"]} >= {"kaggle_history_old", "kaggle_history_new"}
+    assert latest.status_code == 200
+    assert latest.json()["candidate"]["source_run_id"] == "kaggle_history_new"
+
+
+def test_registry_fallback_rejects_path_traversal_run_id(qa_env):
+    app_module = qa_env["app_module"]
+    run_id = "kaggle/../escape"
+    _insert_kaggle_run(qa_env["feedback_db"], run_id, status="completed", artifact_uri="file://D:/Code/Thesis/old.zip")
+    with sqlite3.connect(qa_env["feedback_db"]) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM mlflow_do_run WHERE run_id = ?", (run_id,)).fetchone()
+
+    with pytest.raises(app_module.HTTPException) as error:
+        app_module._resolve_verified_registry_fallback(row, "tfidf_lr")
+    assert error.value.status_code == 400

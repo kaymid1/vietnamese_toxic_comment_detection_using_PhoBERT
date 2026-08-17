@@ -566,14 +566,12 @@ def _detect_chrome_major_version(browser_bin: str | None) -> int | None:
         return None
 
 
-def _get_driver_chrome_uc(
+def _build_chrome_uc_options(
+    uc,
     headless: bool,
     browser_bin: str | None,
     proxy: str | None = None,
 ):
-    """Build undetected_chromedriver for Chrome."""
-    import undetected_chromedriver as uc
-
     options = uc.ChromeOptions()
     options.page_load_strategy = "eager"
     if headless:
@@ -585,20 +583,38 @@ def _get_driver_chrome_uc(
         options.add_argument(f"--proxy-server={proxy}")
     if browser_bin:
         options.binary_location = browser_bin
+    return options
+
+
+def _get_driver_chrome_uc(
+    headless: bool,
+    browser_bin: str | None,
+    proxy: str | None = None,
+):
+    """Build undetected_chromedriver for Chrome."""
+    import undetected_chromedriver as uc
 
     detected_major = _detect_chrome_major_version(browser_bin)
     if detected_major is not None:
         logger.info("Detected Chrome major version: %s", detected_major)
         try:
-            driver = uc.Chrome(options=options, version_main=detected_major)
+            driver = uc.Chrome(
+                options=_build_chrome_uc_options(uc, headless, browser_bin, proxy),
+                version_main=detected_major,
+            )
         except Exception:
             logger.warning(
-                "uc.Chrome failed with version_main=%s, retrying without version pin",
+                "uc.Chrome failed with version_main=%s; retrying without version pin",
                 detected_major,
+                exc_info=True,
             )
-            driver = uc.Chrome(options=options)
+            driver = uc.Chrome(
+                options=_build_chrome_uc_options(uc, headless, browser_bin, proxy)
+            )
     else:
-        driver = uc.Chrome(options=options)
+        driver = uc.Chrome(
+            options=_build_chrome_uc_options(uc, headless, browser_bin, proxy)
+        )
 
     _apply_stealth_patches(driver)
     driver.set_page_load_timeout(30)

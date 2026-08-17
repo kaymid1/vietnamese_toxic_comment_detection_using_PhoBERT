@@ -7963,6 +7963,63 @@ def _resolve_registry_artifact_path(artifact_uri: Optional[str]) -> Path:
     return resolved
 
 
+def _resolve_verified_registry_fallback(
+    row: sqlite3.Row,
+    model_family: str,
+) -> Path:
+    """Resolve only the checksum-verified registry copy for one historical run.
+
+    This is deliberately narrower than the normal artifact resolvers.  It does
+    not accept a registry URI supplied by the run row; it derives the only
+    permitted path from the persisted source run and model family, then checks
+    the corresponding registry record and checksum.
+    """
+    source_run_id = str(row["run_id"] or "").strip()
+    expected_checksum = str(row["artifact_checksum"] or "").strip().lower()
+    family = str(model_family or "").strip()
+    if not source_run_id or not expected_checksum:
+        raise HTTPException(status_code=404, detail="Historical registry fallback is unavailable")
+    if family not in {"tfidf_lr", "phobert"}:
+        raise HTTPException(status_code=400, detail="Historical registry fallback has an invalid model family")
+
+    try:
+        safe_run_id = _sanitize_import_model_name(source_run_id)
+    except HTTPException as exc:
+        raise HTTPException(status_code=400, detail="Historical registry fallback has an invalid source run ID") from exc
+
+    registry_root = MODEL_REGISTRY_ARTIFACT_ROOT.resolve()
+    canonical_uri = f"runtime://model_registry/{family}/{safe_run_id}/artifact.zip"
+    canonical_path = (registry_root / family / safe_run_id / "artifact.zip").resolve()
+    try:
+        canonical_path.relative_to(registry_root)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid historical registry artifact path") from exc
+
+    with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        registry_row = conn.execute(
+            """
+            SELECT model_family, model_id, source_run_id, artifact_uri, artifact_checksum
+            FROM mlflow_model_version
+            WHERE model_family = ? AND model_id = ? AND source_run_id = ?
+            """,
+            (family, f"{family}/{safe_run_id}", source_run_id),
+        ).fetchone()
+    if not registry_row:
+        raise HTTPException(status_code=404, detail="Matching historical registry record is unavailable")
+    if str(registry_row["artifact_uri"] or "").strip() != canonical_uri:
+        raise HTTPException(status_code=400, detail="Historical registry artifact URI is not canonical")
+    registry_checksum = str(registry_row["artifact_checksum"] or "").strip().lower()
+    if not registry_checksum or not hmac.compare_digest(registry_checksum, expected_checksum):
+        raise HTTPException(status_code=409, detail="Historical registry artifact checksum metadata differs")
+    if not canonical_path.is_file():
+        raise HTTPException(status_code=404, detail="Historical registry artifact file is missing")
+    actual_checksum = _sha256_file(canonical_path).lower()
+    if not hmac.compare_digest(actual_checksum, expected_checksum):
+        raise HTTPException(status_code=409, detail="Historical registry artifact checksum mismatch")
+    return canonical_path
+
+
 def _copy_registry_artifact(source: Path, model_family: str, run_id: str, checksum: str) -> Path:
     target_dir = (MODEL_REGISTRY_ARTIFACT_ROOT / model_family / _sanitize_import_model_name(run_id)).resolve()
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -8052,11 +8109,21 @@ def _normalize_kaggle_metrics(raw_metrics: Optional[Dict[str, Any]], source_memb
     return normalized
 
 
-def _load_kaggle_artifact_metrics(artifact_uri: Optional[str]) -> Optional[Dict[str, Any]]:
+def _load_kaggle_artifact_metrics(
+    artifact_uri: Optional[str],
+    *,
+    row: Optional[sqlite3.Row] = None,
+    model_family: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
     try:
         artifact_path = _resolve_kaggle_artifact_path(artifact_uri)
     except HTTPException:
-        return None
+        if row is None or not model_family:
+            return None
+        try:
+            artifact_path = _resolve_verified_registry_fallback(row, model_family)
+        except HTTPException:
+            return None
     raw_metrics, source_member = _extract_kaggle_metrics_from_zip(artifact_path)
     return _normalize_kaggle_metrics(raw_metrics, source_member)
 
@@ -9002,7 +9069,15 @@ def mlflow_kaggle_status(run_id: str = Query(..., min_length=1)) -> Dict[str, An
     status_source = _do_infer_status_source(status_url, run_mode)
     stage_timestamps = _do_build_stage_timestamps(log_events, row)
     artifact_download_url = _kaggle_artifact_download_url(row["run_id"], artifact_uri_value) if artifact_kind == "real" else None
-    kaggle_metrics = _load_kaggle_artifact_metrics(artifact_uri_value) if artifact_kind == "real" else None
+    kaggle_metrics = (
+        _load_kaggle_artifact_metrics(
+            artifact_uri_value,
+            row=row,
+            model_family=_model_family_from_kind(current_model_kind),
+        )
+        if artifact_kind == "real"
+        else None
+    )
     previous_run = (
         _load_previous_completed_kaggle_run(row, current_model_kind)
         if row["status"] == "completed" and artifact_kind == "real" and kaggle_metrics
@@ -9316,17 +9391,41 @@ def _load_kaggle_candidate(run_id: str) -> Optional[Dict[str, Any]]:
     runtime_meta = _do_extract_runtime_metadata(logs)
     model_family = _model_family_from_kind(runtime_meta.get("model_kind"))
     artifact_uri = str(row["artifact_uri"] or "").strip()
-    metrics = _load_kaggle_artifact_metrics(artifact_uri) if artifact_uri else None
+    expected_checksum = str(row["artifact_checksum"] or "").strip().lower() or None
+    metrics: Optional[Dict[str, Any]] = None
     artifact_path: Optional[Path] = None
     artifact_actual_checksum: Optional[str] = None
     contract_ok = False
     contract_detail = "Artifact is unavailable"
+    artifact_source: Optional[str] = None
+    primary_detail: Optional[str] = None
     try:
-        artifact_path = _resolve_kaggle_artifact_path(artifact_uri)
+        try:
+            artifact_path = _resolve_kaggle_artifact_path(artifact_uri)
+            artifact_source = "kaggle"
+        except HTTPException as primary_error:
+            primary_detail = str(primary_error.detail)
+            artifact_path = _resolve_verified_registry_fallback(row, model_family)
+            artifact_source = "registry_fallback"
         artifact_actual_checksum = _sha256_file(artifact_path)
-        contract_ok, contract_detail = _artifact_contract(artifact_path, model_family)
+        if expected_checksum and not hmac.compare_digest(expected_checksum, artifact_actual_checksum.lower()):
+            contract_detail = "Artifact SHA-256 mismatch"
+        else:
+            contract_ok, contract_detail = _artifact_contract(artifact_path, model_family)
+            raw_metrics, source_member = _extract_kaggle_metrics_from_zip(artifact_path)
+            metrics = _normalize_kaggle_metrics(raw_metrics, source_member)
+            if artifact_source == "registry_fallback" and not contract_ok:
+                metrics = None
+            elif artifact_source == "registry_fallback" and not metrics:
+                contract_ok = False
+                contract_detail = "Historical registry fallback is missing metrics.json"
     except HTTPException as exc:
         contract_detail = str(exc.detail)
+        artifact_path = None
+        artifact_actual_checksum = None
+        metrics = None
+        if primary_detail:
+            contract_detail = f"{primary_detail}; historical registry fallback: {exc.detail}"
     test_fingerprint, test_size = _bundle_test_fingerprint(row["bundle_path"])
     try:
         training_plan = json.loads(row["bundle_manifest_json"]) if row["bundle_manifest_json"] else {}
@@ -9341,8 +9440,9 @@ def _load_kaggle_candidate(run_id: str) -> Optional[Dict[str, Any]]:
         "metrics": metrics,
         "artifact_uri": artifact_uri,
         "artifact_path": artifact_path,
-        "artifact_expected_checksum": str(row["artifact_checksum"] or "").strip().lower() or None,
+        "artifact_expected_checksum": expected_checksum,
         "artifact_actual_checksum": artifact_actual_checksum,
+        "artifact_source": artifact_source,
         "contract_ok": contract_ok,
         "contract_detail": contract_detail,
         "bundle_checksum": str(row["bundle_checksum"] or "").strip() or None,
@@ -9602,6 +9702,7 @@ def _build_family_comparison(run_id: str) -> Dict[str, Any]:
             "artifact_actual_checksum": actual_checksum,
             "artifact_verified": artifact_verified,
             "artifact_contract": candidate.get("contract_detail"),
+            "artifact_source": candidate.get("artifact_source"),
             "metrics": candidate_metrics,
             "source_run_id": run_id,
             "raw_metrics": candidate_metrics,
@@ -9625,14 +9726,100 @@ def _latest_candidate_run_id() -> Optional[str]:
     with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
         row = conn.execute(
             """
-            SELECT source_run_id
-            FROM mlflow_training_artifact
-            WHERE source_run_id IS NOT NULL AND source_run_id <> ''
-            ORDER BY created_at DESC
+            SELECT run.run_id
+            FROM mlflow_do_run AS run
+            LEFT JOIN mlflow_training_artifact AS artifact
+              ON artifact.source_run_id = run.run_id
+            WHERE run.status = 'completed'
+              AND run.artifact_uri IS NOT NULL
+              AND run.artifact_uri <> ''
+            ORDER BY COALESCE(artifact.created_at, run.updated_at, run.created_at) DESC
             LIMIT 1
             """
         ).fetchone()
     return str(row[0]) if row and row[0] else None
+
+
+@app.get("/api/mlflow/compare/history", dependencies=[Depends(require_admin)])
+def mlflow_compare_history(
+    model_family: Optional[str] = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=25, ge=1, le=200),
+) -> Dict[str, Any]:
+    """Return comparison history from persisted completed Kaggle runs.
+
+    This endpoint intentionally derives history from the database rather than
+    frontend state.  Each item is evaluated through the same candidate loader
+    used by compare/latest, so recovered metrics and artifact verification are
+    represented consistently.
+    """
+    init_feedback_db()
+    with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+        run_ids = [
+            str(row[0])
+            for row in conn.execute(
+                """
+                SELECT run_id
+                FROM mlflow_do_run
+                WHERE status = 'completed'
+                  AND artifact_uri IS NOT NULL
+                  AND artifact_uri <> ''
+                ORDER BY updated_at DESC, created_at DESC
+                """
+            ).fetchall()
+        ]
+
+    requested_family = str(model_family or "").strip()
+    if requested_family and requested_family not in {"tfidf_lr", "phobert"}:
+        raise HTTPException(status_code=400, detail="Unsupported model family")
+
+    items: List[Dict[str, Any]] = []
+    for run_id in run_ids:
+        candidate = _load_kaggle_candidate(run_id)
+        if not candidate or (requested_family and candidate["model_family"] != requested_family):
+            continue
+        metrics = candidate.get("metrics") or {}
+        items.append(
+            {
+                "run_id": run_id,
+                "source_run_id": run_id,
+                "model": f"{candidate['model_family']}/{_sanitize_import_model_name(run_id)}",
+                "model_family": candidate["model_family"],
+                "model_kind": candidate.get("model_kind"),
+                "training_mode": candidate.get("training_mode"),
+                "status": "completed",
+                "created_at": candidate["row"]["created_at"],
+                "metrics": {
+                    key: metrics.get(key)
+                    for key in ("f1_toxic", "macro_f1", "accuracy", "precision", "recall")
+                },
+                "artifact_checksum": candidate.get("artifact_expected_checksum"),
+                "artifact_actual_checksum": candidate.get("artifact_actual_checksum"),
+                "artifact_verified": bool(
+                    candidate.get("artifact_path")
+                    and candidate.get("artifact_expected_checksum")
+                    and candidate.get("artifact_actual_checksum")
+                    and hmac.compare_digest(
+                        str(candidate.get("artifact_expected_checksum")),
+                        str(candidate.get("artifact_actual_checksum")),
+                    )
+                ),
+                "artifact_contract": candidate.get("contract_detail"),
+                "artifact_source": candidate.get("artifact_source"),
+                "test_fingerprint": candidate.get("test_fingerprint"),
+                "test_size": candidate.get("test_size"),
+                "comparison_available": bool(candidate.get("metrics")),
+            }
+        )
+
+    offset = (page - 1) * page_size
+    return {
+        "items": items[offset : offset + page_size],
+        "total": len(items),
+        "page": page,
+        "page_size": page_size,
+        "model_family": requested_family or None,
+    }
 
 
 @app.get("/api/mlflow/compare/latest", dependencies=[Depends(require_admin)])

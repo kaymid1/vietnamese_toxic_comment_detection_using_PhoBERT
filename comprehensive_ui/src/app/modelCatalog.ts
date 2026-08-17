@@ -1,4 +1,8 @@
 export const PHOBERT_V2_FINETUNED_ID = "phobert/phobert_v2_finetuned";
+export const HIDDEN_UI_MODEL_IDS = new Set(["tfidf_lr/baseline_tfidf"]);
+
+export const isHiddenUiModel = (modelId: string | null | undefined): boolean =>
+  Boolean(modelId && HIDDEN_UI_MODEL_IDS.has(modelId));
 
 const BUILTIN_MODEL_LABELS: Record<string, string> = {
   "tfidf_lr/baseline_tfidf": "TF-IDF + Logistic Regression",

@@ -215,6 +215,26 @@ export interface MlflowRegistryModel {
   is_current_production?: boolean;
 }
 
+export interface MlflowCompareHistoryItem {
+  run_id: string;
+  source_run_id: string;
+  model: string;
+  model_family: "tfidf_lr" | "phobert" | string;
+  model_kind?: string | null;
+  training_mode?: string | null;
+  status: string;
+  created_at?: string | null;
+  metrics: Record<string, number | null>;
+  artifact_checksum?: string | null;
+  artifact_actual_checksum?: string | null;
+  artifact_verified: boolean;
+  artifact_contract?: string | null;
+  artifact_source?: string | null;
+  test_fingerprint?: string | null;
+  test_size?: number | null;
+  comparison_available: boolean;
+}
+
 export interface MlflowTrainingPreview {
   scope: "batch" | "all_batches";
   batch_id?: string | null;
@@ -379,6 +399,7 @@ export interface MlflowComparePayload {
     artifact_actual_checksum?: string | null;
     artifact_verified?: boolean;
     artifact_contract?: string | null;
+    artifact_source?: string | null;
     notes?: string | null;
     metrics?: Record<string, number | null>;
     source_run_id?: string | null;
@@ -599,6 +620,7 @@ export function useMlflowStore(options: UseMlflowStoreOptions = {}) {
   const [crawlHistoryPage, setCrawlHistoryPage] = useState(1);
   const [crawlHistoryUnavailable, setCrawlHistoryUnavailable] = useState(false);
   const [comparePayload, setComparePayload] = useState<MlflowComparePayload | null>(null);
+  const [compareHistory, setCompareHistory] = useState<MlflowCompareHistoryItem[]>([]);
   const [registryModels, setRegistryModels] = useState<MlflowRegistryModel[]>([]);
   const [lastBundlePath, setLastBundlePath] = useState<string | null>(null);
   const [requiredZipContents, setRequiredZipContents] = useState<string[]>([]);
@@ -1303,6 +1325,21 @@ export function useMlflowStore(options: UseMlflowStoreOptions = {}) {
     });
   }, [authorizedFetch, run]);
 
+  const refreshCompareHistory = useCallback(
+    async (modelFamily?: string) => {
+      return run(async () => {
+        const query = new URLSearchParams({ page: "1", page_size: "200" });
+        if (modelFamily) query.set("model_family", modelFamily);
+        const payload = await parseJsonResponse<{ items: MlflowCompareHistoryItem[] }>(
+          await authorizedFetch(buildApiUrl(`/api/mlflow/compare/history?${query.toString()}`)),
+        );
+        setCompareHistory(payload.items || []);
+        return payload;
+      });
+    },
+    [authorizedFetch, run],
+  );
+
   const refreshModelRegistry = useCallback(async () => {
     return run(async () => {
       const payload = await parseJsonResponse<{ items: MlflowRegistryModel[] }>(
@@ -1604,6 +1641,7 @@ export function useMlflowStore(options: UseMlflowStoreOptions = {}) {
     crawlHistoryTotal,
     crawlHistoryPage,
     comparePayload,
+    compareHistory,
     registryModels,
     lastBundlePath,
     requiredZipContents,
@@ -1639,6 +1677,7 @@ export function useMlflowStore(options: UseMlflowStoreOptions = {}) {
     geminiEvaluateKaggleRun,
     clearDOSession,
     refreshCompare,
+    refreshCompareHistory,
     refreshModelRegistry,
     updateModelRegistryLifecycle,
     promote,

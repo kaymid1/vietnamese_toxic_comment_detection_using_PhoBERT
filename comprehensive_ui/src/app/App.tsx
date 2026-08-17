@@ -7,6 +7,7 @@ import { ResultsPage } from "@/app/components/ResultsPage";
 import { DatasetPage } from "@/app/components/DatasetPage";
 import { SyntheticGenerationPage } from "@/app/components/SyntheticGenerationPage";
 import { ModelPage } from "@/app/components/ModelPage";
+import { TechnicalQAPage } from "@/app/components/TechnicalQAPage";
 import { ContactPage } from "@/app/components/ContactPage";
 import { MLFlowPage } from "@/app/components/MLFlowPage";
 import { SystemSettingsPage } from "@/app/components/SystemSettingsPage";
@@ -15,7 +16,7 @@ import { ProgressNotificationProvider, useProgressNotification } from "@/app/com
 import { Button } from "@/app/components/ui/button";
 import { Card } from "@/app/components/ui/card";
 import { Input } from "@/app/components/ui/input";
-import { getModelLabel } from "@/app/modelCatalog";
+import { getModelLabel, isHiddenUiModel } from "@/app/modelCatalog";
 import { deriveCommentAggregation } from "@/app/commentAggregation";
 
 interface ApiSegment {
@@ -642,7 +643,7 @@ export default function App() {
         ? data.models.filter((name): name is string => typeof name === "string")
         : [];
 
-      const sortedModels = sortModelsForSelection(models);
+      const sortedModels = sortModelsForSelection(models.filter((model) => !isHiddenUiModel(model)));
       const nonDeprecatedModels = sortedModels.filter((model) => !isDeprecatedModel(model));
       const apiDefault = data.default && sortedModels.includes(data.default) ? data.default : null;
       const resolvedDefault =
@@ -1152,6 +1153,8 @@ export default function App() {
             )}
 
             {currentPage === "model" && <ModelPage onTryNow={handleTryNow} />}
+
+            {currentPage === "technical_qa" && <TechnicalQAPage />}
 
             {currentPage === "contact" && <ContactPage />}
           </div>

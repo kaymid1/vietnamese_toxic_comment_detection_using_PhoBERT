@@ -14,6 +14,7 @@ import {
   Shield,
   Sparkles,
   Sun,
+  MessagesSquare,
   X,
 } from "lucide-react";
 import type { Language } from "@/app/i18n/messages";
@@ -49,6 +50,7 @@ export function Navigation({
     { name: t("nav.home"), id: "home", icon: Home },
     { name: t("nav.results"), id: "results", icon: BarChart3 },
     { name: t("nav.model"), id: "model", icon: Cpu },
+    { name: t("nav.technicalQa"), id: "technical_qa", icon: MessagesSquare },
     { name: t("nav.contact"), id: "contact", icon: Mail },
   ];
 
@@ -217,4 +219,3 @@ export function Navigation({
     </>
   );
 }
-

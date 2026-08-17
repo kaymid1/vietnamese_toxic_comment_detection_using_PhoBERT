@@ -21,6 +21,7 @@ import {
   DropdownMenuTrigger,
 } from "@/app/components/ui/dropdown-menu";
 import { getModelLabel } from "@/app/modelCatalog";
+import { useI18n } from "@/app/i18n/context";
 import {
   DEFAULT_MLFLOW_GATE_THRESHOLDS,
   MlflowBadge,
@@ -50,6 +51,7 @@ import {
   buildApiUrl,
   useMlflowStore,
   type MlflowCandidate,
+  type MlflowCompareHistoryItem,
   type MlflowGeminiReviewSuggestion,
   type MlflowModelReEvaluationResponse,
   type MlflowPrediction,
@@ -69,6 +71,14 @@ const MLFLOW_MODEL_DRAFT_KEY = "viettoxic:mlflow:selectedModel";
 const MLFLOW_ACTIVE_TAB_KEY = "viettoxic:mlflow:activeTab";
 const MLFLOW_CLEAR_ALL_CONFIRM_TOKEN = "DELETE_ALL_MLFLOW_DATA";
 const KAGGLE_TERMINAL_STATUSES = new Set(["completed", "failed", "dry_run", "placeholder"]);
+
+const COMPARISON_METRICS = [
+  { metric: "accuracy", labelKey: "accuracy", direction: "higher" as const },
+  { metric: "macro_f1", labelKey: "macroF1", direction: "higher" as const },
+  { metric: "f1_toxic", labelKey: "f1Toxic", direction: "higher" as const },
+  { metric: "precision", labelKey: "precision", direction: "higher" as const },
+  { metric: "recall", labelKey: "recall", direction: "higher" as const },
+];
 
 type IconButtonWithTooltipProps = ComponentProps<typeof Button> & {
   label: string;
@@ -301,6 +311,7 @@ const safeWriteLocalStorageString = (key: string, value: string) => {
 
 export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdminUnauthorized }: MLFlowPageProps) {
   const showLegacyIngest = false;
+  const { t } = useI18n();
   const { start: startProgress, update: updateProgress, succeed: succeedProgress, fail: failProgress } = useProgressNotification();
   const isDeprecatedModel = (model: string) => model.toLowerCase().includes("deprecated");
   const {
@@ -326,6 +337,7 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
     crawlHistoryTotal,
     crawlHistoryPage,
     comparePayload,
+    compareHistory,
     registryModels,
     lastBundlePath,
     doStatus,
@@ -356,6 +368,7 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
     geminiEvaluateKaggleRun,
     clearDOSession,
     refreshCompare,
+    refreshCompareHistory,
     refreshModelRegistry,
     updateModelRegistryLifecycle,
     promote,
@@ -410,6 +423,7 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
   const [geminiEvaluating, setGeminiEvaluating] = useState(false);
   const prevDoStatusRef = useRef<string>("idle");
   const announcedAutomationEventRef = useRef<number | null>(null);
+  const refreshedAutomationCompareEventRef = useRef<string | null>(null);
   const kaggleTriggerPendingRef = useRef(false);
   const trainingPreviewResizeRef = useRef<{ pointerId: number; startY: number; startHeight: number } | null>(null);
 
@@ -419,6 +433,7 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
     void refreshThresholdStatus(activeBatchId);
     void refreshTrainingPreview(1, "all_batches");
     void refreshCompare();
+    void refreshCompareHistory();
     void refreshModelRegistry();
     void refreshDOPreflight();
     void refreshAutomationStatus();
@@ -1385,14 +1400,9 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
         ? item.current - item.previous
         : null,
   }));
-  const productionComparisonData = [
-    { metric: "accuracy", label: "Accuracy" },
-    { metric: "macro_f1", label: "Macro F1" },
-    { metric: "f1_toxic", label: "F1 Toxic" },
-    { metric: "precision", label: "Precision" },
-    { metric: "recall", label: "Recall" },
-  ].map((item) => ({
+  const productionComparisonData = COMPARISON_METRICS.map((item) => ({
     ...item,
+    label: t(`mlflowComparison.${item.labelKey}`),
     current: comparePayload?.current?.metrics?.[item.metric] ?? null,
     candidate: comparePayload?.candidate?.metrics?.[item.metric] ?? null,
     delta: comparePayload?.deltas?.[item.metric] ?? null,
@@ -1435,6 +1445,51 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
   const doIsRestricted = /restricted|account tier|increase your account tier/i.test(doErrorMessage);
   const doIsMockArtifact = doArtifactKind === "mock" || doArtifactUri.toLowerCase().startsWith("mock://");
   const doHasRealArtifact = doArtifactKind === "real" && !!doArtifactUri;
+  const compareCurrent = comparePayload?.current;
+  const compareCandidate = comparePayload?.candidate;
+  const hasCompareCandidate = Boolean(compareCandidate?.model || compareCandidate?.source_run_id);
+  const candidateArtifactAvailable = Boolean(
+    compareCandidate?.artifact_path || compareCandidate?.artifact_checksum || compareCandidate?.artifact_actual_checksum,
+  );
+  const candidateMetricsReady = COMPARISON_METRICS.every(({ metric }) => {
+    const value = compareCandidate?.metrics?.[metric];
+    return typeof value === "number" && Number.isFinite(value);
+  });
+  const automationTrainingInProgress = Boolean(
+    automationStatus?.families?.some((family) => Boolean(family.state?.active_run_id)) ||
+      automationStatus?.events?.some((event) => event.action === "train_started" && event.status === "running"),
+  );
+  const candidateTrainingInProgress =
+    ((["queued", "running"].includes(doStatusValue) &&
+      (!hasCompareCandidate || doStatus?.run_id === compareCandidate?.source_run_id)) ||
+      (!hasCompareCandidate && automationTrainingInProgress));
+  const comparisonIsComparable = comparePayload?.test_comparability_verified === true;
+  const comparisonCandidateState = !hasCompareCandidate
+    ? candidateTrainingInProgress
+      ? t("mlflowComparison.candidateTraining")
+      : comparePayload?.message || t("mlflowComparison.noCompletedCandidate")
+    : !candidateMetricsReady
+      ? candidateTrainingInProgress
+        ? t("mlflowComparison.candidateTraining")
+        : t(candidateArtifactAvailable ? "mlflowComparison.candidateMetricsUnavailable" : "mlflowComparison.candidateMetricsUnavailableGeneric")
+      : null;
+  const comparisonModelName = (modelId: string | null | undefined, family: string | null | undefined) => {
+    if (modelId) {
+      const knownLabel = getModelLabel(modelId);
+      if (knownLabel !== modelId) return knownLabel;
+    }
+    if (family === "tfidf_lr") return "TF-IDF + Logistic Regression";
+    if (family === "phobert") return "PhoBERT";
+    return modelId || family || "-";
+  };
+  const comparisonDeltaLabel = (item: (typeof COMPARISON_METRICS)[number], delta: number | null) => {
+    if (!comparisonIsComparable || typeof delta !== "number" || !Number.isFinite(delta)) {
+      return t("mlflowComparison.notComparable");
+    }
+    if (Math.abs(delta) < 1e-9) return t("mlflowComparison.noChange");
+    const candidateIsBetter = item.direction === "higher" ? delta > 0 : delta < 0;
+    return candidateIsBetter ? t("mlflowComparison.better") : t("mlflowComparison.worse");
+  };
   const formatIsoTs = (value: string | null | undefined) => {
     if (!value) return "-";
     const d = new Date(value);
@@ -1449,8 +1504,8 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
     typeof value === "number" && Number.isFinite(value) ? value.toFixed(3) : "-";
   const formatMetricDelta = (value: number | null | undefined) =>
     typeof value === "number" && Number.isFinite(value) ? `${value >= 0 ? "+" : ""}${value.toFixed(3)}` : "-";
-  const metricDeltaClass = (value: number | null | undefined) =>
-    typeof value !== "number" || !Number.isFinite(value)
+  const metricDeltaClass = (value: number | null | undefined, comparable = true) =>
+    !comparable || typeof value !== "number" || !Number.isFinite(value)
       ? "text-muted-foreground"
       : value > 0
         ? "text-emerald-600 dark:text-emerald-400"
@@ -1483,6 +1538,29 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
     }
   }, [latestAutomationEvent, openDORun]);
 
+  const automationCompareEvent = automationStatus?.events?.find((event) => {
+    if (!event.source_run_id) return false;
+    if (event.action === "candidate_ready") {
+      return event.status === "awaiting_approval" || event.status === "ready";
+    }
+    if (event.action === "auto_promote") {
+      return event.status === "promoted" || event.status === "rejected" || event.status === "failed";
+    }
+    return false;
+  });
+
+  useEffect(() => {
+    if (!automationCompareEvent?.source_run_id) return;
+    const eventKey = `${automationCompareEvent.id}:${automationCompareEvent.status}`;
+    if (refreshedAutomationCompareEventRef.current === eventKey) return;
+    refreshedAutomationCompareEventRef.current = eventKey;
+    void refreshCompare(automationCompareEvent.source_run_id).catch(() => {
+      if (refreshedAutomationCompareEventRef.current === eventKey) {
+        refreshedAutomationCompareEventRef.current = null;
+      }
+    });
+  }, [automationCompareEvent, refreshCompare]);
+
   useEffect(() => {
     const prev = prevDoStatusRef.current;
     if (prev === doStatusValue) return;
@@ -1494,6 +1572,7 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
       succeedProgress("kaggle-pipeline", { message: "Kaggle pipeline đã hoàn tất." });
       toast.success("Kaggle pipeline hoàn tất.");
       if (doRunId) void refreshCompare(doRunId);
+      void refreshCompareHistory();
     } else if (doStatusValue === "failed") {
       failProgress("kaggle-pipeline", { message: doIsRestricted ? "GPU bị restricted; hãy chuyển CPU hoặc mở ticket tăng tier." : "Kaggle pipeline thất bại." });
       if (doIsRestricted) {
@@ -1504,7 +1583,7 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
     }
 
     prevDoStatusRef.current = doStatusValue;
-  }, [doIsRestricted, doRunId, doStatusValue, failProgress, refreshCompare, startProgress, succeedProgress]);
+  }, [doIsRestricted, doRunId, doStatusValue, failProgress, refreshCompare, refreshCompareHistory, startProgress, succeedProgress]);
 
   useEffect(() => {
     if (ingestStage) {
@@ -1582,10 +1661,25 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
       )}
 
       <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-4">
-        <TabsList className="w-full grid grid-cols-3 h-auto">
-          <TabsTrigger value="step1">Data & Review</TabsTrigger>
-          <TabsTrigger value="step4">Kaggle Retrain</TabsTrigger>
-          <TabsTrigger value="step5">Results, Gate & Registry</TabsTrigger>
+        <TabsList className="w-full grid grid-cols-3 h-auto border border-border/70 bg-muted/40 p-1 shadow-sm">
+          <TabsTrigger
+            value="step1"
+            className="cursor-pointer transition-[background-color,color,border-color,box-shadow] duration-200 hover:bg-accent/60 hover:text-accent-foreground data-[state=active]:border-primary/30 data-[state=active]:bg-background data-[state=active]:font-semibold data-[state=active]:text-primary data-[state=active]:shadow-sm"
+          >
+            Data & Review
+          </TabsTrigger>
+          <TabsTrigger
+            value="step4"
+            className="cursor-pointer transition-[background-color,color,border-color,box-shadow] duration-200 hover:bg-accent/60 hover:text-accent-foreground data-[state=active]:border-primary/30 data-[state=active]:bg-background data-[state=active]:font-semibold data-[state=active]:text-primary data-[state=active]:shadow-sm"
+          >
+            Kaggle Retrain
+          </TabsTrigger>
+          <TabsTrigger
+            value="step5"
+            className="cursor-pointer transition-[background-color,color,border-color,box-shadow] duration-200 hover:bg-accent/60 hover:text-accent-foreground data-[state=active]:border-primary/30 data-[state=active]:bg-background data-[state=active]:font-semibold data-[state=active]:text-primary data-[state=active]:shadow-sm"
+          >
+            Results, Gate & Registry
+          </TabsTrigger>
         </TabsList>
 
         <TabsContent value="step1" className="space-y-4">
@@ -1631,6 +1725,7 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
                   void refreshReviewHistory(undefined, historyDecision, 1, "all_batches");
                   if (crawlHistoryOpen) void refreshCrawlHistory(1);
                   void refreshCompare();
+                  void refreshCompareHistory();
                 }}
               >
                 Refresh
@@ -3275,39 +3370,95 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
           <div className="grid gap-4 md:grid-cols-2">
             <Card className="p-4 space-y-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <h3 className="font-medium">So sánh với production cùng model family</h3>
-                <Badge variant="outline">{comparePayload?.model_family || "chưa có family"}</Badge>
+                <h3 className="font-medium">{t("mlflowComparison.title")}</h3>
+                <Badge variant="outline">{comparePayload?.model_family || t("mlflowComparison.familyUnknown")}</Badge>
               </div>
               <div className="grid gap-2 text-sm sm:grid-cols-2">
-                <div className="rounded-md border p-3">
-                  <p className="text-xs text-muted-foreground">Production hiện tại</p>
-                  <p className="break-all font-semibold">{comparePayload?.current?.model || "-"}</p>
+                <div className="rounded-md border border-primary/30 bg-primary/5 p-3">
+                  <p className="text-xs font-medium text-muted-foreground">{t("mlflowComparison.currentProduction")}</p>
+                  <p className="truncate font-semibold" title={compareCurrent?.model || undefined}>
+                    {comparisonModelName(compareCurrent?.model, compareCurrent?.model_family || comparePayload?.model_family)}
+                  </p>
+                  <p className="mt-1 text-[11px] text-muted-foreground">
+                    {t("mlflowComparison.internalModelId")}: <span className="break-all">{compareCurrent?.model || "—"}</span>
+                  </p>
+                  <p className="text-[11px] text-muted-foreground">
+                    {t("mlflowComparison.runId")}: <span className="break-all">{compareCurrent?.run_id || "—"}</span>
+                  </p>
+                  {compareCurrent?.created_at && <p className="text-[11px] text-muted-foreground">{t("mlflowComparison.created")}: {formatIsoTs(compareCurrent.created_at)}</p>}
                 </div>
-                <div className="rounded-md border p-3">
-                  <p className="text-xs text-muted-foreground">Candidate</p>
-                  <p className="break-all font-semibold">{comparePayload?.candidate?.model || "-"}</p>
-                  <p className="break-all text-[11px] text-muted-foreground">run={comparePayload?.candidate?.source_run_id || "-"}</p>
-                  <p className="break-all text-[11px] text-muted-foreground">feedback snapshot={comparePayload?.candidate?.feedback_snapshot_sha256 || "-"}</p>
+                <div className="rounded-md border border-amber-500/40 bg-amber-500/5 p-3">
+                  <p className="text-xs font-medium text-muted-foreground">{t("mlflowComparison.candidateNew")}</p>
+                  <p className="truncate font-semibold" title={compareCandidate?.model || undefined}>
+                    {comparisonModelName(compareCandidate?.model, compareCandidate?.model_family || comparePayload?.model_family)}
+                  </p>
+                  <p className="mt-1 text-[11px] text-muted-foreground">
+                    {t("mlflowComparison.internalModelId")}: <span className="break-all">{compareCandidate?.model || "—"}</span>
+                  </p>
+                  <p className="text-[11px] text-muted-foreground">
+                    {t("mlflowComparison.runId")}: <span className="break-all">{compareCandidate?.source_run_id || "—"}</span>
+                  </p>
+                  {compareCandidate?.created_at && <p className="text-[11px] text-muted-foreground">{t("mlflowComparison.created")}: {formatIsoTs(compareCandidate.created_at)}</p>}
                 </div>
               </div>
-              <div className="space-y-2">
-                {productionComparisonData.map((item) => (
-                  <div key={item.metric} className="grid grid-cols-[1fr_auto_auto_auto] items-center gap-3 rounded-md border px-3 py-2 text-sm">
-                    <span>{item.label}</span>
-                    <span className="text-muted-foreground">{formatMetric(item.current)}</span>
-                    <span className="font-medium">{formatMetric(item.candidate)}</span>
-                    <span className={`font-semibold ${metricDeltaClass(item.delta)}`}>{formatMetricDelta(item.delta)}</span>
+              {comparisonCandidateState && (
+                <div className={`rounded-md border p-3 text-sm ${hasCompareCandidate ? "bg-amber-500/10" : "bg-muted/40"}`} role="status">
+                  {comparisonCandidateState}
+                </div>
+              )}
+              {hasCompareCandidate && (
+                <>
+                  <div className="hidden grid-cols-[minmax(7rem,1fr)_minmax(5rem,auto)_minmax(5rem,auto)_minmax(8rem,auto)] items-center gap-3 rounded-md bg-muted/60 px-3 py-2 text-xs font-semibold text-muted-foreground sm:grid">
+                    <span>{t("mlflowComparison.metric")}</span>
+                    <span className="text-right">{t("mlflowComparison.productionMetrics")}</span>
+                    <span className="text-right">{t("mlflowComparison.candidateMetrics")}</span>
+                    <span className="text-right">{t("mlflowComparison.difference")}</span>
                   </div>
-                ))}
-              </div>
-              <div className={`rounded-md border p-3 text-xs ${comparePayload?.test_comparability_verified ? "bg-emerald-500/10" : "bg-amber-500/10"}`}>
-                {comparePayload?.test_comparability_verified
-                  ? "Đã xác minh cùng semantic test-set fingerprint."
-                  : "Chưa xác minh được test-set fingerprint; promotion bị khóa."}
-              </div>
+                  <div className="space-y-2">
+                    {productionComparisonData.map((item) => {
+                      const deltaText = !comparisonIsComparable
+                        ? t("mlflowComparison.notComparable")
+                        : typeof item.delta === "number" && Number.isFinite(item.delta)
+                          ? `${formatMetricDelta(item.delta)} · ${comparisonDeltaLabel(item, item.delta)}`
+                          : "—";
+                      return (
+                        <div
+                          key={item.metric}
+                          className={`grid grid-cols-1 gap-2 rounded-md border px-3 py-2 text-sm sm:grid-cols-[minmax(7rem,1fr)_minmax(5rem,auto)_minmax(5rem,auto)_minmax(8rem,auto)] sm:items-center sm:gap-3 ${item.metric === "macro_f1" ? "border-primary/50 bg-primary/5" : ""}`}
+                        >
+                          <span className={item.metric === "macro_f1" ? "font-semibold" : ""}>{item.label}</span>
+                          <span className="flex items-center justify-between gap-3 text-muted-foreground sm:justify-end">
+                            <span className="text-xs text-muted-foreground sm:hidden">{t("mlflowComparison.productionMetrics")}</span>
+                            <span>{formatMetric(item.current)}</span>
+                          </span>
+                          <span className="flex items-center justify-between gap-3 font-medium sm:justify-end">
+                            <span className="text-xs text-muted-foreground sm:hidden">{t("mlflowComparison.candidateMetrics")}</span>
+                            <span>{formatMetric(item.candidate)}</span>
+                          </span>
+                          <span
+                            className={`flex items-center justify-between gap-3 font-semibold sm:justify-end ${metricDeltaClass(item.delta, comparisonIsComparable)}`}
+                            aria-label={`${t("mlflowComparison.difference")}: ${deltaText}`}
+                          >
+                            <span className="text-xs text-muted-foreground sm:hidden">{t("mlflowComparison.difference")}</span>
+                            <span>{deltaText}</span>
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </>
+              )}
+              {hasCompareCandidate && (
+                <>
+                  <div className={`rounded-md border p-3 text-xs ${comparisonIsComparable ? "bg-emerald-500/10" : "bg-amber-500/10"}`}>
+                    {comparisonIsComparable ? t("mlflowComparison.comparableTestSet") : t("mlflowComparison.incomparableTestSet")}
+                  </div>
+                  <p className="text-xs text-muted-foreground">{t("mlflowComparison.comparisonEvidence")}</p>
+                </>
+              )}
               <div className="flex flex-wrap gap-2">
                 <Button variant="outline" onClick={() => refreshCompare(comparePayload?.candidate?.source_run_id || doRunId || undefined)}>
-                  Refresh compare
+                  {t("mlflowComparison.refreshCompare")}
                 </Button>
                 <Button
                   variant="secondary"
@@ -3380,7 +3531,7 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
                 <h3 className="font-medium">Model Registry</h3>
                 <p className="text-xs text-muted-foreground">Completed Kaggle artifacts are retained as candidates until an explicit lifecycle action.</p>
               </div>
-              <Button size="sm" variant="outline" onClick={() => void refreshModelRegistry()}>Refresh registry</Button>
+              <Button size="sm" variant="outline" onClick={() => void Promise.all([refreshModelRegistry(), refreshCompareHistory()])}>Refresh registry</Button>
             </div>
             <div className="space-y-2">
               {registryModels.map((model) => (
