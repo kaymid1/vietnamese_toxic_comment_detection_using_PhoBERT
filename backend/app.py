@@ -31,6 +31,68 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
+from backend.runtime_paths import get_project_root
+
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
+logger = logging.getLogger("viet-toxic-backend")
+
+
+# Resolve the project root and load environment files before importing local
+# modules that materialize environment-dependent defaults at import time.
+BASE_DIR = get_project_root()
+ENV_FILES = [
+    BASE_DIR / ".env",
+    BASE_DIR / ".env.local",
+    BASE_DIR / "backend" / ".env",
+    BASE_DIR / "backend" / ".env.local",
+]
+
+
+def load_env_files() -> None:
+    def _load_env_fallback(path: Path) -> None:
+        for raw_line in path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("export "):
+                line = line[len("export ") :].strip()
+            if "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip()
+            if not key:
+                continue
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+                value = value[1:-1]
+            os.environ[key] = value
+
+    loaded_any = False
+    try:
+        from dotenv import load_dotenv
+
+        for env_path in ENV_FILES:
+            if env_path.exists():
+                load_dotenv(env_path, override=True)
+                loaded_any = True
+    except ImportError:
+        logger.warning("python-dotenv not installed; using basic .env parser fallback")
+        for env_path in ENV_FILES:
+            if env_path.exists():
+                _load_env_fallback(env_path)
+                loaded_any = True
+
+    if loaded_any:
+        logger.info("Loaded environment variables from .env files")
+
+
+load_env_files()
+
+
 from domain_classifier import CATEGORY_THRESHOLDS
 from backend.crawl_adapter import crawl_urls
 from backend.system_settings import (
@@ -48,7 +110,6 @@ from backend.runtime_paths import (
     get_kaggle_runtime_dir,
     get_model_options_dir,
     get_model_registry_dir,
-    get_project_root,
 )
 from backend.artifact_refs import encode_artifact_ref, resolve_artifact_ref
 from backend.mlflow_kaggle_ingest import (
@@ -62,7 +123,7 @@ from backend.mlflow_kaggle_ingest import (
 )
 from infer_crawled_local import infer_crawled, build_segment_hash, build_context_segment_hash
 
-BASE_DIR = get_project_root()
+
 APP_DATA_DIR = get_data_dir()
 PROCESSED_DATA_DIR = APP_DATA_DIR / "processed"
 DATA_DIR = APP_DATA_DIR / "raw" / "crawled_urls"
@@ -284,62 +345,6 @@ TRAINING_TRACKER_DEFAULT_PHASES: List[Dict[str, Any]] = [
         ],
     },
 ]
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-)
-logger = logging.getLogger("viet-toxic-backend")
-
-
-ENV_FILES = [
-    BASE_DIR / ".env",
-    BASE_DIR / ".env.local",
-    BASE_DIR / "backend" / ".env",
-    BASE_DIR / "backend" / ".env.local",
-]
-
-
-def load_env_files() -> None:
-    def _load_env_fallback(path: Path) -> None:
-        for raw_line in path.read_text(encoding="utf-8").splitlines():
-            line = raw_line.strip()
-            if not line or line.startswith("#"):
-                continue
-            if line.startswith("export "):
-                line = line[len("export ") :].strip()
-            if "=" not in line:
-                continue
-            key, value = line.split("=", 1)
-            key = key.strip()
-            value = value.strip()
-            if not key:
-                continue
-            if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
-                value = value[1:-1]
-            os.environ[key] = value
-
-    loaded_any = False
-    try:
-        from dotenv import load_dotenv
-
-        for env_path in ENV_FILES:
-            if env_path.exists():
-                load_dotenv(env_path, override=True)
-                loaded_any = True
-    except ImportError:
-        logger.warning("python-dotenv not installed; using basic .env parser fallback")
-        for env_path in ENV_FILES:
-            if env_path.exists():
-                _load_env_fallback(env_path)
-                loaded_any = True
-
-    if loaded_any:
-        logger.info("Loaded environment variables from .env files")
-
-
-load_env_files()
-
 
 def get_setting(key: str, default: Optional[str] = None) -> Optional[str]:
     return get_runtime_setting(key, default, db_path=FEEDBACK_DB_PATH)
