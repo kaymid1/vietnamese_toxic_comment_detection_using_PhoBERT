@@ -185,6 +185,42 @@ def test_missing_required_and_external_references_are_reported(source_state, tmp
         state_bundle.export_bundle(output=tmp_path / "refused", dry_run=False, source_paths=source_state)
 
 
+def test_stale_target_detection_uses_managed_reference_ownership(tmp_path):
+    roots = {
+        "data": tmp_path / "VietToxicData",
+        "runtime": tmp_path / "VietToxicRuntime",
+        "model": tmp_path / "VietToxicModels",
+    }
+    values = [
+        str(roots["runtime"] / "model_registry" / "artifact.zip"),
+        r"D:\Code\Thesis\Thesis\.runtime\model_registry\artifact.zip",
+        "Thesis/.runtime/model_registry/artifact.zip",
+        "file:///Users/old/mlruns/run-1/artifacts",
+    ]
+    references = []
+    for value in values:
+        inspected = state_bundle.inspect_artifact_ref(value, roots=roots)
+        references.append(
+            {
+                "classification": inspected.classification,
+                "logical_reference": value,
+                "persistence": "external",
+            }
+        )
+
+    stale = state_bundle._stale_managed_references(references)
+
+    assert {item["classification"] for item in stale} == {
+        "managed_absolute",
+        "legacy_managed_absolute",
+        "legacy_managed_relative",
+    }
+    assert all(item["classification"] != "protected_uri" for item in stale)
+    protected = [item for item in references if item["classification"] == "protected_uri"]
+    assert len(protected) == 1
+    assert protected[0]["persistence"] == "external"
+
+
 @pytest.mark.parametrize(
     "unsafe_path",
     ["../escape", r"..\escape", "/absolute/member", r"C:\absolute\member", "C:drive-relative", "//server/share"],

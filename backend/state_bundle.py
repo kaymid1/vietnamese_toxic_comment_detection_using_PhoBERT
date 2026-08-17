@@ -513,6 +513,21 @@ def _iter_path_references(db_path: Path, *, roots: Mapping[str, Path]) -> list[d
     return result
 
 
+def _stale_managed_references(references: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return references that still contain managed machine-specific paths.
+
+    Classification is authoritative here. Protected URIs and external paths
+    may look like machine paths, but they are intentionally opaque values and
+    must not be rewritten or rejected as stale managed state.
+    """
+    managed_classifications = {
+        "managed_absolute",
+        "legacy_managed_absolute",
+        "legacy_managed_relative",
+    }
+    return [item for item in references if item["classification"] in managed_classifications]
+
+
 def _model_inventory(root: Path, *, include_hashes: bool) -> dict[str, Any]:
     if not root.exists():
         return {"status": "missing", "file_count": 0, "total_bytes": 0, "files": [], "contracts": []}
@@ -1424,12 +1439,7 @@ def verify_target(bundle: Path, *, target_paths: TargetPaths | None = None) -> d
     expected_counts = manifest["statistics"]["application_state_counts"]
     count_matches = application["state_counts"] == expected_counts
     references = _iter_path_references(target.feedback_db, roots=target.artifact_roots)
-    stale_managed = [
-        item
-        for item in references
-        if item["classification"] in {"managed_absolute", "legacy_managed_absolute", "legacy_managed_relative"}
-        or (MACHINE_PATH_RE.search(str(item["logical_reference"])) and item["classification"] != "external_absolute")
-    ]
+    stale_managed = _stale_managed_references(references)
     missing_required: list[dict[str, Any]] = []
     for item in references:
         if item["persistence"] in {"persistent-required", "model-component"} and item["exists"] is False:
