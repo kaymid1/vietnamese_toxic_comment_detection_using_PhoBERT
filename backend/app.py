@@ -1087,6 +1087,30 @@ def _read_production_slot_model_id(model_family: str) -> Optional[str]:
     return str(row[0]).strip() if row and row[0] else None
 
 
+def _read_production_slot_state(model_family: str) -> Dict[str, Optional[str]]:
+    state: Dict[str, Optional[str]] = {
+        "active_model_id": None,
+        "previous_model_id": None,
+        "updated_at": None,
+    }
+    if model_family not in {"phobert", "tfidf_lr"} or not FEEDBACK_DB_PATH.exists():
+        return state
+    try:
+        with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+            row = conn.execute(
+                "SELECT active_model_id, previous_model_id, updated_at "
+                "FROM mlflow_production_slot WHERE model_family = ?",
+                (model_family,),
+            ).fetchone()
+    except sqlite3.Error:
+        return state
+    if row:
+        state["active_model_id"] = str(row[0]).strip() if row[0] else None
+        state["previous_model_id"] = str(row[1]).strip() if row[1] else None
+        state["updated_at"] = str(row[2]).strip() if row[2] else None
+    return state
+
+
 def _get_default_model_id_without_slot(model_root: Path) -> Optional[str]:
     phobert_models = list_models_by_type(model_root, "phobert")
     preferred_dir = model_root / "phobert" / PHOBERT_V2_FINETUNED_STORAGE_NAME
@@ -10454,10 +10478,70 @@ def get_models() -> Dict[str, Any]:
             family: get_family_default_model_id(model_root, family)
             for family in ("tfidf_lr", "phobert")
         }
+
+        def describe_model(model_id: Optional[str]) -> Dict[str, Any]:
+            detail: Dict[str, Any] = {
+                "model_id": model_id,
+                "family": None,
+                "version": None,
+                "artifact_path": None,
+                "artifact_available": False,
+                "base_model": None,
+            }
+            if not model_id:
+                return detail
+            try:
+                model_type, model_name, model_dir = resolve_model_path(model_root, model_id)
+            except (FileNotFoundError, OSError, ValueError):
+                return detail
+            run_config = _load_model_json(model_dir, "run_config.json")
+            detail.update({
+                "model_id": f"{model_type}/{model_name}",
+                "family": model_type,
+                "version": run_config.get("model_version") or run_config.get("model_name") or f"{model_type}/{model_name}",
+                "artifact_path": to_relative(str(model_dir)),
+                "artifact_available": True,
+                "base_model": get_phobert_base_model(model_dir) if model_type == "phobert" else None,
+            })
+            return detail
+
+        model_details: Dict[str, Dict[str, Any]] = {}
+        for model in models:
+            model_id = str(model["id"])
+            model_details[model_id] = describe_model(model_id)
+
+        configured_slots: Dict[str, Dict[str, Any]] = {}
+        for family in ("tfidf_lr", "phobert"):
+            state = _read_production_slot_state(family)
+            configured = describe_model(state["active_model_id"])
+            previous = describe_model(state["previous_model_id"])
+            configured_slots[family] = {
+                "configured": configured,
+                "previous": previous,
+                "updated_at": state["updated_at"],
+                "resolved": describe_model(production_slots[family]),
+            }
+
+        default_model_id = get_default_model_id(model_root)
+        runtime_default = describe_model(default_model_id)
+        phobert_configured = configured_slots["phobert"]["configured"]
+        if phobert_configured["model_id"] == runtime_default["model_id"]:
+            runtime_default["resolution_source"] = "phobert_production_slot"
+            runtime_default["fallback_reason"] = None
+        else:
+            runtime_default["resolution_source"] = "phobert_fallback"
+            runtime_default["fallback_reason"] = (
+                "No configured PhoBERT production slot; selected the first compatible PhoBERT fallback."
+                if not phobert_configured["model_id"]
+                else "Configured PhoBERT production slot was not compatible; selected a compatible PhoBERT fallback."
+            )
         return {
             "models": model_ids,
-            "default": get_default_model_id(model_root),
+            "default": default_model_id,
             "production_slots": production_slots,
+            "model_details": model_details,
+            "configured_production_slots": configured_slots,
+            "runtime_default": runtime_default,
             "labels": {
                 model_id: MODEL_DISPLAY_NAMES.get(model_id, model_id)
                 for model_id in model_ids

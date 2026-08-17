@@ -1041,6 +1041,22 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
     setGeminiSuggestions((prev) => Object.fromEntries(Object.entries(prev).filter(([id]) => !appliedIds.has(Number(id)))));
   };
 
+  const dismissGeminiSuggestion = (suggestion: MlflowGeminiReviewSuggestion) => {
+    setGeminiSuggestions((prev) => {
+      const next = { ...prev };
+      delete next[suggestion.id];
+      return next;
+    });
+  };
+
+  const dismissCandidateGeminiSuggestion = (suggestion: MlflowGeminiReviewSuggestion) => {
+    setCandidateGeminiSuggestions((prev) => {
+      const next = { ...prev };
+      delete next[suggestion.id];
+      return next;
+    });
+  };
+
   const handleApplyGeminiSuggestions = async (suggestions: MlflowGeminiReviewSuggestion[]) => {
     if (suggestions.length === 0) return;
     setGeminiApplying(true);
@@ -1823,7 +1839,7 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
                 )}
                 <SectionInfoTooltip label="Thông tin chi tiết Training Preview">
                   <p>
-                    Danh sách chỉ hiển thị comment accepted đã qua gate; candidate chưa xác minh chỉ hiển thị trong Manual Verify.
+                    Danh sách hiển thị comment accepted đã qua gate và được chọn cho training; các candidate chưa xác minh chỉ xuất hiện ở đây khi là ngoại lệ model_conflict hoặc model_uncertain cần human review.
                     Mẫu accepted phải được chọn cho training và có nhãn Độc hại hoặc Sạch hợp lệ mới đủ điều kiện vào accepted export set;
                     balanced export có thể lấy ít hơn. Checkbox đầu hàng chỉ chọn tạm thời cho thao tác trên màn hình.
                   </p>
@@ -2302,6 +2318,9 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
                               <Sparkles className="h-4 w-4" />
                               Áp dụng đề xuất
                             </Button>
+                            <Button size="sm" variant="outline" onClick={() => dismissGeminiSuggestion(suggestion)} disabled={geminiApplying}>
+                              Không áp dụng
+                            </Button>
                           </div>
                           {suggestion.reason && <p className="mt-1 text-muted-foreground">{suggestion.reason}</p>}
                         </div>
@@ -2502,6 +2521,9 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
                             disabled={candidateGeminiApplying}
                           >
                             Áp dụng dòng này
+                          </Button>
+                          <Button size="sm" variant="outline" onClick={() => dismissCandidateGeminiSuggestion(suggestion)} disabled={candidateGeminiApplying}>
+                            Không áp dụng
                           </Button>
                         </div>
                       )}

@@ -16,6 +16,7 @@ import { Button } from "@/app/components/ui/button";
 import { Card } from "@/app/components/ui/card";
 import { Input } from "@/app/components/ui/input";
 import { getModelLabel } from "@/app/modelCatalog";
+import { deriveCommentAggregation } from "@/app/commentAggregation";
 
 interface ApiSegment {
   segment_id: string;
@@ -388,7 +389,9 @@ const mergeApiResult = (
       : typeof previous.seg_threshold_used === "number"
         ? previous.seg_threshold_used
         : 0.5;
-  const resolvedPageThreshold = Number.isFinite(pageThreshold) ? pageThreshold : 0.5;
+  // Keep the compatibility field aligned with backend aggregation: final toxic
+  // comment labels / all extracted comments, using a strict `>` comparison.
+  const aggregation = deriveCommentAggregation(mergedSegments, pageThreshold);
 
   return {
     ...latest,
@@ -399,12 +402,7 @@ const mergeApiResult = (
       overall: toxicityOverall,
       by_segment: mergedSegments,
     },
-    page_toxic:
-      toxicityOverall !== null
-        ? toxicityOverall >= resolvedPageThreshold
-          ? 1
-          : 0
-        : latest.page_toxic ?? previous.page_toxic ?? null,
+    page_toxic: aggregation.aggregateAlert ? 1 : 0,
     constructiveness: {
       overall: constructivenessOverall,
       by_segment: constructiveSegments,
@@ -1112,7 +1110,12 @@ export default function App() {
               />
             )}
 
-            {currentPage === "dataset" && <DatasetPage />}
+            {currentPage === "dataset" && (
+              <DatasetPage
+                adminToken={adminSession?.token}
+                onAdminUnauthorized={handleAdminUnauthorized}
+              />
+            )}
 
             {currentPage === "dataset_synthetic" && adminSession?.token && (
               <SyntheticGenerationPage

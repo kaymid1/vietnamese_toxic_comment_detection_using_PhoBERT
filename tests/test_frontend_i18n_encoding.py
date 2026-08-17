@@ -43,15 +43,30 @@ def test_frontend_source_has_no_common_utf8_mojibake_markers():
     assert offenders == []
 
 
+def test_dataset_training_candidates_use_read_only_preview_and_plan_contracts():
+    page_text = (FRONTEND_SRC / "app" / "components" / "DatasetPage.tsx").read_text(encoding="utf-8-sig")
+
+    # The Dataset page must show the same preview shape that training consumes,
+    # without adding a mutation endpoint or treating the candidate pool as gold data.
+    assert "/api/mlflow/training-preview?" in page_text
+    assert "/api/mlflow/training-plan?" in page_text
+    assert "value={preview.total}" in page_text
+    assert "plan.summary.eligible_mlflow - plan.summary.after_balance" in page_text
+    assert "plan?.summary.duplicates_skipped" in page_text
+    assert "Read-only candidate table" in (FRONTEND_SRC / "app" / "i18n" / "messages.ts").read_text(encoding="utf-8-sig")
+    assert "training-preview/review" not in page_text
+    assert "delete" not in page_text.lower()
+
+
 def test_kaggle_pipeline_vietnamese_copy_is_utf8_clean():
     text = (FRONTEND_SRC / "app" / "components" / "MLFlowPage.tsx").read_text(encoding="utf-8-sig")
 
     expected_copy = [
-        "Pipeline tự động Google Kaggle (API trực tiếp)",
+        "Huấn luyện trên Google Kaggle",
+        "Tạo bundle mới, chạy train qua Kaggle API và lưu bằng chứng cho từng run.",
         "Tạo bundle & kích hoạt Kaggle",
-        "Flow tự động hiện chạy qua Google Kaggle (GPU runtime).",
-        "Để trống để dùng base model mặc định của script finetune.",
-        "Retrain phù hợp khi refresh dataset lớn; Finetune phù hợp khi thêm ít data/pseudo mới để giảm tài nguyên.",
+        "Kaggle đang chạy",
+        "Đã clear Kaggle session hiện tại. Sẵn sàng trigger run mới.",
     ]
 
     for copy in expected_copy:

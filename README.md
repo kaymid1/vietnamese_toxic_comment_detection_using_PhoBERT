@@ -12,7 +12,13 @@ Active runtime path:
 2. Backend crawls **comment sections only** (via `comment_crawl.py` through `backend/crawl_adapter.py`).
 3. Backend runs local model inference (`infer_crawled_local.py`).
 4. Backend optionally stores new inferred comment data in the MLflow review DB for admin review/retrain bundles.
-5. UI shows page-level and segment-level toxicity results.
+5. UI shows per-comment toxicity predictions and URL-level summaries of those extracted comments.
+
+Toxicity inference is performed on extracted comments only. A URL/page is a grouping context: it is not classified as toxic or safe, and article/webpage content is not inferred in the active flow. The UI distinguishes:
+
+- **Average Comment Toxicity Score** = mean model toxicity probability across extracted comments.
+- **Toxic Comment Rate** = toxic comment count / extracted comment count.
+- **Aggregate alert state** = toxic comment rate > configured page threshold.
 
 The old article/video crawl lane (`setup_and_crawl.py`) is still in the repo, but it is **not** the active crawl adapter path.
 

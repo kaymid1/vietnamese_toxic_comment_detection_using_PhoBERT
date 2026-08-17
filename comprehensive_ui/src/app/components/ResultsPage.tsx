@@ -4,10 +4,11 @@ import { Card } from "@/app/components/ui/card";
 import { Progress } from "@/app/components/ui/progress";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/app/components/ui/tooltip";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/app/components/ui/dialog";
-import { AlertTriangle, CheckCircle, CircleHelp, Download, ExternalLink, RotateCcw } from "lucide-react";
+import { CircleHelp, Download, ExternalLink, RotateCcw } from "lucide-react";
 import { PieChart, Pie, Cell, ResponsiveContainer, Legend, Tooltip as RechartTooltip } from "recharts";
 import { useI18n } from "@/app/i18n/context";
 import { getModelLabel } from "@/app/modelCatalog";
+import { deriveCommentAggregation } from "@/app/commentAggregation";
 
 interface SegmentData {
   segment_id: string;
@@ -241,8 +242,10 @@ export function ResultsPage({
             typeof constructivenessMeta?.threshold === "number"
               ? constructivenessMeta.threshold
               : 0.5;
-          const toxicCount = segments.filter((s) => s.score >= effectiveSegThreshold).length;
-          const safeCount = segments.length - toxicCount;
+          const pageThreshold = thresholds?.page_threshold ?? 0.5;
+          const commentAggregation = deriveCommentAggregation(segments, pageThreshold);
+          const toxicCount = commentAggregation.toxicCommentCount;
+          const cleanCount = commentAggregation.cleanCommentCount;
           const constructiveCountFallback = constructivenessSegments.filter((s) => {
             if (typeof s.constructiveness_label === "number") return s.constructiveness_label === 1;
             const score =
@@ -275,14 +278,18 @@ export function ResultsPage({
             typeof constructivenessMeta?.segments_without_score === "number"
               ? constructivenessMeta.segments_without_score
               : Math.max(0, constructivenessTotalSegments - constructivenessSegmentsWithScore);
-          const pageToxicFlag = typeof result.page_toxic === "number" ? result.page_toxic : null;
-          const pageThreshold = thresholds?.page_threshold ?? 0.5;
-          const isToxic =
-            pageToxicFlag !== null
-              ? pageToxicFlag === 1
-              : typeof overallScore === "number"
-                ? overallScore >= pageThreshold
-                : false;
+          const aggregateStatusClass =
+            commentAggregation.state === "elevated"
+              ? "bg-background-danger border-border-danger"
+              : commentAggregation.state === "below_threshold"
+                ? "bg-background-warning border-border-warning"
+                : "bg-background-success border-border-success";
+          const aggregateStatusTextClass =
+            commentAggregation.state === "elevated"
+              ? "text-text-danger"
+              : commentAggregation.state === "below_threshold"
+                ? "text-text-warning"
+                : "text-text-success";
           const videos = result.videos ?? [];
           const topSegments = [...segments].sort((a, b) => b.score - a.score).slice(0, 3);
           const urlBusyKey = normalizeResultUrlKey(result.url);
@@ -386,21 +393,58 @@ export function ResultsPage({
 
               {result.status === "ok" && (
                 <>
+                  <div className={`mb-8 p-6 rounded-lg border-l-4 ${aggregateStatusClass}`}>
+                    <h3 className={`text-xl ${aggregateStatusTextClass}`}>{t("results.pageLevelCommentToxicity")}</h3>
+                    <p className="mt-2 text-sm text-muted-foreground">{t("results.pageLevelCommentToxicityDescription")}</p>
+                    <div className="mt-4 grid grid-cols-1 sm:grid-cols-3 gap-3 text-sm">
+                      <div>
+                        <p className="text-muted-foreground">{t("results.toxicComments")}</p>
+                        <p className={`text-xl font-semibold ${aggregateStatusTextClass}`}>
+                          {toxicCount} / {commentAggregation.totalCommentCount}
+                        </p>
+                      </div>
+                      <div>
+                        <p className="text-muted-foreground">{t("results.toxicCommentRate")}</p>
+                        <p className="text-xl font-semibold">{(commentAggregation.toxicCommentRate * 100).toFixed(1)}%</p>
+                      </div>
+                      <div>
+                        <p className="text-muted-foreground">{t("results.aggregateAlertThreshold")}</p>
+                        <p className="text-xl font-semibold">{(pageThreshold * 100).toFixed(1)}%</p>
+                      </div>
+                    </div>
+                    <div className="mt-4">
+                      <h4 className={`font-semibold ${aggregateStatusTextClass}`}>
+                        {commentAggregation.state === "none"
+                          ? t("results.noToxicCommentsDetected")
+                          : commentAggregation.state === "below_threshold"
+                            ? t("results.toxicCommentsBelowThreshold")
+                            : t("results.elevatedToxicCommentRate")}
+                      </h4>
+                      <p className="mt-1 text-sm text-foreground">
+                        {commentAggregation.state === "none"
+                          ? t("results.noToxicCommentsDescription")
+                          : commentAggregation.state === "below_threshold"
+                            ? t("results.toxicCommentsBelowThresholdDescription")
+                            : t("results.elevatedToxicCommentRateDescription")}
+                      </p>
+                    </div>
+                  </div>
+
                   <div className="mb-8">
                     <div className="flex items-center justify-between mb-3">
                       <h3 className="text-xl text-primary">{t("results.overallToxicityScore")}</h3>
-                      <span className={`text-3xl ${isToxic ? "text-text-danger" : "text-text-success"}`}>
+                      <span className="text-3xl text-primary">
                         {overallPercent !== null ? `${overallPercent}%` : "--"}
                       </span>
                     </div>
                     <div className="flex flex-wrap gap-4 text-xs text-muted-foreground">
-                      <span>{t("results.pageThreshold", { value: formatThreshold(thresholds?.page_threshold) })}</span>
+                      <span>{t("results.aggregateAlertThreshold")}: {(pageThreshold * 100).toFixed(1)}%</span>
                       <span>{t("results.effectiveSegmentThreshold", { value: formatThreshold(effectiveSegThreshold) })}</span>
                     </div>
                     <Progress value={overallPercent ?? 0} className="h-4" />
                     <div className="flex justify-between mt-2 text-sm">
-                      <span className="text-text-success">{t("results.safe")}</span>
-                      <span className="text-text-danger">{t("results.toxic")}</span>
+                      <span className="text-muted-foreground">{t("results.averageCommentScoreLow")}</span>
+                      <span className="text-muted-foreground">{t("results.averageCommentScoreHigh")}</span>
                     </div>
                   </div>
 
@@ -441,8 +485,8 @@ export function ResultsPage({
                         <PieChart>
                           <Pie
                             data={[
-                              { name: t("results.toxicContent"), value: overallPercent ?? 0 },
-                              { name: t("results.safeContent"), value: 100 - (overallPercent ?? 0) },
+                              { name: t("results.toxicComments"), value: toxicCount },
+                              { name: t("results.cleanComments"), value: cleanCount },
                             ]}
                             cx="50%"
                             cy="50%"
@@ -464,16 +508,16 @@ export function ResultsPage({
                       <h3 className="mb-4 text-primary">{t("results.detailedStats")}</h3>
                       <div className="bg-background-secondary p-4 rounded-lg border border-border">
                         <div className="flex justify-between items-center mb-2">
-                          <span className="text-muted-foreground">{t("results.totalSegments")}</span>
-                          <span className="text-xl">{segments.length}</span>
+                          <span className="text-muted-foreground">{t("results.totalComments")}</span>
+                          <span className="text-xl">{commentAggregation.totalCommentCount}</span>
                         </div>
                         <div className="flex justify-between items-center mb-2">
-                          <span className="text-muted-foreground">{t("results.detectedToxicSegments")}</span>
+                          <span className="text-muted-foreground">{t("results.toxicComments")}</span>
                           <span className="text-xl text-text-danger">{toxicCount}</span>
                         </div>
                         <div className="flex justify-between items-center">
-                          <span className="text-muted-foreground">{t("results.safeSegments")}</span>
-                          <span className="text-xl text-text-success">{safeCount}</span>
+                          <span className="text-muted-foreground">{t("results.cleanComments")}</span>
+                          <span className="text-xl text-text-success">{cleanCount}</span>
                         </div>
                         <div className="flex justify-between items-center mt-2">
                           <span className="text-muted-foreground">{t("results.constructiveSegments")}</span>
@@ -532,7 +576,7 @@ export function ResultsPage({
                                       : "bg-background-warning text-text-warning border-border-warning"
                                   }`}
                                 >
-                                  {segmentIsToxic ? t("results.toxicAtOrAboveThreshold") : t("results.riskBelowThreshold")}
+                                  {segmentIsToxic ? t("results.toxicAtOrAboveThreshold") : t("results.clean")}
                                 </span>
                               </div>
                               {(constructivenessScore !== undefined || constructivenessLabel !== undefined) && (
@@ -560,28 +604,6 @@ export function ResultsPage({
                       </div>
                     </div>
                   )}
-
-                  <div
-                    className={`p-6 rounded-lg border-l-4 ${
-                      isToxic ? "bg-background-danger border-border-danger" : "bg-background-success border-border-success"
-                    }`}
-                  >
-                    <div className="flex items-start gap-3">
-                      {isToxic ? (
-                        <AlertTriangle className="w-6 h-6 mt-1 flex-shrink-0 text-text-danger" />
-                      ) : (
-                        <CheckCircle className="w-6 h-6 mt-1 flex-shrink-0 text-text-success" />
-                      )}
-                      <div>
-                        <h4 className={`mb-2 ${isToxic ? "text-text-danger" : "text-text-success"}`}>
-                          {isToxic ? t("results.warningContent") : t("results.safeContentTitle")}
-                        </h4>
-                        <p className="text-foreground">
-                          {isToxic ? t("results.warningDescription") : t("results.safeDescription")}
-                        </p>
-                      </div>
-                    </div>
-                  </div>
 
                   <div className="mt-8">
                     <h3 className="text-xl mb-4 text-primary">{t("results.detectedVideos")}</h3>
@@ -751,7 +773,7 @@ export function ResultsPage({
                                 : "bg-background-success text-text-success border-border-success"
                             }`}
                           >
-                            {segmentIsToxic ? t("results.toxicAtOrAboveThreshold") : t("results.safe")}
+                            {segmentIsToxic ? t("results.toxicAtOrAboveThreshold") : t("results.clean")}
                           </span>
                         </div>
                         <details className="text-sm text-foreground">
