@@ -45,3 +45,8 @@ results/
 experiments/retrain_runs/
 experiments/crawler_audit.md
 .runtime/
+
+# Private cross-platform state migration material
+.migration/
+state_exports/
+.state_bundle_backups/

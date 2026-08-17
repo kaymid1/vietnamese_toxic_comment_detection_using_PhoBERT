@@ -1,5 +1,6 @@
 import json
 import os
+import signal
 import socket
 import sqlite3
 import subprocess
@@ -52,6 +53,7 @@ def _start_server(command: list[str], cwd: Path) -> tuple[subprocess.Popen[str],
             stderr=subprocess.STDOUT,
             text=True,
             creationflags=creation_flags,
+            start_new_session=os.name != "nt",
         )
     health_url = f"http://127.0.0.1:{command[command.index('--port') + 1]}/health"
     deadline = time.monotonic() + 180
@@ -73,11 +75,22 @@ def _start_server(command: list[str], cwd: Path) -> tuple[subprocess.Popen[str],
 def _stop_server(process: subprocess.Popen[str]) -> None:
     if process.poll() is not None:
         return
-    process.terminate()
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    else:
+        os.killpg(process.pid, signal.SIGTERM)
     try:
         process.wait(timeout=15)
     except subprocess.TimeoutExpired:
-        process.kill()
+        if os.name == "nt":
+            process.kill()
+        else:
+            os.killpg(process.pid, signal.SIGKILL)
         process.wait(timeout=5)
 
 

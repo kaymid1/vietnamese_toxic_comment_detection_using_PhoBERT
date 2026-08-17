@@ -4,8 +4,10 @@ from __future__ import annotations
 import argparse
 import json
 import sqlite3
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
+from collections.abc import Mapping
 from typing import Any, Iterable
 
 from backend.artifact_refs import encode_artifact_ref, inspect_artifact_ref
@@ -26,7 +28,9 @@ def _integrity(conn: sqlite3.Connection) -> None:
         raise RuntimeError(f"SQLite integrity_check failed: {result[0] if result else 'no result'}")
 
 
-def _transform_logs(raw: str) -> tuple[str, str]:
+def _transform_logs(
+    raw: str, *, roots: Mapping[str, Path] | None = None
+) -> tuple[str, str]:
     try:
         payload = json.loads(raw)
     except (TypeError, json.JSONDecodeError):
@@ -39,7 +43,7 @@ def _transform_logs(raw: str) -> tuple[str, str]:
         copy = dict(item)
         for key in LOG_PATH_KEYS.intersection(copy):
             if isinstance(copy[key], str):
-                encoded = encode_artifact_ref(copy[key])
+                encoded = encode_artifact_ref(copy[key], roots=roots)
                 if encoded != copy[key]:
                     copy[key] = encoded
                     changed = True
@@ -47,8 +51,10 @@ def _transform_logs(raw: str) -> tuple[str, str]:
     return (json.dumps(updated, ensure_ascii=False, separators=(",", ":")) if changed else raw), "convertible" if changed else "unchanged"
 
 
-def plan_migration(db_path: Path) -> list[dict[str, Any]]:
-    with sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True) as conn:
+def plan_migration(
+    db_path: Path, *, roots: Mapping[str, Path] | None = None
+) -> list[dict[str, Any]]:
+    with closing(sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)) as conn:
         _integrity(conn)
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         plan: list[dict[str, Any]] = []
@@ -61,12 +67,12 @@ def plan_migration(db_path: Path) -> list[dict[str, Any]]:
                     old = row[fields.index(field) + 1]
                     if old is None:
                         continue
-                    inspected = inspect_artifact_ref(str(old))
-                    new = encode_artifact_ref(str(old))
+                    inspected = inspect_artifact_ref(str(old), roots=roots)
+                    new = encode_artifact_ref(str(old), roots=roots)
                     plan.append({"table": table, "id": row[0], "field": field, "old": str(old), "new": new, "classification": inspected.classification})
             if table == "mlflow_do_run":
                 for row in conn.execute("SELECT run_id, logs_json FROM mlflow_do_run WHERE logs_json IS NOT NULL"):
-                    new, classification = _transform_logs(str(row[1]))
+                    new, classification = _transform_logs(str(row[1]), roots=roots)
                     plan.append({"table": table, "id": row[0], "field": "logs_json", "old": str(row[1]), "new": new, "classification": classification})
     return plan
 
@@ -76,28 +82,42 @@ def _backup(db_path: Path) -> Path:
     backup = db_path.with_name(f"{db_path.name}.pre-portability-{stamp}.bak")
     if backup.exists():
         raise RuntimeError(f"Backup already exists: {backup}")
-    with sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True) as source, sqlite3.connect(backup) as destination:
+    source = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+    destination = sqlite3.connect(backup)
+    try:
         _integrity(source)
         source.backup(destination)
         _integrity(destination)
+        destination.commit()
+    finally:
+        destination.close()
+        source.close()
     return backup
 
 
-def apply_migration(db_path: Path) -> tuple[Path, list[dict[str, Any]]]:
-    plan = plan_migration(db_path)
+def apply_migration(
+    db_path: Path, *, roots: Mapping[str, Path] | None = None
+) -> tuple[Path, list[dict[str, Any]]]:
+    plan = plan_migration(db_path, roots=roots)
     backup = _backup(db_path)
     updates = [item for item in plan if item["new"] != item["old"]]
+    conn: sqlite3.Connection | None = None
     try:
-        with sqlite3.connect(db_path) as conn:
-            _integrity(conn)
-            conn.execute("BEGIN IMMEDIATE")
-            for item in updates:
-                key = ROW_KEYS[item["table"]]
-                conn.execute(f"UPDATE {item['table']} SET {item['field']} = ? WHERE {key} = ?", (item["new"], item["id"]))
-            _integrity(conn)
-            conn.commit()
+        conn = sqlite3.connect(db_path)
+        _integrity(conn)
+        conn.execute("BEGIN IMMEDIATE")
+        for item in updates:
+            key = ROW_KEYS[item["table"]]
+            conn.execute(f"UPDATE {item['table']} SET {item['field']} = ? WHERE {key} = ?", (item["new"], item["id"]))
+        _integrity(conn)
+        conn.commit()
     except Exception:
+        if conn is not None:
+            conn.rollback()
         raise
+    finally:
+        if conn is not None:
+            conn.close()
     return backup, plan
 
 

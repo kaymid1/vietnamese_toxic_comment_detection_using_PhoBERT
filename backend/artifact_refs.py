@@ -8,6 +8,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from collections.abc import Mapping
 from typing import Optional, Union
 
 from backend.runtime_paths import get_data_dir, get_model_options_dir, get_project_root, get_runtime_dir
@@ -63,7 +64,19 @@ def _legacy_managed_ref(value: str) -> Optional[str]:
     return None
 
 
-def inspect_artifact_ref(value: Union[str, Path, None]) -> ArtifactReference:
+def _roots(overrides: Optional[Mapping[str, Path]] = None) -> dict[str, Path]:
+    resolved = {scheme: factory().resolve() for scheme, factory in PORTABLE_SCHEMES.items()}
+    if overrides:
+        unknown = set(overrides) - set(PORTABLE_SCHEMES)
+        if unknown:
+            raise ValueError(f"Unknown artifact root scheme(s): {', '.join(sorted(unknown))}")
+        resolved.update({scheme: Path(path).expanduser().resolve() for scheme, path in overrides.items()})
+    return resolved
+
+
+def inspect_artifact_ref(
+    value: Union[str, Path, None], *, roots: Optional[Mapping[str, Path]] = None
+) -> ArtifactReference:
     raw = str(value or "").strip()
     if not raw:
         return ArtifactReference(raw, "empty")
@@ -72,15 +85,14 @@ def inspect_artifact_ref(value: Union[str, Path, None]) -> ArtifactReference:
         scheme, suffix = portable
         if not suffix or ".." in Path(suffix.replace("\\", "/")).parts:
             return ArtifactReference(raw, "invalid", warning="invalid portable reference")
-        return ArtifactReference(raw, "portable", PORTABLE_SCHEMES[scheme]() / Path(suffix.replace("\\", "/")))
+        return ArtifactReference(raw, "portable", _roots(roots)[scheme] / Path(suffix.replace("\\", "/")))
     if PROTECTED_URI_RE.match(raw):
         return ArtifactReference(raw, "protected_uri", warning="unsupported URL/URI preserved")
     # New writers encode by containment even when the configured root is not
     # named data/.runtime/models (for example an external volume on macOS).
     if _is_absolute(raw):
         candidate = Path(raw).expanduser().resolve()
-        for scheme, root_factory in PORTABLE_SCHEMES.items():
-            root = root_factory().resolve()
+        for scheme, root in _roots(roots).items():
             try:
                 relative = candidate.relative_to(root)
             except ValueError:
@@ -98,19 +110,23 @@ def inspect_artifact_ref(value: Union[str, Path, None]) -> ArtifactReference:
     return ArtifactReference(raw, "relative_unmanaged", candidate, "unrecognised relative path")
 
 
-def resolve_artifact_ref(value: Union[str, Path, None]) -> Path:
-    inspected = inspect_artifact_ref(value)
+def resolve_artifact_ref(
+    value: Union[str, Path, None], *, roots: Optional[Mapping[str, Path]] = None
+) -> Path:
+    inspected = inspect_artifact_ref(value, roots=roots)
     if inspected.classification in {"portable", "managed_absolute", "legacy_managed_absolute", "legacy_managed_relative", "external_absolute", "relative_unmanaged"} and inspected.path is not None:
         return inspected.path.expanduser().resolve()
     raise ValueError(f"Artifact reference could not be resolved: {inspected.value!r} ({inspected.classification})")
 
 
-def encode_artifact_ref(value: Union[str, Path, None]) -> str:
+def encode_artifact_ref(
+    value: Union[str, Path, None], *, roots: Optional[Mapping[str, Path]] = None
+) -> str:
     """Encode a known managed path, otherwise preserve the original string exactly."""
     raw = str(value or "").strip()
     if not raw:
         return raw
-    inspected = inspect_artifact_ref(raw)
+    inspected = inspect_artifact_ref(raw, roots=roots)
     if inspected.classification == "portable":
         return raw
     if inspected.classification in {"managed_absolute", "legacy_managed_absolute", "legacy_managed_relative"}:
