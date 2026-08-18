@@ -380,6 +380,7 @@ def test_system_settings_validate_mask_and_reveal_secret(client, admin_headers):
         json={
             "settings": {
                 "KAGGLE_KEY": "secret-token",
+                "KAGGLE_API_TOKEN": "modern-secret-token",
                 "KAGGLE_WEBHOOK_TIMEOUT_SEC": 181,
                 "KAGGLE_KERNEL_PRIVATE": False,
             }
@@ -396,6 +397,10 @@ def test_system_settings_validate_mask_and_reveal_secret(client, admin_headers):
     assert settings["KAGGLE_KEY"]["value"] is None
     assert settings["KAGGLE_KEY"]["has_value"] is True
     assert "secret-token" not in str(settings["KAGGLE_KEY"]["masked_value"])
+    assert settings["KAGGLE_API_TOKEN"]["secret"] is True
+    assert settings["KAGGLE_API_TOKEN"]["value"] is None
+    assert settings["KAGGLE_API_TOKEN"]["has_value"] is True
+    assert "modern-secret-token" not in str(settings["KAGGLE_API_TOKEN"]["masked_value"])
     assert settings["KAGGLE_WEBHOOK_TIMEOUT_SEC"]["value"] == "181"
     assert settings["KAGGLE_KERNEL_PRIVATE"]["value"] == "false"
 

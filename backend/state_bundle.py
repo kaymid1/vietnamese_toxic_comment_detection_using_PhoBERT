@@ -662,6 +662,7 @@ def _environment_requirements() -> dict[str, Any]:
         "required_for_kaggle": [
             {"name": "KAGGLE_USERNAME", "description": "Kaggle account name", "secret": False},
             {"name": "KAGGLE_KEY", "description": "Kaggle API credential", "secret": True},
+            {"name": "KAGGLE_API_TOKEN", "description": "Kaggle API token for current CLI releases", "secret": True},
         ],
         "required_for_gemini": [
             {"name": "GEMINI_API_KEY", "description": "Gemini API credential", "secret": True}

@@ -87,7 +87,6 @@ export function SystemSettingsPage({ adminToken, onAdminUnauthorized }: SystemSe
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const activeGroup = groups.find((group) => group.id === activeTab) || groups[0];
   const automationDryRunSetting = groups
     .find((group) => group.id === "mlflow_automation")
     ?.settings.find((setting) => setting.key === "MLFLOW_AUTOMATION_DRY_RUN");
@@ -371,13 +370,6 @@ export function SystemSettingsPage({ adminToken, onAdminUnauthorized }: SystemSe
             </TabsTrigger>
           ))}
         </TabsList>
-
-        {activeGroup && (
-          <div className="flex items-center gap-2 rounded-md border border-primary/20 bg-primary/5 px-3 py-2 text-sm">
-            <span className="text-muted-foreground">Đang cấu hình:</span>
-            <span className="font-semibold text-foreground">{activeGroup.label}</span>
-          </div>
-        )}
 
         {groups.map((group) => (
           <TabsContent key={group.id} value={group.id} className="space-y-4">

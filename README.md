@@ -133,7 +133,7 @@ The following definitions describe the active implementation in `backend/app.py`
 - **Dataset Bundle readiness** is derived from `trainingPlan.summary.mlflow_added`, not the historical count of every row in the accepted bucket. The compact bundle card therefore mirrors the next export snapshot: eligible MLflow rows, rows after balancing, duplicates removed, rows actually added, and final train size. The configured target is considered ready only when the actual MLflow rows added to that snapshot reach it.
 - **Lock** is a limited guard: it prevents Manual Verify `Remove` and prevents deselecting a locked training row. It is not a universal write/export lock.
 - **Kaggle bundle triggering** now creates a fresh `clean_victsd_gold` bundle snapshot before contacting `KAGGLE_WEBHOOK_URL`. The run stores its bundle path, SHA-256 checksum, token-protected download URL, balance policy, merge counts, and exact included `mlflow_comment_item` IDs in `mlflow_do_run`; the webhook receives that exact URL and checksum. The generated Kaggle notebook requires this run bundle and verifies SHA-256 before extraction. LR Smoke preserves every included reviewed row, whether it came from website collection (`MLFlowAccepted`) or Gemini generation (`SyntheticReviewed`), and downsamples only gold rows. Configure `KAGGLE_BUNDLE_PUBLIC_BASE_URL` when the backend's request origin is not publicly reachable from Kaggle.
-- **MLflow Automation** is disabled by default. Admin System Settings provides one global switch and an independent mode per family: `disabled`, `train_only`, or `full_auto`. A new accepted training row may start an automation cycle only after the configured minimum of newly eligible rows and cooldown are satisfied; one active run is reserved per family. Every automation decision is recorded in `mlflow_automation_state` and `mlflow_automation_event`. `train_only` leaves a completed candidate awaiting an admin promotion. `full_auto` promotes only automation-created runs that pass the existing checksum, serving-contract, same-semantic-test-set, and metric gates. Automation uses `MLFLOW_AUTOMATION_DRY_RUN=true` by default; a real automatic run additionally requires `KAGGLE_BUNDLE_PUBLIC_BASE_URL`. The in-process watcher polls Kaggle status while the backend stays alive; `GET /api/mlflow/kaggle/status` also resumes terminal handling after a restart.
+- **MLflow Automation** is disabled by default. Admin System Settings provides one global switch and an independent mode per family: `disabled`, `train_only`, or `full_auto`. `MLFLOW_AUTOMATION_BALANCE_STRATEGY` selects the training data: `balanced_50_50` (the default) downsamples the larger Toxic/Clean class, while `all` retains every eligible row. Both modes include only rows with `gate_bucket=accepted`, a valid label, and `selected_for_training=1`; they never include pending/unapproved candidates. A new accepted training row may start an automation cycle only after the configured minimum of newly eligible rows and cooldown are satisfied; one active run is reserved per family. Every automation decision is recorded in `mlflow_automation_state` and `mlflow_automation_event`. `train_only` leaves a completed candidate awaiting an admin promotion. `full_auto` promotes only automation-created runs that pass the existing checksum, serving-contract, same-semantic-test-set, and metric gates. Automation uses `MLFLOW_AUTOMATION_DRY_RUN=true` by default; a real automatic run additionally requires `KAGGLE_BUNDLE_PUBLIC_BASE_URL`. The in-process watcher polls Kaggle status while the backend stays alive; `GET /api/mlflow/kaggle/status` also resumes terminal handling after a restart.
 - **Gemini Evaluate** is available only after a Kaggle run has completed with a real artifact. It receives structured evidence for the candidate, the current production model, the latest earlier run of the same model kind, test comparability, and production-gate results. Its Vietnamese assessment and the actual model that returned it (including fallback) are cached in `mlflow_gemini_evaluation` and shown beside the Kaggle metrics. The assessment is advisory: it never promotes a model or bypasses a gate. Admins can inspect and edit the active Review/Evaluate instructions in System Settings → **AI Instructions**; the fixed JSON schema and safety constraints remain enforced by backend code.
 
 ---
@@ -247,6 +247,8 @@ The user-selectable runtime models are:
 - **TF-IDF baseline** — `tfidf_lr/baseline_tfidf`, using TF-IDF features with Logistic Regression.
 - **PhoBERT v1 transformer baseline** — `phobert/baseline`, fully fine-tuned from `vinai/phobert-base`.
 - **PhoBERT v2 fine-tuned model** — `phobert/phobert_v2_finetuned`, displayed as **PhoBERT v2 Fine-tuned**. Its unchanged physical folder is `phobert_lora_4.7` for backward compatibility. The folder's `run_config.json` and `training_manifest.json` both record `vinai/phobert-base-v2` as the base model. The checkpoint contains the full model weights; it is not a LoRA or PEFT adapter.
+
+In MLflow → Kaggle Retrain → **Finetune**, **Base model** is a dropdown, not a free-text field. It contains only locally installed PhoBERT checkpoints that have the required weights and tokenizer files; TF-IDF models and incomplete checkpoint folders are excluded. The selected checkpoint is bundled into the finetune run exactly as selected.
 
 The runtime maintains independent production slots for `tfidf_lr` and `phobert`.
 Kaggle candidates are compared only with the production model from the same family.
@@ -444,6 +446,8 @@ KAGGLE_WEBHOOK_URL=https://living-rare-ram.ngrok-free.app/kaggle/trigger
 KAGGLE_STATUS_WEBHOOK_URL=https://living-rare-ram.ngrok-free.app/kaggle/status
 ```
 
+For current Kaggle CLI releases, configure the single secret `KAGGLE_API_TOKEN` in **System Settings → Kaggle Account**. The legacy `KAGGLE_USERNAME` + `KAGGLE_KEY` pair remains supported for older clients.
+
 ---
 
 ## Kaggle Mirror Notebook Workflow
@@ -528,4 +532,3 @@ These endpoints exist but are not currently called from the main UI flow/compone
 ## Rule for future updates
 
 If documentation conflicts with code, trust the running code (`backend/app.py`, `backend/crawl_adapter.py`, `comment_crawl.py`, `infer_crawled_local.py`, and frontend `src/app/*`).
-

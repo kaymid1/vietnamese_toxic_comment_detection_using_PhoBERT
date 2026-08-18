@@ -4,6 +4,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -17,7 +18,18 @@ from urllib.request import Request, urlopen
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import Response
 from pydantic import BaseModel
-from dotenv import load_dotenv
+
+# Load the environment before importing modules that freeze an
+# environment-derived default path at import time.  In particular,
+# system_settings.DEFAULT_SETTINGS_DB_PATH must use APP_DATA_DIR from
+# backend/.env.local, otherwise this receiver reads a different settings DB
+# than backend.app and silently falls back to mock mode.
+from backend.runtime_paths import get_project_root
+from backend.env_loader import load_env_files
+
+
+BASE_DIR = get_project_root()
+load_env_files()
 
 from backend.system_settings import (
     DEFAULT_SETTINGS_DB_PATH,
@@ -25,18 +37,13 @@ from backend.system_settings import (
     get_int_setting as get_runtime_int_setting,
     get_setting as get_runtime_setting,
 )
-from backend.runtime_paths import get_kaggle_runtime_dir, get_project_root, get_runtime_dir
+from backend.runtime_paths import get_kaggle_runtime_dir, get_runtime_dir
 from backend.artifact_refs import encode_artifact_ref, resolve_artifact_ref
 
 
-BASE_DIR = get_project_root()
 RUNTIME_DIR = get_runtime_dir()
 KAGGLE_RUNTIME_DIR = get_kaggle_runtime_dir()
 STATE_PATH = RUNTIME_DIR / "kaggle_webhook_jobs.json"
-
-# Load local env files so running this service standalone still picks up backend config.
-load_dotenv(BASE_DIR / "backend" / ".env.local", override=False)
-load_dotenv(BASE_DIR / ".env.local", override=False)
 
 WEBHOOK_MODE = os.getenv("KAGGLE_WEBHOOK_MODE", "mock").strip().lower()
 AUTO_COMPLETE_SECONDS = max(0, int(os.getenv("KAGGLE_WEBHOOK_AUTO_COMPLETE_SECONDS", "90")))
@@ -154,14 +161,45 @@ def _build_subprocess_env() -> Dict[str, str]:
     env = dict(os.environ)
     kaggle_username = _setting("KAGGLE_USERNAME", "").strip()
     kaggle_key = _setting("KAGGLE_KEY", "").strip()
+    kaggle_api_token = _setting("KAGGLE_API_TOKEN", "").strip()
     if kaggle_username:
         env["KAGGLE_USERNAME"] = kaggle_username
     if kaggle_key:
         env["KAGGLE_KEY"] = kaggle_key
+    # Current Kaggle CLI releases authenticate with one API token.  During the
+    # setting migration, accept the value already stored in KAGGLE_KEY as a
+    # fallback so existing installations work after the receiver reloads.
+    if kaggle_api_token or kaggle_key:
+        env["KAGGLE_API_TOKEN"] = kaggle_api_token or kaggle_key
     # Force UTF-8 for Python-based CLIs (including kaggle) to avoid Windows cp1252/charmap failures.
     env.setdefault("PYTHONUTF8", "1")
     env.setdefault("PYTHONIOENCODING", "utf-8")
+    # Avoid requiring a writable user home directory when Kaggle initializes
+    # its configuration. Credentials remain supplied through the process env.
+    kaggle_config_dir = RUNTIME_DIR / "kaggle_config"
+    kaggle_config_dir.mkdir(parents=True, exist_ok=True)
+    env.setdefault("KAGGLE_CONFIG_DIR", str(kaggle_config_dir))
     return env
+
+
+def _kaggle_cli() -> str:
+    """Resolve an isolated Kaggle CLI without shadowing the local ``kaggle`` package."""
+    executable_name = "kaggle.exe" if os.name == "nt" else "kaggle"
+    configured_cli = os.getenv("KAGGLE_CLI_PATH", "").strip()
+    if configured_cli:
+        return configured_cli
+
+    # ``kaggle/`` is a repository-local package used for MLflow evidence, so
+    # installing PyPI's package of the same name into the backend venv breaks
+    # application imports. Keep the command-line client in an isolated venv.
+    isolated_cli = RUNTIME_DIR / "kaggle-cli-venv" / ("Scripts" if os.name == "nt" else "bin") / executable_name
+    if isolated_cli.is_file():
+        return str(isolated_cli)
+
+    # Do not resolve sys.executable: virtualenv's Python often resolves to its
+    # base interpreter, while the CLI lives in the virtualenv's bin directory.
+    venv_cli = Path(sys.executable).parent / executable_name
+    return str(venv_cli) if venv_cli.is_file() else executable_name
 
 
 def _run_cmd(cmd: list[str], *, cwd: Optional[Path] = None, timeout: Optional[int] = None) -> str:
@@ -437,7 +475,7 @@ def _fetch_existing_kernel_metadata(kernel_ref: str, job_dir: Path) -> Optional[
     pull_dir.mkdir(parents=True, exist_ok=True)
     try:
         _run_cmd(
-            ["kaggle", "kernels", "pull", kernel_ref, "-p", str(pull_dir), "-m"],
+            [_kaggle_cli(), "kernels", "pull", kernel_ref, "-p", str(pull_dir), "-m"],
             timeout=REAL_PULL_TIMEOUT_SEC,
         )
     except Exception as exc:
@@ -508,7 +546,7 @@ def _is_kaggle_push_conflict(text: str) -> bool:
 
 
 def _run_kaggle_push_with_retry(job_dir: Path) -> str:
-    cmd = ["kaggle", "kernels", "push", "-p", str(job_dir)]
+    cmd = [_kaggle_cli(), "kernels", "push", "-p", str(job_dir)]
     logs: list[str] = []
     retry_attempts = _int_setting("KAGGLE_PUSH_RETRY_ATTEMPTS", REAL_PUSH_RETRY_ATTEMPTS, min_value=1)
     retry_delay_sec = _int_setting("KAGGLE_PUSH_RETRY_DELAY_SEC", REAL_PUSH_RETRY_DELAY_SEC, min_value=1)
@@ -648,6 +686,34 @@ def _refresh_completed_artifact(job: Dict[str, Any]) -> None:
         job["error_message"] = None
 
 
+def _real_output_download_metadata(job: Dict[str, Any]) -> Dict[str, Any]:
+    """Return user-safe progress and recovery details for a real Kaggle export."""
+    kernel_ref = str(job.get("kernel_ref") or "").strip()
+    if not kernel_ref:
+        return {}
+
+    output_bytes = 0
+    output_files = 0
+    try:
+        output_dir = _resolve_work_dir(job.get("work_dir")) / "output"
+        for path in output_dir.rglob("*"):
+            if path.is_file():
+                output_files += 1
+                output_bytes += path.stat().st_size
+    except OSError:
+        # Status should remain available while a partially downloaded file changes.
+        pass
+
+    job_id = str(job.get("job_id") or job.get("run_id") or "kaggle-output").strip()
+    return {
+        "artifact_download_bytes": output_bytes,
+        "artifact_download_file_count": output_files,
+        "artifact_size_bytes": int(job.get("artifact_size_bytes") or 0) or None,
+        # Credentials are intentionally not embedded; the user supplies their own Kaggle CLI auth.
+        "artifact_manual_download_command": f"kaggle kernels output {kernel_ref} -p ./kaggle-output-{job_id} -o",
+    }
+
+
 def _trigger_mock(payload: TriggerRequest) -> Dict[str, Any]:
     job_id = f"mock_{uuid.uuid4().hex[:12]}"
     now = time.time()
@@ -683,8 +749,9 @@ def _trigger_mock(payload: TriggerRequest) -> Dict[str, Any]:
 
 
 def _trigger_real(payload: TriggerRequest) -> Dict[str, Any]:
-    if shutil.which("kaggle") is None:
-        raise HTTPException(status_code=500, detail="kaggle CLI not found in PATH")
+    kaggle_cli = _kaggle_cli()
+    if not Path(kaggle_cli).is_file() and shutil.which(kaggle_cli) is None:
+        raise HTTPException(status_code=500, detail="Kaggle CLI is not installed for the webhook service")
 
     owner, slug = _resolve_owner_slug(payload.notebook_url)
     kernel_ref = f"{owner}/{slug}"
@@ -866,7 +933,7 @@ def _download_real_output_artifact(job_id: str) -> None:
 
     try:
         _run_cmd(
-            ["kaggle", "kernels", "output", kernel_ref, "-p", str(output_dir), "-o", "-q"],
+            [_kaggle_cli(), "kernels", "output", kernel_ref, "-p", str(output_dir), "-o", "-q"],
             timeout=REAL_OUTPUT_TIMEOUT_SEC,
         )
         artifact_file = _pick_artifact_file(output_dir)
@@ -878,6 +945,7 @@ def _download_real_output_artifact(job_id: str) -> None:
             "current_stage": "complete",
             "artifact_checksum": _sha256_file(artifact_file),
             "artifact_uri": _resolve_artifact_uri(artifact_file, job),
+            "artifact_size_bytes": artifact_file.stat().st_size,
             "error_message": None,
             "artifact_download_started": False,
         }
@@ -893,6 +961,10 @@ def _download_real_output_artifact(job_id: str) -> None:
         state = _load_state()
         jobs = state.get("jobs", {})
         latest = dict(jobs.get(job_id) or job)
+        if str(latest.get("status") or "").lower() in {"cancelled", "canceled"}:
+            # An admin explicitly stopped tracking. Do not let a late downloader
+            # completion revive the run in the UI.
+            return
         latest.update(update)
         jobs[job_id] = latest
         state["jobs"] = jobs
@@ -917,10 +989,10 @@ def _status_real(job_id: str, job: Dict[str, Any], jobs: Dict[str, Any]) -> Dict
         job["status"] = "failed"
         job["error_message"] = push_error
         jobs[job_id] = job
-    elif status not in {"completed", "failed"}:
+    elif status not in {"completed", "failed", "cancelled", "canceled"}:
         try:
             status_stdout = _run_cmd(
-                ["kaggle", "kernels", "status", kernel_ref],
+                [_kaggle_cli(), "kernels", "status", kernel_ref],
                 timeout=REAL_STATUS_TIMEOUT_SEC,
             )
             normalized = _normalize_kernel_status(status_stdout)
@@ -933,7 +1005,7 @@ def _status_real(job_id: str, job: Dict[str, Any], jobs: Dict[str, Any]) -> Dict
                 log_tail = ""
                 try:
                     _run_cmd(
-                        ["kaggle", "kernels", "output", kernel_ref, "-p", str(output_dir), "-o", "-q"],
+                    [_kaggle_cli(), "kernels", "output", kernel_ref, "-p", str(output_dir), "-o", "-q"],
                         timeout=REAL_OUTPUT_TIMEOUT_SEC,
                     )
                     log_tail = _read_kaggle_failure_log_tail(output_dir)
@@ -968,6 +1040,7 @@ def _status_real(job_id: str, job: Dict[str, Any], jobs: Dict[str, Any]) -> Dict
         "artifact_uri": job.get("artifact_uri"),
         "artifact_checksum": job.get("artifact_checksum"),
         "error_message": job.get("error_message"),
+        **_real_output_download_metadata(job),
     }
 
 
@@ -1027,3 +1100,32 @@ def kaggle_status(job_id: str = Query(..., min_length=1)) -> Dict[str, Any]:
         state["jobs"] = jobs
         _save_state(state)
         return payload
+
+
+@app.post("/kaggle/cancel")
+def kaggle_cancel(job_id: str = Query(..., min_length=1)) -> Dict[str, Any]:
+    """Stop local tracking without pretending Kaggle supports cancellation."""
+    with _LOCK:
+        state = _load_state()
+        jobs = state.get("jobs", {})
+        job = jobs.get(job_id)
+        if not isinstance(job, dict):
+            raise HTTPException(status_code=404, detail="job_id not found")
+        job["status"] = "cancelled"
+        job["current_stage"] = "complete"
+        job["artifact_download_started"] = False
+        job["error_message"] = (
+            "Stopped by admin: UI tracking was cancelled. A download already started may finish in the background. "
+            "Kaggle CLI does not provide a safe command to cancel an already submitted kernel."
+        )
+        jobs[job_id] = job
+        state["jobs"] = jobs
+        _save_state(state)
+    return {
+        "job_id": job_id,
+        "run_id": job.get("run_id"),
+        "status": "cancelled",
+        "current_stage": "complete",
+        "error_message": job["error_message"],
+        **(_real_output_download_metadata(job) if str(job.get("mode") or "").lower() == "real" else {}),
+    }

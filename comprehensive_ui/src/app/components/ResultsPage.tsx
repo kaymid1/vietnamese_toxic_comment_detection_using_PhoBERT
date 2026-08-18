@@ -396,7 +396,7 @@ export function ResultsPage({
                   <div className={`mb-8 p-6 rounded-lg border-l-4 ${aggregateStatusClass}`}>
                     <h3 className={`text-xl ${aggregateStatusTextClass}`}>{t("results.pageLevelCommentToxicity")}</h3>
                     <p className="mt-2 text-sm text-muted-foreground">{t("results.pageLevelCommentToxicityDescription")}</p>
-                    <div className="mt-4 grid grid-cols-1 sm:grid-cols-3 gap-3 text-sm">
+                    <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
                       <div>
                         <p className="text-muted-foreground">{t("results.toxicComments")}</p>
                         <p className={`text-xl font-semibold ${aggregateStatusTextClass}`}>
@@ -406,10 +406,6 @@ export function ResultsPage({
                       <div>
                         <p className="text-muted-foreground">{t("results.toxicCommentRate")}</p>
                         <p className="text-xl font-semibold">{(commentAggregation.toxicCommentRate * 100).toFixed(1)}%</p>
-                      </div>
-                      <div>
-                        <p className="text-muted-foreground">{t("results.aggregateAlertThreshold")}</p>
-                        <p className="text-xl font-semibold">{(pageThreshold * 100).toFixed(1)}%</p>
                       </div>
                     </div>
                     <div className="mt-4">
@@ -438,7 +434,6 @@ export function ResultsPage({
                       </span>
                     </div>
                     <div className="flex flex-wrap gap-4 text-xs text-muted-foreground">
-                      <span>{t("results.aggregateAlertThreshold")}: {(pageThreshold * 100).toFixed(1)}%</span>
                       <span>{t("results.effectiveSegmentThreshold", { value: formatThreshold(effectiveSegThreshold) })}</span>
                     </div>
                     <Progress value={overallPercent ?? 0} className="h-4" />

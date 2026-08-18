@@ -125,6 +125,7 @@ interface AnalyzeCompareResponse {
 
 interface ModelsResponse {
   models?: string[];
+  finetune_base_models?: string[];
   default?: string | null;
   labels?: Record<string, string>;
 }
@@ -562,6 +563,7 @@ export default function App() {
   const [thresholds, setThresholds] = useState<AnalyzeResponse["thresholds"] | null>(null);
   const [thresholdsByDomain, setThresholdsByDomain] = useState<DomainThresholds | null>(null);
   const [availableModels, setAvailableModels] = useState<string[]>([]);
+  const [finetuneBaseModels, setFinetuneBaseModels] = useState<string[]>([]);
   const [modelLabels, setModelLabels] = useState<Record<string, string>>({});
   const [selectedModels, setSelectedModels] = useState<string[]>([]);
   const [compareModels, setCompareModels] = useState<Record<string, CompareModelResponse> | null>(null);
@@ -645,6 +647,12 @@ export default function App() {
         : [];
 
       const sortedModels = sortModelsForSelection(models.filter((model) => !isHiddenUiModel(model)));
+      const finetuneModels = Array.isArray(data.finetune_base_models)
+        ? data.finetune_base_models.filter(
+            (model): model is string =>
+              typeof model === "string" && sortedModels.includes(model) && !isDeprecatedModel(model),
+          )
+        : [];
       const nonDeprecatedModels = sortedModels.filter((model) => !isDeprecatedModel(model));
       const apiDefault = data.default && sortedModels.includes(data.default) ? data.default : null;
       const resolvedDefault =
@@ -654,6 +662,7 @@ export default function App() {
         null;
 
       setAvailableModels(sortedModels);
+      setFinetuneBaseModels(finetuneModels);
       setModelLabels(data.labels && typeof data.labels === "object" ? data.labels : {});
       const stored = window.localStorage.getItem("viettoxic:models");
       const legacyStored = window.localStorage.getItem("viettoxic:model");
@@ -681,6 +690,7 @@ export default function App() {
       const message = error instanceof Error ? error.message : t("app.cannotLoadModels");
       setModelsError(message);
       setAvailableModels([]);
+      setFinetuneBaseModels([]);
       setModelLabels({});
       setSelectedModels([]);
     } finally {
@@ -1139,6 +1149,7 @@ export default function App() {
               <div className={currentPage === "admin_mlflow" || currentPage === "mlflow" ? "" : "hidden"}>
                 <MLFlowPage
                   availableModels={availableModels}
+                  finetuneBaseModels={finetuneBaseModels}
                   onModelsChanged={loadModels}
                   adminToken={adminSession.token}
                   onAdminUnauthorized={handleAdminUnauthorized}
@@ -1157,6 +1168,8 @@ export default function App() {
               <ScheduledTasksPage
                 adminToken={adminSession.token}
                 onAdminUnauthorized={handleAdminUnauthorized}
+                availableModels={availableModels}
+                modelLabels={modelLabels}
               />
             )}
 

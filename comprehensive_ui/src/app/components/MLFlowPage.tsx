@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent, type ComponentProps, type MouseEvent, type ReactNode } from "react";
 import { AnimatePresence, motion } from "motion/react";
-import { AlertTriangle, BarChart3, Check, CircleHelp, EyeOff, GripHorizontal, History, Lock, MessageCircle, MoreHorizontal, Plus, RefreshCw, RotateCcw, Sparkles, ThumbsUp, Unlock } from "lucide-react";
+import { AlertTriangle, BarChart3, Check, CircleHelp, Clipboard, Clock3, EyeOff, GripHorizontal, History, Lock, MessageCircle, MoreHorizontal, Plus, RefreshCw, RotateCcw, Sparkles, ThumbsUp, Unlock } from "lucide-react";
 import { Bar, BarChart, CartesianGrid, Cell, Legend, Pie, PieChart, ResponsiveContainer, Tooltip as RechartTooltip, XAxis, YAxis } from "recharts";
 import { toast } from "sonner";
 import { Card } from "@/app/components/ui/card";
@@ -61,6 +61,7 @@ import {
 
 interface MLFlowPageProps {
   availableModels: string[];
+  finetuneBaseModels: string[];
   onModelsChanged?: () => Promise<void> | void;
   adminToken: string;
   onAdminUnauthorized: () => void;
@@ -70,7 +71,8 @@ const MLFLOW_URLS_DRAFT_KEY = "viettoxic:mlflow:urlsText";
 const MLFLOW_MODEL_DRAFT_KEY = "viettoxic:mlflow:selectedModel";
 const MLFLOW_ACTIVE_TAB_KEY = "viettoxic:mlflow:activeTab";
 const MLFLOW_CLEAR_ALL_CONFIRM_TOKEN = "DELETE_ALL_MLFLOW_DATA";
-const KAGGLE_TERMINAL_STATUSES = new Set(["completed", "failed", "dry_run", "placeholder"]);
+const KAGGLE_TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled", "canceled", "dry_run", "placeholder"]);
+const PHOBERT_FINETUNE_UNAVAILABLE_REASON = "Finetune PhoBERT đang tạm khóa vì bundle checkpoint lớn vượt giới hạn tải qua Kaggle tunnel. Hãy dùng Retrain.";
 
 const COMPARISON_METRICS = [
   { metric: "accuracy", labelKey: "accuracy", direction: "higher" as const },
@@ -121,6 +123,14 @@ function SectionInfoTooltip({ label, children }: { label: string; children: Reac
       </TooltipContent>
     </Tooltip>
   );
+}
+
+function formatAutomationCountdown(totalSeconds: number): string {
+  const seconds = Math.max(0, Math.ceil(totalSeconds));
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  if (minutes > 0) return `${minutes}m ${String(remainder).padStart(2, "0")}s`;
+  return `${remainder}s`;
 }
 
 function formatInferenceTime(timestamp: string): string {
@@ -309,7 +319,7 @@ const safeWriteLocalStorageString = (key: string, value: string) => {
   }
 };
 
-export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdminUnauthorized }: MLFlowPageProps) {
+export function MLFlowPage({ availableModels, finetuneBaseModels, onModelsChanged, adminToken, onAdminUnauthorized }: MLFlowPageProps) {
   const showLegacyIngest = false;
   const { t } = useI18n();
   const { start: startProgress, update: updateProgress, succeed: succeedProgress, fail: failProgress } = useProgressNotification();
@@ -341,6 +351,7 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
     registryModels,
     lastBundlePath,
     doStatus,
+    kaggleRunHistory,
     doPreflight,
     automationStatus,
     automationStatusError,
@@ -363,10 +374,12 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
     triggerDO,
     refreshDOPreflight,
     refreshDOStatus,
+    refreshKaggleRunHistory,
     refreshAutomationStatus,
     openDORun,
     geminiEvaluateKaggleRun,
     clearDOSession,
+    stopDORun,
     refreshCompare,
     refreshCompareHistory,
     refreshModelRegistry,
@@ -414,14 +427,19 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
     return ["step1", "step4", "step5"].includes(stored) ? stored : "step1";
   });
   const [selectedModelKind, setSelectedModelKind] = useState<"phobert" | "lr_smoke">("phobert");
-  const [selectedTrainingMode, setSelectedTrainingMode] = useState<"retrain" | "finetune">("finetune");
+  const [selectedTrainingMode, setSelectedTrainingMode] = useState<"retrain" | "finetune">("retrain");
+  const finetuneUnavailableReason = selectedModelKind === "phobert"
+    ? PHOBERT_FINETUNE_UNAVAILABLE_REASON
+    : "TF-IDF + LR chỉ hỗ trợ chế độ Retrain.";
   const [balanceStrategy, setBalanceStrategy] = useState<"balanced_50_50" | "all">("balanced_50_50");
+  const [automationClockNow, setAutomationClockNow] = useState(() => Date.now());
   const [finetuneBaseModel, setFinetuneBaseModel] = useState("");
   const [promotionDialogOpen, setPromotionDialogOpen] = useState(false);
   const [trainingPreviewListHeight, setTrainingPreviewListHeight] = useState(320);
   const [kaggleTriggerPending, setKaggleTriggerPending] = useState(false);
   const [geminiEvaluating, setGeminiEvaluating] = useState(false);
   const prevDoStatusRef = useRef<string>("idle");
+  const suppressDoStatusAnnouncementRef = useRef(false);
   const announcedAutomationEventRef = useRef<number | null>(null);
   const refreshedAutomationCompareEventRef = useRef<string | null>(null);
   const kaggleTriggerPendingRef = useRef(false);
@@ -437,12 +455,19 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
     void refreshModelRegistry();
     void refreshDOPreflight();
     void refreshAutomationStatus();
+    void refreshKaggleRunHistory();
   }, []);
 
   useEffect(() => {
     const timer = window.setInterval(() => void refreshAutomationStatus(), 15000);
     return () => window.clearInterval(timer);
   }, [refreshAutomationStatus]);
+
+  useEffect(() => {
+    if (!adminToken) return;
+    const timer = window.setInterval(() => setAutomationClockNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [adminToken]);
 
   useEffect(() => {
     const firstSelectable = availableModels.find((model) => !isDeprecatedModel(model)) || availableModels[0] || "";
@@ -460,6 +485,18 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
       setReEvaluationModel(availableModels.find((model) => !isDeprecatedModel(model)) || availableModels[0] || "");
     }
   }, [availableModels, reEvaluationModel]);
+
+  useEffect(() => {
+    if (!finetuneBaseModels.includes(finetuneBaseModel)) {
+      setFinetuneBaseModel(finetuneBaseModels[0] || "");
+    }
+  }, [finetuneBaseModel, finetuneBaseModels]);
+
+  useEffect(() => {
+    if (selectedTrainingMode === "finetune") {
+      setSelectedTrainingMode("retrain");
+    }
+  }, [selectedTrainingMode]);
 
   useEffect(() => {
     if (reviewHistoryOpen) void refreshReviewHistory(undefined, historyDecision, 1, "all_batches");
@@ -1214,13 +1251,28 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
     }
 
     const resolvedBaseModel =
-      selectedTrainingMode === "retrain" ? selectedModel.trim() : finetuneBaseModel.trim() || selectedModel.trim();
+      selectedTrainingMode === "retrain" ? selectedModel.trim() : finetuneBaseModel.trim();
     if (selectedTrainingMode === "retrain" && !resolvedBaseModel) {
       setStatusText("Retrain yêu cầu base model. Hãy chọn model ở bước ingest trước khi trigger.");
       toast.error("Thiếu base model cho retrain.");
       return;
     }
+    if (selectedModelKind === "phobert" && selectedTrainingMode === "finetune") {
+      setStatusText(PHOBERT_FINETUNE_UNAVAILABLE_REASON);
+      toast.error("Finetune PhoBERT hiện chưa được hỗ trợ.");
+      return;
+    }
+    if (selectedTrainingMode === "finetune" && !finetuneBaseModels.includes(resolvedBaseModel)) {
+      setStatusText("Finetune yêu cầu chọn một checkpoint PhoBERT hợp lệ từ danh sách.");
+      toast.error("Checkpoint PhoBERT chưa hợp lệ.");
+      return;
+    }
 
+    // A terminal run belongs to the previous attempt.  Reset its local session
+    // before submitting so the in-page card never presents stale metrics/status.
+    prevDoStatusRef.current = "idle";
+    clearDOSession();
+    setStatusText("Đang tạo bundle mới và gửi job lên Kaggle...");
     kaggleTriggerPendingRef.current = true;
     setKaggleTriggerPending(true);
     startProgress("kaggle-pipeline", { title: "Kaggle pipeline", message: "Đang gửi training job lên Kaggle...", value: 8 });
@@ -1329,6 +1381,7 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
     "destroy_vm",
   ];
   const doStageLabels: Record<string, string> = {
+    submitting: "Đang tạo bundle mới và gửi job lên Kaggle",
     trigger_vm_gpu: "Provision VM (CPU/GPU)",
     upload_data_and_train_files: "Upload data + train files",
     train: "Train trên VM",
@@ -1343,19 +1396,19 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
     Array.isArray(doStatus?.stages) && (doStatus.stages as unknown[]).every((stage) => typeof stage === "string")
       ? (doStatus.stages as string[])
       : defaultDoStages;
-  const doStatusValue = (doStatus?.status as string | undefined) || "idle";
+  const doStatusValue = (doStatus?.status as string | undefined) || (kaggleTriggerPending ? "submitting" : "idle");
   const doHasActiveRun = Boolean(
     doStatus?.run_id && !KAGGLE_TERMINAL_STATUSES.has(doStatusValue.toLowerCase()),
   );
-  const doCurrentStage = (doStatus?.current_stage as string | undefined) || "";
+  const doCurrentStage = (doStatus?.current_stage as string | undefined) || (kaggleTriggerPending ? "submitting" : "");
   const doLogs = Array.isArray(doStatus?.logs) ? (doStatus?.logs as string[]) : [];
-  const doRunId = (doStatus?.run_id as string | undefined) || "-";
+  const doRunId = (doStatus?.run_id as string | undefined) || (kaggleTriggerPending ? "Đang tạo run mới..." : "-");
   const doProvider = (doStatus?.provider as string | undefined) || "-";
   const doBatchId = (doStatus?.batch_id as string | undefined) || "-";
   const doGpuProfile = (doStatus?.gpu_profile as string | undefined) || "-";
   const doComputeMode = ((doStatus?.compute_mode as string | undefined) || "kaggle").toLowerCase();
-  const doTrainingMode = ((doStatus?.training_mode as string | undefined) || "unknown").toLowerCase();
-  const doModelKind = String(doStatus?.model_kind || "").toLowerCase();
+  const doTrainingMode = ((doStatus?.training_mode as string | undefined) || (kaggleTriggerPending ? selectedTrainingMode : "unknown")).toLowerCase();
+  const doModelKind = String(doStatus?.model_kind || (kaggleTriggerPending ? selectedModelKind : "")).toLowerCase();
   const doModelLabel = doModelKind === "lr_smoke" ? "TF-IDF + LR" : doModelKind === "phobert" ? "PhoBERT" : "Unknown model";
   const doAutomationEvent = automationStatus?.events.find((event) => event.source_run_id === doRunId);
   const doAutomationMode = doAutomationEvent?.detail?.match(/mode=([^;]+)/)?.[1] || null;
@@ -1371,6 +1424,10 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
   const doArtifactKind = ((doStatus?.artifact_kind as string | undefined) || "none").toLowerCase();
   const doChecksum = (doStatus?.artifact_checksum as string | undefined) || "";
   const doArtifactDownloadUrl = doStatus?.artifact_download_url || "";
+  const doArtifactDownloadBytes = Number(doStatus?.artifact_download_bytes);
+  const doArtifactDownloadFileCount = Number(doStatus?.artifact_download_file_count);
+  const doArtifactSizeBytes = Number(doStatus?.artifact_size_bytes);
+  const doArtifactManualDownloadCommand = String(doStatus?.artifact_manual_download_command || "");
   const doMetrics = doStatus?.metrics || null;
   const doPreviousRun = doStatus?.previous_run || null;
   const doPreviousMetrics = doPreviousRun?.metrics || null;
@@ -1504,6 +1561,18 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
     typeof value === "number" && Number.isFinite(value) ? value.toFixed(3) : "-";
   const formatMetricDelta = (value: number | null | undefined) =>
     typeof value === "number" && Number.isFinite(value) ? `${value >= 0 ? "+" : ""}${value.toFixed(3)}` : "-";
+  const formatBytes = (value: number) => {
+    if (!Number.isFinite(value) || value < 0) return "-";
+    if (value < 1024) return `${value} B`;
+    const units = ["KiB", "MiB", "GiB", "TiB"];
+    let amount = value / 1024;
+    let unit = 0;
+    while (amount >= 1024 && unit < units.length - 1) {
+      amount /= 1024;
+      unit += 1;
+    }
+    return `${amount.toFixed(amount >= 10 ? 1 : 2)} ${units[unit]}`;
+  };
   const metricDeltaClass = (value: number | null | undefined, comparable = true) =>
     !comparable || typeof value !== "number" || !Number.isFinite(value)
       ? "text-muted-foreground"
@@ -1516,6 +1585,42 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
     if (!doArtifactDownloadUrl) return;
     void downloadAdminFile(doArtifactDownloadUrl, doArtifactUri.split("/").pop() || "kaggle_exported_model.zip");
   };
+  const handleCopyArtifactCommand = async () => {
+    if (!doArtifactManualDownloadCommand) return;
+    try {
+      await navigator.clipboard.writeText(doArtifactManualDownloadCommand);
+      toast.success("Đã copy lệnh Kaggle CLI.");
+    } catch {
+      toast.error("Không thể copy lệnh. Hãy copy trực tiếp từ ô lệnh.");
+    }
+  };
+  const handleOpenKaggleRun = async (runId: string) => {
+    try {
+      suppressDoStatusAnnouncementRef.current = true;
+      const payload = await openDORun(runId);
+      setStatusText(`Đang xem run ${runId}.`);
+      if (payload?.status === "dry_run") {
+        toast.info("Đây là dry run nên không có metrics/model artifact; log và cấu hình vẫn được hiển thị.");
+      }
+      window.requestAnimationFrame(() => {
+        document.getElementById("kaggle-run-details")?.scrollIntoView({ behavior: "smooth", block: "start" });
+      });
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : `Không thể mở run ${runId}.`);
+    }
+  };
+  const handleStopDORun = async () => {
+    const runId = typeof doStatus?.run_id === "string" ? doStatus.run_id : "";
+    if (!runId) return;
+    if (!window.confirm("Dừng theo dõi run này? Run và log vẫn được giữ lại. Download đã bắt đầu có thể vẫn hoàn tất trong background; Kaggle CLI không hỗ trợ huỷ kernel qua CLI này.")) return;
+    try {
+      const result = await stopDORun(runId);
+      setStatusText(result.message || `Đã dừng run ${runId}.`);
+      toast.success("Đã dừng theo dõi. Bạn vẫn có thể xem log và lệnh CLI.");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Không thể dừng run.");
+    }
+  };
 
   // Terminal/status-refresh entries are bookkeeping. Prefer the event that
   // actually represents the most recent automation attempt in the summary.
@@ -1523,6 +1628,18 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
     (event) => event.action === "train_started" || event.action === "train_start",
   ) || automationStatus?.events?.[0];
   const latestAutomationFamily = automationStatus?.families?.find((family) => family.model_family === (latestAutomationEvent?.model_family || "tfidf_lr"));
+  const automationCountdown = useMemo(() => {
+    if (!adminToken || !automationStatus) return null;
+    const candidates = automationStatus.families.flatMap((family) => {
+      const cooldownMinutes = Number(family.policy.cooldown_minutes || 0);
+      const lastTriggeredAt = family.state.last_triggered_at ? Date.parse(family.state.last_triggered_at) : NaN;
+      if (!family.policy.enabled || family.policy.mode === "disabled" || cooldownMinutes <= 0 || !Number.isFinite(lastTriggeredAt)) return [];
+      const remainingSeconds = (lastTriggeredAt + cooldownMinutes * 60_000 - automationClockNow) / 1000;
+      return remainingSeconds > 0 ? [{ family, remainingSeconds }] : [];
+    });
+    if (!candidates.length) return null;
+    return candidates.sort((left, right) => left.remainingSeconds - right.remainingSeconds)[0];
+  }, [adminToken, automationClockNow, automationStatus]);
   useEffect(() => {
     if (!latestAutomationEvent || announcedAutomationEventRef.current === latestAutomationEvent.id) return;
     announcedAutomationEventRef.current = latestAutomationEvent.id;
@@ -1565,6 +1682,14 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
     const prev = prevDoStatusRef.current;
     if (prev === doStatusValue) return;
 
+    if (suppressDoStatusAnnouncementRef.current) {
+      // Opening a historical terminal run is a read-only action: do not replay
+      // its completion/failure notifications or start a progress popup.
+      prevDoStatusRef.current = doStatusValue;
+      suppressDoStatusAnnouncementRef.current = false;
+      return;
+    }
+
     if (doStatusValue === "running") {
       startProgress("kaggle-pipeline", { title: "Kaggle pipeline", message: "Kaggle đang train mô hình..." });
       toast.message("Kaggle pipeline đang chạy.");
@@ -1592,10 +1717,12 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
   }, [ingestProgress, ingestStage, ingestStageMessage, updateProgress]);
 
   const doCompletedIndex = doStages.findIndex((s) => s === doCurrentStage);
-  const doHasStageProgress = ["running", "failed", "completed", "dry_run"].includes(doStatusValue);
+  const doHasStageProgress = ["running", "failed", "cancelled", "canceled", "completed", "dry_run"].includes(doStatusValue);
   const doProgress =
-    doStatusValue === "completed" || doStatusValue === "dry_run"
+    doStatusValue === "completed" || doStatusValue === "failed" || doStatusValue === "cancelled" || doStatusValue === "canceled" || doStatusValue === "dry_run"
       ? 100
+      : doStatusValue === "submitting"
+        ? 8
       : doStatusValue === "queued" || doStatusValue === "placeholder"
         ? 0
         : !doHasStageProgress || doCompletedIndex < 0
@@ -1605,9 +1732,9 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
   const doBadgeVariant =
     doStatusValue === "failed"
       ? "destructive"
-      : doStatusValue === "completed"
+      : doStatusValue === "completed" || doStatusValue === "cancelled" || doStatusValue === "canceled"
         ? "secondary"
-        : doStatusValue === "running" || doStatusValue === "queued"
+        : doStatusValue === "running" || doStatusValue === "queued" || doStatusValue === "submitting"
           ? "default"
           : "outline";
 
@@ -1685,7 +1812,7 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
         <TabsContent value="step1" className="space-y-4">
           {showLegacyIngest && (
           <Card className="p-4 space-y-3">
-            <div className="grid gap-3 md:grid-cols-4">
+            <div id="kaggle-run-details" className="grid gap-3 md:grid-cols-4">
               <div>
                 <label className="text-sm">Model</label>
                 <select
@@ -2729,7 +2856,25 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
         </TabsContent>
 
         <TabsContent value="step4" className="space-y-4">
-          <Card className="p-4">
+          <Card className="relative p-4">
+            {adminToken && automationStatus && (
+              <Tooltip delayDuration={300}>
+                <TooltipTrigger asChild>
+                  <span
+                    className="absolute right-3 top-3 inline-flex items-center gap-1 rounded-full border bg-background/90 px-2 py-1 text-[11px] tabular-nums text-muted-foreground shadow-sm"
+                    aria-label={automationCountdown ? `Automation tiếp theo sau ${formatAutomationCountdown(automationCountdown.remainingSeconds)}` : "Automation đang sẵn sàng hoặc chưa có cooldown"}
+                  >
+                    <Clock3 className="h-3.5 w-3.5" />
+                    {automationCountdown ? formatAutomationCountdown(automationCountdown.remainingSeconds) : "Ready"}
+                  </span>
+                </TooltipTrigger>
+                <TooltipContent side="left">
+                  {automationCountdown
+                    ? `Automation ${automationCountdown.family.model_family === "tfidf_lr" ? "TF-IDF + LR" : "PhoBERT"} có thể trigger sau ${formatAutomationCountdown(automationCountdown.remainingSeconds)}.`
+                    : "Automation đã hết cooldown hoặc đang chờ đủ mẫu mới."}
+                </TooltipContent>
+              </Tooltip>
+            )}
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
                 <h3 className="font-medium">Automation</h3>
@@ -2751,9 +2896,41 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
             {latestAutomationEvent && (
               <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-md border bg-muted/20 p-2 text-xs">
                 <span><b>Latest automation</b> · {latestAutomationEvent.model_family === "tfidf_lr" ? "TF-IDF + LR" : "PhoBERT"} · {latestAutomationEvent.status} · {formatIsoTs(latestAutomationEvent.created_at)}</span>
-                {latestAutomationEvent.source_run_id ? <Button size="sm" variant="outline" onClick={() => void openDORun(latestAutomationEvent.source_run_id!)}>{latestAutomationEvent.status === "dry_run" ? "View details" : "View run"}</Button> : <span className="text-muted-foreground">{latestAutomationEvent.detail || "No Kaggle run was created."}</span>}
+                {latestAutomationEvent.source_run_id ? <Button size="sm" variant="outline" onClick={() => void handleOpenKaggleRun(latestAutomationEvent.source_run_id!)}>{latestAutomationEvent.status === "dry_run" ? "View details" : "View run"}</Button> : <span className="text-muted-foreground">{latestAutomationEvent.detail || "No Kaggle run was created."}</span>}
               </div>
             )}
+          </Card>
+          <Card className="p-4 space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <h3 className="font-medium">Lịch sử Kaggle runs</h3>
+                <p className="text-xs text-muted-foreground">Chọn một run để xem lại cấu hình, log, metrics và biểu đồ đã lưu.</p>
+              </div>
+              <Button size="sm" variant="outline" onClick={() => void refreshKaggleRunHistory()}>
+                <RefreshCw className="h-4 w-4" /> Tải lại
+              </Button>
+            </div>
+            <div className="max-h-64 space-y-2 overflow-auto pr-1">
+              {kaggleRunHistory.map((run) => {
+                const label = run.model_kind === "lr_smoke" ? "TF-IDF + LR" : "PhoBERT";
+                return (
+                  <div key={run.run_id} className="flex flex-wrap items-center justify-between gap-3 rounded-md border p-3 text-sm">
+                    <div className="min-w-0 flex-1">
+                      <p className="break-all font-medium">{run.run_id}</p>
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        {label} · {run.training_mode || "retrain"} · {run.trigger_source === "automation" ? "Automation" : "Manual"} · {formatIsoTs(run.updated_at || run.created_at)}
+                      </p>
+                      {run.error_message && <p className="mt-1 line-clamp-1 text-xs text-destructive">{run.error_message}</p>}
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Badge variant={run.status === "completed" ? "secondary" : run.status === "failed" ? "destructive" : "outline"}>{run.status}</Badge>
+                      <Button size="sm" variant="outline" onClick={() => void handleOpenKaggleRun(run.run_id)}>Xem chi tiết</Button>
+                    </div>
+                  </div>
+                );
+              })}
+              {kaggleRunHistory.length === 0 && <p className="rounded-md border border-dashed p-3 text-sm text-muted-foreground">Chưa có Kaggle run đã lưu.</p>}
+            </div>
           </Card>
           <Card className="p-4 space-y-3">
             <div className="flex flex-wrap items-center justify-between gap-2">
@@ -2783,12 +2960,20 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
                   </DropdownMenuTrigger>
                   <DropdownMenuContent align="end">
                     <DropdownMenuItem
+                      disabled={!doStatus?.run_id || !doHasActiveRun}
+                      className="text-destructive focus:text-destructive"
+                      onSelect={() => void handleStopDORun()}
+                    >
+                      Dừng theo dõi run
+                    </DropdownMenuItem>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem
                       onSelect={() => {
                         clearDOSession();
-                        setStatusText("Đã clear Kaggle session hiện tại. Sẵn sàng trigger run mới.");
+                        setStatusText("Đã ẩn run khỏi màn hình hiện tại. Run và log vẫn được giữ lại.");
                       }}
                     >
-                      Clear session
+                      Ẩn run hiện tại
                     </DropdownMenuItem>
                   </DropdownMenuContent>
                 </DropdownMenu>
@@ -2799,19 +2984,31 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
                   <p className="text-sm font-medium">Cấu hình run</p>
-                  <p className="text-xs text-muted-foreground">Chỉ chọn model, chế độ train và chính sách dữ liệu trước khi kích hoạt.</p>
+                  <p className="text-xs text-muted-foreground">Chọn model và chính sách dữ liệu trước khi kích hoạt. Chế độ hiện dùng Retrain.</p>
                 </div>
                 <Badge variant="outline">Kaggle API</Badge>
               </div>
 
               <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(20rem,0.9fr)]">
-                <div className="grid gap-4 sm:grid-cols-2">
+                <div className="grid content-start gap-4">
                   <div className="space-y-2">
-                    <p className="text-xs font-medium text-muted-foreground">MODEL</p>
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="text-xs font-medium text-muted-foreground">MODEL</p>
+                      <Tooltip delayDuration={300}>
+                        <TooltipTrigger asChild>
+                          <span className="inline-flex cursor-help">
+                            <Badge variant="outline">Retrain only</Badge>
+                          </span>
+                        </TooltipTrigger>
+                        <TooltipContent side="bottom" className="max-w-sm p-3">
+                          <MlflowTooltipBody text={finetuneUnavailableReason} />
+                        </TooltipContent>
+                      </Tooltip>
+                    </div>
                     <div className="flex overflow-hidden rounded-md border shadow-sm" role="group" aria-label="Loại model">
                       <Button
                         type="button"
-                        className="rounded-none border-0"
+                        className="flex-1 rounded-none border-0"
                         variant={selectedModelKind === "phobert" ? "default" : "ghost"}
                         onClick={() => setSelectedModelKind("phobert")}
                       >
@@ -2819,7 +3016,7 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
                       </Button>
                       <Button
                         type="button"
-                        className="rounded-none border-0"
+                        className="flex-1 rounded-none border-0"
                         variant={selectedModelKind === "lr_smoke" ? "default" : "ghost"}
                         onClick={() => {
                           setSelectedModelKind("lr_smoke");
@@ -2832,34 +3029,11 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
                   </div>
 
                   <div className="space-y-2">
-                    <p className="text-xs font-medium text-muted-foreground">CHẾ ĐỘ</p>
-                    <div className="flex overflow-hidden rounded-md border shadow-sm" role="group" aria-label="Chế độ huấn luyện">
-                      <Button
-                        type="button"
-                        className="rounded-none border-0"
-                        variant={selectedTrainingMode === "retrain" ? "default" : "ghost"}
-                        onClick={() => setSelectedTrainingMode("retrain")}
-                      >
-                        Retrain
-                      </Button>
-                      <Button
-                        type="button"
-                        className="rounded-none border-0"
-                        variant={selectedTrainingMode === "finetune" ? "default" : "ghost"}
-                        onClick={() => setSelectedTrainingMode("finetune")}
-                        disabled={selectedModelKind === "lr_smoke"}
-                      >
-                        Finetune
-                      </Button>
-                    </div>
-                  </div>
-
-                  <div className="space-y-2 sm:col-span-2">
                     <p className="text-xs font-medium text-muted-foreground">DỮ LIỆU</p>
                     <div className="flex overflow-hidden rounded-md border shadow-sm" role="group" aria-label="Chính sách dữ liệu">
                       <Button
                         type="button"
-                        className="rounded-none border-0"
+                        className="flex-1 rounded-none border-0"
                         variant={balanceStrategy === "balanced_50_50" ? "default" : "ghost"}
                         onClick={() => setBalanceStrategy("balanced_50_50")}
                       >
@@ -2867,7 +3041,7 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
                       </Button>
                       <Button
                         type="button"
-                        className="rounded-none border-0"
+                        className="flex-1 rounded-none border-0"
                         variant={balanceStrategy === "all" ? "default" : "ghost"}
                         onClick={() => setBalanceStrategy("all")}
                       >
@@ -2914,23 +3088,24 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
               {selectedModelKind === "phobert" && selectedTrainingMode === "finetune" && (
                 <div>
                   <label className="text-xs text-muted-foreground">Base model (required for finetune)</label>
-                  <Input
+                  <select
                     value={finetuneBaseModel}
-                    onChange={(e: ChangeEvent<HTMLInputElement>) => setFinetuneBaseModel(e.target.value)}
-                    placeholder="Select an installed PhoBERT model artifact"
-                    className="mt-1"
-                    list="finetune-base-models"
-                  />
-                  <datalist id="finetune-base-models">
-                    {availableModels
-                      .filter((model) => !isDeprecatedModel(model))
-                      .map((model) => (
+                    onChange={(event) => setFinetuneBaseModel(event.target.value)}
+                    className="mt-1 h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                    disabled={finetuneBaseModels.length === 0}
+                    aria-label="PhoBERT base model for finetune"
+                  >
+                    {finetuneBaseModels.length === 0 ? (
+                      <option value="">No complete installed PhoBERT checkpoint available</option>
+                    ) : (
+                      finetuneBaseModels.map((model) => (
                         <option key={`base-${model}`} value={model}>
                           {getModelLabel(model)}
                         </option>
-                      ))}
-                  </datalist>
-                  <p className="mt-1 text-xs text-muted-foreground">Finetune bundles this exact PhoBERT checkpoint. An empty or incomplete base model is rejected; it never falls back to the original pretrained checkpoint.</p>
+                      ))
+                    )}
+                  </select>
+                  <p className="mt-1 text-xs text-muted-foreground">Chỉ hiển thị checkpoint PhoBERT đã cài đặt và đủ artifact. Finetune sẽ bundle đúng checkpoint đã chọn, không fallback về pretrained model.</p>
                 </div>
               )}
 
@@ -2986,6 +3161,50 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
                 </p>
               </div>
             </div>
+
+            {doIsDryRun && (
+              <div className="rounded-md border border-amber-500/30 bg-amber-500/5 p-3 text-sm">
+                <p className="font-medium">Automation dry run — không có metric hoặc biểu đồ</p>
+                <p className="mt-1 text-xs text-muted-foreground">Run này chỉ kiểm tra điều kiện và bundle; không gửi kernel Kaggle, không train model và không export artifact. Log/cấu hình đầy đủ nằm trong phần thông tin kỹ thuật bên dưới.</p>
+              </div>
+            )}
+
+            {doArtifactManualDownloadCommand && (
+              <Card className="border-amber-500/30 bg-amber-500/5 p-4 space-y-3">
+                <div className="flex flex-wrap items-start justify-between gap-2">
+                  <div>
+                    <h3 className="font-medium">Kaggle artifact download</h3>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {doCurrentStage === "import_artifact"
+                        ? "Kaggle đã train xong; máy chủ đang tải output để import."
+                        : "Thông tin output được giữ lại để có thể tải thủ công khi xem lại run này."}
+                    </p>
+                  </div>
+                  <Badge variant="outline">
+                    {Number.isFinite(doArtifactDownloadBytes)
+                      ? `${formatBytes(doArtifactDownloadBytes)} output`
+                      : "Chưa đo được dung lượng"}
+                  </Badge>
+                </div>
+                <div className="grid gap-2 text-xs text-muted-foreground sm:grid-cols-2">
+                  <span>Đã nhận: <b className="text-foreground">{Number.isFinite(doArtifactDownloadBytes) ? formatBytes(doArtifactDownloadBytes) : "-"}</b></span>
+                  <span>Số file: <b className="text-foreground">{Number.isFinite(doArtifactDownloadFileCount) ? doArtifactDownloadFileCount : "-"}</b></span>
+                  {Number.isFinite(doArtifactSizeBytes) && doArtifactSizeBytes > 0 && (
+                    <span className="sm:col-span-2">Model artifact đã chọn: <b className="text-foreground">{formatBytes(doArtifactSizeBytes)}</b></span>
+                  )}
+                </div>
+                <div className="rounded-md border bg-background/80 p-3">
+                  <p className="text-xs font-medium">Tải thủ công bằng Kaggle CLI</p>
+                  <p className="mt-1 text-xs text-muted-foreground">Cần đăng nhập Kaggle CLI trên máy của bạn; lệnh không chứa API token.</p>
+                  <div className="mt-2 flex items-center gap-2">
+                    <code className="min-w-0 flex-1 overflow-x-auto rounded bg-muted px-2 py-2 text-xs">{doArtifactManualDownloadCommand}</code>
+                    <Button size="icon" variant="outline" aria-label="Copy lệnh tải artifact Kaggle" title="Copy lệnh" onClick={() => void handleCopyArtifactCommand()}>
+                      <Clipboard className="h-4 w-4" />
+                    </Button>
+                  </div>
+                </div>
+              </Card>
+            )}
 
             {doStatusValue === "completed" && (
               <Card className="p-4 border-primary/20 bg-primary/5 space-y-3">
@@ -3125,12 +3344,19 @@ export function MLFlowPage({ availableModels, onModelsChanged, adminToken, onAdm
                         </p>
                       </div>
                     </div>
-                    <p className="break-all text-xs text-muted-foreground">
-                      MLflow IDs: {doEvidence.included_mlflow_ids?.join(", ") || "-"}
-                    </p>
-                    <p className="break-all text-xs text-muted-foreground">
-                      IDs SHA-256: {doEvidence.included_mlflow_ids_sha256 || "-"}
-                    </p>
+                    <details className="mt-2 rounded-md border bg-muted/20 px-3 py-2 text-xs">
+                      <summary className="cursor-pointer select-none font-medium text-muted-foreground hover:text-foreground">
+                        Xem chi tiết provenance MLflow ({doEvidence.included_mlflow_count ?? 0} IDs)
+                      </summary>
+                      <div className="mt-2 space-y-2 text-muted-foreground">
+                        <p className="break-all">
+                          MLflow IDs: {doEvidence.included_mlflow_ids?.join(", ") || "-"}
+                        </p>
+                        <p className="break-all">
+                          IDs SHA-256: {doEvidence.included_mlflow_ids_sha256 || "-"}
+                        </p>
+                      </div>
+                    </details>
                   </div>
                 )}
                 {doMetrics && (

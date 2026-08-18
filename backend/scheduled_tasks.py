@@ -23,6 +23,7 @@ DEFAULT_MAX_ARTICLES_PER_RUN = 10
 MAX_ARTICLE_ATTEMPTS = 3
 RETRY_DELAYS_MINUTES = {1: 30, 2: 120}
 RUN_LEASE_HOURS = 6
+RUN_STALL_TIMEOUT_MINUTES = 15
 
 
 class ScheduledTaskNotFound(KeyError):
@@ -76,6 +77,17 @@ def _validate_rss_url(value: str) -> str:
     text = str(value or "").strip()
     if text != DEFAULT_VNEXPRESS_RSS_URL:
         raise ValueError("MVP supports only the VnExpress latest-news RSS URL")
+    return text
+
+
+def _validate_model_name(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if len(text) > 160 or ".." in text or "\\" in text or text.count("/") > 1:
+        raise ValueError("model_name is invalid")
     return text
 
 
@@ -186,6 +198,7 @@ def _task_payload(row: sqlite3.Row) -> Dict[str, Any]:
         "config": config,
         "rss_url": config.get("rss_url", DEFAULT_VNEXPRESS_RSS_URL),
         "max_articles_per_run": int(config.get("max_articles_per_run", DEFAULT_MAX_ARTICLES_PER_RUN)),
+        "model_name": config.get("model_name"),
         "next_run_at": row["next_run_at"],
         "last_run_at": row["last_run_at"],
         "created_at": row["created_at"],
@@ -300,6 +313,7 @@ class ScheduledTaskService:
                 continue
 
     def tick(self) -> None:
+        self.recover_stale_runs()
         for task_id in self._due_task_ids():
             claim = self._claim_task(task_id, "scheduled")
             if claim:
@@ -338,6 +352,12 @@ class ScheduledTaskService:
             config["max_articles_per_run"] = _validate_max_articles(values["max_articles_per_run"])
         if "rss_url" in values:
             config["rss_url"] = _validate_rss_url(values["rss_url"])
+        if "model_name" in values:
+            model_name = _validate_model_name(values["model_name"])
+            if model_name:
+                config["model_name"] = model_name
+            else:
+                config.pop("model_name", None)
         config.setdefault("rss_url", DEFAULT_VNEXPRESS_RSS_URL)
         config.setdefault("max_articles_per_run", DEFAULT_MAX_ARTICLES_PER_RUN)
         now = _now()
@@ -371,12 +391,22 @@ class ScheduledTaskService:
     def recover_stale_runs(self) -> List[str]:
         now = _now()
         now_text = _iso(now)
+        stale_before_text = _iso(now - timedelta(minutes=RUN_STALL_TIMEOUT_MINUTES))
+        retry_after_30m = _iso(now + timedelta(minutes=30))
+        retry_after_2h = _iso(now + timedelta(hours=2))
         recovered_tasks: set[str] = set()
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             stale = conn.execute(
-                "SELECT id, task_id FROM scheduled_task_runs WHERE status = 'running' AND lease_until IS NOT NULL AND lease_until < ?",
-                (now_text,),
+                """
+                SELECT id, task_id FROM scheduled_task_runs
+                WHERE status = 'running'
+                  AND (
+                    (lease_until IS NOT NULL AND lease_until < ?)
+                    OR (started_at IS NOT NULL AND started_at < ?)
+                  )
+                """,
+                (now_text, stale_before_text),
             ).fetchall()
             for row in stale:
                 run_id = str(row["id"])
@@ -384,20 +414,29 @@ class ScheduledTaskService:
                 recovered_tasks.add(task_id)
                 conn.execute(
                     "UPDATE scheduled_task_runs SET status = 'failed', finished_at = ?, error = ?, lease_owner = NULL, lease_until = NULL WHERE id = ? AND status = 'running'",
-                    (now_text, "Run lease expired during backend restart; eligible work was requeued.", run_id),
+                    (now_text, "Run became stale and was marked failed; eligible work was requeued.", run_id),
                 )
                 conn.execute(
                     """
                     UPDATE article_discovery_history
                     SET stage = CASE
-                            WHEN stage = 'inferring' THEN 'crawled'
-                            WHEN stage = 'crawling' THEN 'queued'
+                            WHEN stage = 'inferring' THEN 'failed_inference'
+                            WHEN stage = 'crawling' THEN 'failed_crawl'
                             ELSE stage
                         END,
-                        retry_after = NULL, last_error = ?, updated_at = ?
+                        retry_after = CASE
+                            WHEN stage IN ('crawling', 'inferring')
+                                 AND CASE WHEN stage = 'crawling' THEN crawl_attempt_count ELSE inference_attempt_count END = 1
+                                THEN ?
+                            WHEN stage IN ('crawling', 'inferring')
+                                 AND CASE WHEN stage = 'crawling' THEN crawl_attempt_count ELSE inference_attempt_count END = 2
+                                THEN ?
+                            ELSE NULL
+                        END,
+                        last_error = ?, updated_at = ?
                     WHERE last_run_id = ? AND stage IN ('crawling', 'inferring')
                     """,
-                    ("Previous run lease expired; work requeued for recovery.", now_text, run_id),
+                    (retry_after_30m, retry_after_2h, "Run became stale before the article stage completed.", now_text, run_id),
                 )
             for task_id in recovered_tasks:
                 conn.execute(
@@ -447,11 +486,72 @@ class ScheduledTaskService:
             return {"run_id": run_id, "task": _task_payload(task), "trigger_type": trigger_type}
 
     def run_now(self, task_id: str) -> Dict[str, Any]:
+        self.recover_stale_runs()
         claim = self._claim_task(task_id, "manual", force=True)
         if not claim:
             raise ScheduledTaskConflict("Task is already running")
         self._start_claimed_run(claim)
         return self.get_run(task_id, str(claim["run_id"]))
+
+    def cancel_run(self, task_id: str, run_id: str, reason: str = "Canceled by administrator.") -> Dict[str, Any]:
+        now = _now()
+        now_text = _iso(now)
+        retry_after_30m = _iso(now + timedelta(minutes=30))
+        retry_after_2h = _iso(now + timedelta(hours=2))
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            run = conn.execute(
+                "SELECT * FROM scheduled_task_runs WHERE task_id = ? AND id = ?",
+                (task_id, run_id),
+            ).fetchone()
+            if not run:
+                conn.rollback()
+                raise ScheduledTaskNotFound(run_id)
+            if str(run["status"]) != "running":
+                conn.rollback()
+                raise ScheduledTaskConflict(f"Run is already {run['status']}")
+            error = reason[:2000]
+            updated = conn.execute(
+                """
+                UPDATE scheduled_task_runs
+                SET status = 'canceled', finished_at = ?, error = ?,
+                    metadata_json = ?, lease_owner = NULL, lease_until = NULL
+                WHERE id = ? AND status = 'running'
+                """,
+                (now_text, error, json.dumps({"canceled": True, "reason": error}), run_id),
+            )
+            conn.execute(
+                """
+                UPDATE article_discovery_history
+                SET stage = CASE
+                        WHEN stage = 'inferring' THEN 'failed_inference'
+                        WHEN stage = 'crawling' THEN 'failed_crawl'
+                        ELSE stage
+                    END,
+                    retry_after = CASE
+                        WHEN stage IN ('crawling', 'inferring')
+                             AND CASE WHEN stage = 'crawling' THEN crawl_attempt_count ELSE inference_attempt_count END = 1
+                            THEN ?
+                        WHEN stage IN ('crawling', 'inferring')
+                             AND CASE WHEN stage = 'crawling' THEN crawl_attempt_count ELSE inference_attempt_count END = 2
+                            THEN ?
+                        ELSE NULL
+                    END,
+                    last_error = ?, updated_at = ?
+                WHERE task_id = ? AND last_run_id = ? AND stage IN ('crawling', 'inferring')
+                """,
+                (retry_after_30m, retry_after_2h, error, now_text, task_id, run_id),
+            )
+            conn.execute(
+                """
+                UPDATE scheduled_tasks
+                SET last_run_at = ?, next_run_at = CASE WHEN enabled = 1 THEN ? ELSE NULL END
+                WHERE id = ?
+                """,
+                (now_text, now_text, task_id),
+            )
+            conn.commit()
+        return self.get_run(task_id, run_id)
 
     def _start_claimed_run(self, claim: Dict[str, Any]) -> None:
         threading.Thread(
@@ -476,12 +576,12 @@ class ScheduledTaskService:
             row = conn.execute("SELECT task_id FROM scheduled_task_runs WHERE id = ?", (run_id,)).fetchone()
             if not row:
                 return
-            conn.execute(
+            updated = conn.execute(
                 """
                 UPDATE scheduled_task_runs
                 SET status = ?, finished_at = ?, discovered_count = ?, processed_count = ?,
                     failed_count = ?, error = ?, metadata_json = ?, lease_owner = NULL, lease_until = NULL
-                WHERE id = ?
+                WHERE id = ? AND status = 'running'
                 """,
                 (
                     status,
@@ -494,7 +594,8 @@ class ScheduledTaskService:
                     run_id,
                 ),
             )
-            conn.execute("UPDATE scheduled_tasks SET last_run_at = ? WHERE id = ?", (now_text, row["task_id"]))
+            if updated.rowcount:
+                conn.execute("UPDATE scheduled_tasks SET last_run_at = ? WHERE id = ?", (now_text, row["task_id"]))
             conn.commit()
 
     def get_run(self, task_id: str, run_id: str) -> Dict[str, Any]:
@@ -593,6 +694,12 @@ class ScheduledTaskService:
             row = conn.execute("SELECT * FROM article_discovery_history WHERE discovery_key = ?", (discovery_key,)).fetchone()
             if not row:
                 return None
+            active_run = conn.execute(
+                "SELECT 1 FROM scheduled_task_runs WHERE id = ? AND task_id = ? AND status = 'running'",
+                (run_id, row["task_id"]),
+            ).fetchone()
+            if not active_run:
+                return None
             field = "crawl_attempt_count" if stage == "crawling" else "inference_attempt_count"
             attempt = int(row[field] or 0) + 1
             total = int(row["attempt_count"] or 0) + 1
@@ -619,8 +726,13 @@ class ScheduledTaskService:
         now_text = _iso(_now())
         with self._connect() as conn:
             conn.execute(
-                "UPDATE article_discovery_history SET stage = 'crawled', crawl_completed_at = ?, last_run_id = ?, updated_at = ? WHERE discovery_key = ?",
-                (now_text, run_id, now_text, discovery_key),
+                """
+                UPDATE article_discovery_history
+                SET stage = 'crawled', crawl_completed_at = ?, last_run_id = ?, updated_at = ?
+                WHERE discovery_key = ? AND last_run_id = ?
+                  AND EXISTS (SELECT 1 FROM scheduled_task_runs WHERE id = ? AND status = 'running')
+                """,
+                (now_text, run_id, now_text, discovery_key, run_id, run_id),
             )
             conn.commit()
 
@@ -632,9 +744,10 @@ class ScheduledTaskService:
                 UPDATE article_discovery_history
                 SET stage = 'completed', inference_completed_at = ?, processed_at = ?,
                     retry_after = NULL, last_run_id = ?, last_error = NULL, updated_at = ?
-                WHERE discovery_key = ?
+                WHERE discovery_key = ? AND last_run_id = ?
+                  AND EXISTS (SELECT 1 FROM scheduled_task_runs WHERE id = ? AND status = 'running')
                 """,
-                (now_text, now_text, run_id, now_text, discovery_key),
+                (now_text, now_text, run_id, now_text, discovery_key, run_id, run_id),
             )
             conn.commit()
 
@@ -647,6 +760,14 @@ class ScheduledTaskService:
         with self._connect() as conn:
             row = conn.execute("SELECT * FROM article_discovery_history WHERE discovery_key = ?", (discovery_key,)).fetchone()
             if not row:
+                return
+            if row["last_run_id"] != run_id:
+                return
+            active_run = conn.execute(
+                "SELECT 1 FROM scheduled_task_runs WHERE id = ? AND task_id = ? AND status = 'running'",
+                (run_id, row["task_id"]),
+            ).fetchone()
+            if not active_run:
                 return
             attempts = int(row["crawl_attempt_count"] if stage == "crawl" else row["inference_attempt_count"] or 0)
             delay = RETRY_DELAYS_MINUTES.get(attempts)

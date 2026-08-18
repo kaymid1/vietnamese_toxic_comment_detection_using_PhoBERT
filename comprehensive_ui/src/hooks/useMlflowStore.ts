@@ -469,6 +469,10 @@ export interface MlflowKaggleStatus {
   artifact_uri?: string | null;
   artifact_kind?: string;
   artifact_download_url?: string | null;
+  artifact_download_bytes?: number | null;
+  artifact_download_file_count?: number | null;
+  artifact_size_bytes?: number | null;
+  artifact_manual_download_command?: string | null;
   artifact_checksum?: string | null;
   bundle_path?: string | null;
   bundle_url?: string | null;
@@ -495,6 +499,19 @@ export interface MlflowKaggleStatus {
   job_id?: string | null;
 }
 
+export interface MlflowKaggleRunHistoryItem {
+  run_id: string;
+  status: string;
+  current_stage?: string | null;
+  model_kind?: string;
+  training_mode?: string;
+  trigger_source?: "automation" | "manual" | string;
+  artifact_available?: boolean;
+  error_message?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
 export interface MlflowAutomationEvent {
   id: number;
   model_family: "tfidf_lr" | "phobert" | string;
@@ -507,7 +524,7 @@ export interface MlflowAutomationEvent {
 }
 
 export interface MlflowAutomationStatus {
-  families: Array<{ model_family: string; policy: { enabled: boolean; mode: string; min_new_rows: number; cooldown_minutes: number; dry_run: boolean }; eligible_count: number; new_eligible_rows: number; ready: boolean; blocked_reason?: string | null; state: { active_run_id?: string | null } }>;
+  families: Array<{ model_family: string; policy: { enabled: boolean; mode: string; min_new_rows: number; cooldown_minutes: number; dry_run: boolean }; eligible_count: number; new_eligible_rows: number; ready: boolean; blocked_reason?: string | null; state: { active_run_id?: string | null; last_triggered_at?: string | null } }>;
   events: MlflowAutomationEvent[];
 }
 
@@ -583,7 +600,7 @@ export interface MlflowImportModelZipResponse {
   validated: boolean;
 }
 
-const DO_TERMINAL_STATUSES = new Set(["completed", "failed", "dry_run", "placeholder"]);
+const DO_TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled", "canceled", "dry_run", "placeholder"]);
 const DO_POLL_INTERVAL_MS = 4000;
 const DO_MAX_POLL_ATTEMPTS = 21600;
 const DO_RUN_STORAGE_KEY = "viettoxic:mlflow:kaggleRunId";
@@ -626,6 +643,7 @@ export function useMlflowStore(options: UseMlflowStoreOptions = {}) {
   const [requiredZipContents, setRequiredZipContents] = useState<string[]>([]);
   const [doRunId, setDoRunId] = useState<string | null>(readPersistedDORunId);
   const [doStatus, setDoStatus] = useState<MlflowKaggleStatus | null>(null);
+  const [kaggleRunHistory, setKaggleRunHistory] = useState<MlflowKaggleRunHistoryItem[]>([]);
   const [doPreflight, setDoPreflight] = useState<MlflowDOPreflight | null>(null);
   const [automationStatus, setAutomationStatus] = useState<MlflowAutomationStatus | null>(null);
   const [automationStatusError, setAutomationStatusError] = useState<string | null>(null);
@@ -1129,6 +1147,14 @@ export function useMlflowStore(options: UseMlflowStoreOptions = {}) {
     [authorizedFetch, doRunId, run],
   );
 
+  const refreshKaggleRunHistory = useCallback(async () => run(async () => {
+    const payload = await parseJsonResponse<{ items: MlflowKaggleRunHistoryItem[] }>(
+      await authorizedFetch(buildApiUrl("/api/mlflow/kaggle/runs?limit=30")),
+    );
+    setKaggleRunHistory(payload.items || []);
+    return payload.items || [];
+  }), [authorizedFetch, run]);
+
   const refreshAutomationStatus = useCallback(async () => run(async () => {
     try {
       const payload = await parseJsonResponse<MlflowAutomationStatus>(
@@ -1180,6 +1206,17 @@ export function useMlflowStore(options: UseMlflowStoreOptions = {}) {
     setDoRunId(null);
     setDoStatus(null);
   }, [stopDOPolling]);
+
+  const stopDORun = useCallback(async (runId: string) => {
+    return run(async () => {
+      const payload = await parseJsonResponse<{ run_id: string; status: string; message?: string }>(
+        await authorizedFetch(buildApiUrl(`/api/mlflow/kaggle/stop?run_id=${encodeURIComponent(runId)}`), { method: "POST" }),
+      );
+      stopDOPolling();
+      await refreshDOStatus(runId);
+      return payload;
+    });
+  }, [authorizedFetch, refreshDOStatus, run, stopDOPolling]);
 
   const startDOPolling = useCallback(
     (runId: string) => {
@@ -1647,6 +1684,7 @@ export function useMlflowStore(options: UseMlflowStoreOptions = {}) {
     requiredZipContents,
     doRunId,
     doStatus,
+    kaggleRunHistory,
     doPreflight,
     automationStatus,
     automationStatusError,
@@ -1672,10 +1710,12 @@ export function useMlflowStore(options: UseMlflowStoreOptions = {}) {
     triggerDO,
     refreshDOPreflight,
     refreshDOStatus,
+    refreshKaggleRunHistory,
     refreshAutomationStatus,
     openDORun,
     geminiEvaluateKaggleRun,
     clearDOSession,
+    stopDORun,
     refreshCompare,
     refreshCompareHistory,
     refreshModelRegistry,

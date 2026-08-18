@@ -148,6 +148,23 @@ def test_models_api_exposes_accurate_labels(client):
         V1_ID: "PhoBERT v1 Baseline",
         V2_ID: "PhoBERT v2 Fine-tuned",
     }
+    assert payload["finetune_base_models"] == [V1_ID, V2_ID]
+
+
+def test_models_api_excludes_incomplete_checkpoint_from_finetune_dropdown(client):
+    _create_runtime_catalog(app_module.MODEL_OPTIONS_DIR)
+    incomplete_id = "phobert/incomplete"
+    _create_phobert(
+        app_module.MODEL_OPTIONS_DIR,
+        "incomplete",
+        "vinai/phobert-base-v2",
+        with_tokenizer=False,
+    )
+
+    payload = client.get("/api/models").json()
+
+    assert incomplete_id in payload["models"]
+    assert incomplete_id not in payload["finetune_base_models"]
 
 
 def test_legacy_v2_identifier_resolves_to_canonical_id(tmp_path: Path):

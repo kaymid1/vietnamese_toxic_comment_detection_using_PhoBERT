@@ -64,6 +64,9 @@ def test_scheduler_defaults_are_idempotent_and_lease_blocks_duplicate(tmp_path: 
     assert task["timezone"] == DEFAULT_TIMEZONE
     assert task["max_articles_per_run"] == DEFAULT_MAX_ARTICLES_PER_RUN
 
+    updated = service.update_task(BUILTIN_TASK_ID, {"model_name": "phobert/test-model"}, "tester")
+    assert updated["model_name"] == "phobert/test-model"
+
     service.update_task(BUILTIN_TASK_ID, {"enabled": True}, "tester")
     claim = service._claim_task(BUILTIN_TASK_ID, "scheduled")
     assert claim is not None
@@ -98,8 +101,10 @@ def test_article_retry_due_and_stage_specific_attempts(tmp_path: Path):
     service.ensure_builtin_task()
     service.upsert_articles(BUILTIN_TASK_ID, [_article()])
 
-    assert service.begin_article_stage("vnexpress:4987123", "run-1", "crawling") == 1
-    service.mark_article_failed("vnexpress:4987123", "run-1", "crawl", "temporary failure")
+    first_claim = service._claim_task(BUILTIN_TASK_ID, "manual", force=True)
+    assert first_claim is not None
+    assert service.begin_article_stage("vnexpress:4987123", first_claim["run_id"], "crawling") == 1
+    service.mark_article_failed("vnexpress:4987123", first_claim["run_id"], "crawl", "temporary failure")
     assert service.list_processable_articles(BUILTIN_TASK_ID, 10) == []
 
     with sqlite3.connect(tmp_path / "feedback.db") as conn:
@@ -109,7 +114,9 @@ def test_article_retry_due_and_stage_specific_attempts(tmp_path: Path):
         )
         conn.commit()
     assert len(service.list_processable_articles(BUILTIN_TASK_ID, 10)) == 1
-    assert service.begin_article_stage("vnexpress:4987123", "run-2", "crawling") == 2
+    second_claim = service._claim_task(BUILTIN_TASK_ID, "manual", force=True)
+    assert second_claim is not None
+    assert service.begin_article_stage("vnexpress:4987123", second_claim["run_id"], "crawling") == 2
 
 
 def test_stale_run_recovery_requeues_article_stages(tmp_path: Path):
@@ -133,7 +140,26 @@ def test_stale_run_recovery_requeues_article_stages(tmp_path: Path):
     run = service.get_run(BUILTIN_TASK_ID, claim["run_id"])
     article = service.article_metadata("vnexpress:4987123")
     assert run["status"] == "failed"
-    assert article and article["stage"] == "queued"
+    assert article and article["stage"] == "failed_crawl"
+    assert article["retry_after"]
+
+
+def test_cancel_run_marks_active_article_failed_and_cannot_be_overwritten(tmp_path: Path):
+    service = ScheduledTaskService(tmp_path / "feedback.db", lambda task, run_id: {})
+    service.ensure_builtin_task()
+    service.upsert_articles(BUILTIN_TASK_ID, [_article()])
+    claim = service._claim_task(BUILTIN_TASK_ID, "manual", force=True)
+    assert claim is not None
+    assert service.begin_article_stage("vnexpress:4987123", claim["run_id"], "crawling") == 1
+
+    canceled = service.cancel_run(BUILTIN_TASK_ID, claim["run_id"])
+    assert canceled["status"] == "canceled"
+    article = service.article_metadata("vnexpress:4987123")
+    assert article and article["stage"] == "failed_crawl"
+    service.mark_article_crawled("vnexpress:4987123", claim["run_id"])
+    service._finish_run(claim["run_id"], "completed", {"processed_count": 1}, None)
+    assert service.get_run(BUILTIN_TASK_ID, claim["run_id"])["status"] == "canceled"
+    assert service.article_metadata("vnexpress:4987123")["stage"] == "failed_crawl"
 
 
 def test_disabled_task_is_not_auto_resumed_after_recovery(tmp_path: Path):

@@ -54,6 +54,9 @@ from pathlib import Path
 repo_root = Path(sys.argv[1])
 sys.path.insert(0, str(repo_root))
 
+from backend.env_loader import load_env_files
+load_env_files()
+
 from backend.system_settings import DEFAULT_SETTINGS_DB_PATH, update_system_settings
 
 DEFAULT_SETTINGS_DB_PATH.parent.mkdir(parents=True, exist_ok=True)

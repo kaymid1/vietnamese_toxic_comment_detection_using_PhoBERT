@@ -291,6 +291,7 @@ def test_kaggle_trigger_dry_run(client, admin_headers):
 def test_kaggle_preflight_real_mode_requires_credentials(client, admin_headers, qa_env, monkeypatch):
     monkeypatch.delenv("KAGGLE_USERNAME", raising=False)
     monkeypatch.delenv("KAGGLE_KEY", raising=False)
+    monkeypatch.delenv("KAGGLE_API_TOKEN", raising=False)
     app_module = qa_env["app_module"]
     monkeypatch.setattr(app_module, "_kaggle_webhook_reachability", lambda webhook_url: (True, None))
     response = client.patch(
@@ -302,7 +303,7 @@ def test_kaggle_preflight_real_mode_requires_credentials(client, admin_headers, 
                 "KAGGLE_NOTEBOOK_URL": "https://www.kaggle.com/code/kaymid/thesis-phobert/edit",
                 "KAGGLE_WEBHOOK_URL": "http://127.0.0.1:9000/kaggle/trigger",
             },
-            "clear": ["KAGGLE_USERNAME", "KAGGLE_KEY"],
+            "clear": ["KAGGLE_USERNAME", "KAGGLE_KEY", "KAGGLE_API_TOKEN"],
         },
     )
     assert response.status_code == 200
@@ -314,9 +315,11 @@ def test_kaggle_preflight_real_mode_requires_credentials(client, admin_headers, 
     assert payload["checks"]["KAGGLE_NOTEBOOK_URL"] is True
     assert payload["checks"]["KAGGLE_WEBHOOK_URL"] is True
     assert payload["checks"]["KAGGLE_WEBHOOK_REACHABLE"] is True
+    assert payload["checks"]["KAGGLE_CREDENTIALS"] is False
+    assert payload["checks"]["KAGGLE_API_TOKEN"] is False
     assert payload["checks"]["KAGGLE_USERNAME"] is False
     assert payload["checks"]["KAGGLE_KEY"] is False
-    assert set(payload["missing"]) == {"KAGGLE_USERNAME", "KAGGLE_KEY"}
+    assert payload["missing"] == ["KAGGLE_CREDENTIALS"]
     assert payload["config"]["webhook_mode"] == "real"
 
 
@@ -386,6 +389,7 @@ def test_kaggle_preflight_reports_offline_public_bundle_tunnel(client, admin_hea
 def test_kaggle_trigger_real_mode_requires_credentials(client, admin_headers, monkeypatch):
     monkeypatch.delenv("KAGGLE_USERNAME", raising=False)
     monkeypatch.delenv("KAGGLE_KEY", raising=False)
+    monkeypatch.delenv("KAGGLE_API_TOKEN", raising=False)
     response = client.patch(
         "/api/admin/system-settings",
         headers=admin_headers,
@@ -395,7 +399,7 @@ def test_kaggle_trigger_real_mode_requires_credentials(client, admin_headers, mo
                 "KAGGLE_NOTEBOOK_URL": "https://www.kaggle.com/code/kaymid/thesis-phobert/edit",
                 "KAGGLE_WEBHOOK_URL": "http://127.0.0.1:9000/kaggle/trigger",
             },
-            "clear": ["KAGGLE_USERNAME", "KAGGLE_KEY"],
+            "clear": ["KAGGLE_USERNAME", "KAGGLE_KEY", "KAGGLE_API_TOKEN"],
         },
     )
     assert response.status_code == 200
@@ -412,7 +416,7 @@ def test_kaggle_trigger_real_mode_requires_credentials(client, admin_headers, mo
         },
     )
     assert trigger.status_code == 400
-    assert "requires KAGGLE_USERNAME and KAGGLE_KEY" in str(trigger.json().get("detail"))
+    assert "requires KAGGLE_API_TOKEN or KAGGLE_USERNAME and KAGGLE_KEY" in str(trigger.json().get("detail"))
 
 
 def test_kaggle_trigger_real_mode_rejects_mock_job_id(client, admin_headers, qa_env, monkeypatch):
@@ -551,6 +555,7 @@ def test_kaggle_webhook_receiver_reads_db_settings_at_request_time(client, qa_en
                 "KAGGLE_KERNEL_SLUG": "db-slug",
                 "KAGGLE_USERNAME": "db-user",
                 "KAGGLE_KEY": "db-key",
+                "KAGGLE_API_TOKEN": "db-api-token",
                 "KAGGLE_REAL_BUNDLE_URL_TEMPLATE": "https://example.test/bundles/{batch_id}/{run_id}.zip",
             }
         },
@@ -562,6 +567,7 @@ def test_kaggle_webhook_receiver_reads_db_settings_at_request_time(client, qa_en
     subprocess_env = receiver._build_subprocess_env()
     assert subprocess_env["KAGGLE_USERNAME"] == "db-user"
     assert subprocess_env["KAGGLE_KEY"] == "db-key"
+    assert subprocess_env["KAGGLE_API_TOKEN"] == "db-api-token"
     assert receiver._resolve_bundle_url("batch-1", "run-1") == "https://example.test/bundles/batch-1/run-1.zip"
 
     response = client.patch(
@@ -1100,6 +1106,7 @@ def test_family_candidate_compare_promote_and_rollback_end_to_end(
 
     models_after_rollback = client.get("/api/models").json()
     assert models_after_rollback["production_slots"][model_family] == baseline_id
+    assert promoted_model not in models_after_rollback["models"]
 
 
 def test_lr_smoke_training_mode_is_always_retrain(qa_env):
@@ -1130,6 +1137,55 @@ def test_automation_is_disabled_by_default_and_does_not_start_a_cycle(client, ad
     result = cycle_response.json()["results"][0]
     assert result["started"] is False
     assert result["blocked_reason"] == "global_disabled"
+
+
+def test_automation_balance_strategy_setting_is_exposed_and_used(qa_env, client, admin_headers, monkeypatch):
+    app_module = qa_env["app_module"]
+    response = client.patch(
+        "/api/admin/system-settings",
+        headers=admin_headers,
+        json={
+            "settings": {
+                "MLFLOW_AUTOMATION_ENABLED": True,
+                "MLFLOW_AUTOMATION_TFIDF_LR_MODE": "train_only",
+                "MLFLOW_AUTOMATION_BALANCE_STRATEGY": "all",
+                "MLFLOW_AUTOMATION_MIN_NEW_ROWS": 1,
+                "MLFLOW_AUTOMATION_DRY_RUN": True,
+            }
+        },
+    )
+    assert response.status_code == 200
+    groups = {group["id"]: group for group in response.json()["groups"]}
+    setting = next(
+        item for item in groups["mlflow_automation"]["settings"]
+        if item["key"] == "MLFLOW_AUTOMATION_BALANCE_STRATEGY"
+    )
+    assert setting["value"] == "all"
+    assert setting["options"] == ["balanced_50_50", "all"]
+
+    with sqlite3.connect(qa_env["feedback_db"]) as conn:
+        conn.execute(
+            """
+            INSERT INTO mlflow_comment_item (
+                batch_id, text, gate_bucket, pseudo_label, selected_for_training, created_at
+            ) VALUES (?, ?, 'accepted', 1, 1, ?)
+            """,
+            ("automation-balance", "approved automation sample", "2026-08-18T00:00:00Z"),
+        )
+        conn.commit()
+
+    captured: dict[str, str] = {}
+
+    def fake_trigger(request, _request):
+        captured["balance_strategy"] = request.balance_strategy
+        return {"run_id": "automation-balance-run", "status": "dry_run", "bundle_path": "bundles/test.zip"}
+
+    monkeypatch.setattr(app_module, "mlflow_kaggle_trigger", fake_trigger)
+    result = app_module._run_automation_cycle("tfidf_lr", "test")
+
+    assert result["started"] is True
+    assert captured["balance_strategy"] == "all"
+    assert app_module._automation_policy("tfidf_lr")["balance_strategy"] == "all"
 
 
 def test_full_auto_promotes_only_an_automation_created_candidate(qa_env):

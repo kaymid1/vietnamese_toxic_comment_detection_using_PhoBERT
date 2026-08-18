@@ -583,6 +583,7 @@ class ScheduledTaskUpdateRequest(BaseModel):
     timezone: Optional[str] = None
     max_articles_per_run: Optional[int] = Field(default=None, ge=1, le=100)
     rss_url: Optional[str] = None
+    model_name: Optional[str] = Field(default=None, max_length=160)
 
 
 @app.post("/api/admin/login", response_model=AdminLoginResponse)
@@ -665,6 +666,7 @@ def scheduled_tasks_list() -> Dict[str, Any]:
 def scheduled_task_detail(task_id: str) -> Dict[str, Any]:
     init_feedback_db()
     try:
+        SCHEDULED_TASK_SERVICE.recover_stale_runs()
         task = SCHEDULED_TASK_SERVICE.get_task(task_id)
         return {
             "task": task,
@@ -680,11 +682,14 @@ def scheduled_task_update(task_id: str, request: ScheduledTaskUpdateRequest, adm
     init_feedback_db()
     values = request.model_dump(exclude_unset=True)
     try:
+        if values.get("model_name"):
+            resolved_type, resolved_name, _ = resolve_model_path(resolve_model_root(), values["model_name"])
+            values["model_name"] = f"{resolved_type}/{resolved_name}"
         task = SCHEDULED_TASK_SERVICE.update_task(task_id, values, admin_username)
         return {"task": task}
     except ScheduledTaskNotFound as exc:
         raise HTTPException(status_code=404, detail=f"Scheduled task not found: {task_id}") from exc
-    except ValueError as exc:
+    except (FileNotFoundError, OSError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
@@ -713,12 +718,24 @@ def scheduled_task_runs(task_id: str, limit: int = Query(default=50, ge=1, le=20
 def scheduled_task_run_detail(task_id: str, run_id: str) -> Dict[str, Any]:
     init_feedback_db()
     try:
+        SCHEDULED_TASK_SERVICE.recover_stale_runs()
         return {
             "run": SCHEDULED_TASK_SERVICE.get_run(task_id, run_id),
             "articles": SCHEDULED_TASK_SERVICE.list_articles(task_id, run_id=run_id, limit=500),
         }
     except ScheduledTaskNotFound as exc:
         raise HTTPException(status_code=404, detail=f"Scheduled task run not found: {run_id}") from exc
+
+
+@app.post("/api/admin/scheduled-tasks/{task_id}/runs/{run_id}/cancel", dependencies=[Depends(require_admin)])
+def scheduled_task_run_cancel(task_id: str, run_id: str) -> Dict[str, Any]:
+    init_feedback_db()
+    try:
+        return {"run": SCHEDULED_TASK_SERVICE.cancel_run(task_id, run_id)}
+    except ScheduledTaskNotFound as exc:
+        raise HTTPException(status_code=404, detail=f"Scheduled task run not found: {run_id}") from exc
+    except ScheduledTaskConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 class FeedbackPageItem(BaseModel):
@@ -1096,6 +1113,25 @@ def list_all_models(model_root: Path) -> List[Dict[str, str]]:
     return models
 
 
+def _runtime_hidden_model_ids() -> set[str]:
+    """Return installed model versions hidden from runtime selection after lifecycle actions."""
+    hidden_ids = {
+        # Legacy Kaggle artifacts that must not be selectable for inference.
+        "tfidf_lr/kaggle_02f746984da4",
+        "tfidf_lr/kaggle_ba077a893083",
+    }
+    try:
+        with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+            rows = conn.execute(
+                "SELECT model_id FROM mlflow_model_version WHERE status IN ('archived', 'deleted')"
+            ).fetchall()
+        hidden_ids.update(str(row[0]).strip() for row in rows if row[0])
+    except (sqlite3.Error, OSError):
+        # Model discovery should remain available during first-run DB setup.
+        pass
+    return hidden_ids
+
+
 def _is_deprecated_model_name(name: str) -> bool:
     return "deprecated" in name.lower()
 
@@ -1180,10 +1216,12 @@ def _read_production_slot_state(model_family: str) -> Dict[str, Optional[str]]:
 
 
 def _get_default_model_id_without_slot(model_root: Path) -> Optional[str]:
+    hidden_model_ids = _runtime_hidden_model_ids()
     phobert_models = list_models_by_type(model_root, "phobert")
     preferred_dir = model_root / "phobert" / PHOBERT_V2_FINETUNED_STORAGE_NAME
     if (
         PHOBERT_V2_FINETUNED_STORAGE_NAME in phobert_models
+        and PHOBERT_V2_FINETUNED_ID not in hidden_model_ids
         and get_phobert_base_model(preferred_dir) == PHOBERT_V2_BASE_MODEL
         and _is_compatible_model("phobert", preferred_dir)
     ):
@@ -1191,6 +1229,8 @@ def _get_default_model_id_without_slot(model_root: Path) -> Optional[str]:
 
     for name in phobert_models:
         if name in {PHOBERT_V2_FINETUNED_STORAGE_NAME, PHOBERT_V1_BASELINE_NAME}:
+            continue
+        if f"phobert/{name}" in hidden_model_ids:
             continue
         if _is_deprecated_model_name(name):
             continue
@@ -1200,6 +1240,7 @@ def _get_default_model_id_without_slot(model_root: Path) -> Optional[str]:
     legacy_dir = model_root / "phobert" / PHOBERT_V1_BASELINE_NAME
     if (
         PHOBERT_V1_BASELINE_NAME in phobert_models
+        and PHOBERT_V1_BASELINE_ID not in hidden_model_ids
         and _is_compatible_model("phobert", legacy_dir)
     ):
         return PHOBERT_V1_BASELINE_ID
@@ -1209,6 +1250,8 @@ def _get_default_model_id_without_slot(model_root: Path) -> Optional[str]:
         name = str(model.get("name") or "")
         model_id = str(model.get("id") or "")
         if not model_type or not name or not model_id:
+            continue
+        if model_id in hidden_model_ids:
             continue
         if model_id == PHOBERT_V2_FINETUNED_ID:
             continue
@@ -7705,7 +7748,7 @@ def mlflow_manual_export_bundle(request: MlflowManualExportBundleRequest) -> Dic
         policy_version=policy_version,
     )
 
-    out_dir = BASE_DIR / "data" / "processed"
+    out_dir = PROCESSED_DATA_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
     timestamp = utc_timestamp_compact()
     scope_token = "batch" if resolved_batch_id else "all_batches"
@@ -7924,6 +7967,19 @@ def mlflow_manual_export_bundle(request: MlflowManualExportBundleRequest) -> Dic
     }
 
 
+def _resolve_mlflow_bundle_path(bundle_path: str) -> Path:
+    """Resolve a configured bundle path, retaining access to pre-portability bundles."""
+    resolved = resolve_artifact_ref(bundle_path)
+    allowed_roots = (PROCESSED_DATA_DIR.resolve(), (BASE_DIR / "data" / "processed").resolve())
+    for processed_dir in allowed_roots:
+        try:
+            resolved.relative_to(processed_dir)
+            return resolved
+        except ValueError:
+            continue
+    raise ValueError("bundle path is outside the managed processed-data directories")
+
+
 @app.get("/api/mlflow/manual/export-bundle/download", dependencies=[Depends(require_admin)])
 def mlflow_manual_export_bundle_download(bundle_path: str = Query(..., min_length=1)) -> FileResponse:
     candidate = (bundle_path or "").strip()
@@ -7931,13 +7987,7 @@ def mlflow_manual_export_bundle_download(bundle_path: str = Query(..., min_lengt
         raise HTTPException(status_code=400, detail="bundle_path is required")
 
     try:
-        resolved = resolve_artifact_ref(candidate)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail="Invalid bundle_path") from exc
-    processed_dir = PROCESSED_DATA_DIR.resolve()
-
-    try:
-        resolved.relative_to(processed_dir)
+        resolved = _resolve_mlflow_bundle_path(candidate)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="Invalid bundle_path") from exc
 
@@ -8399,10 +8449,16 @@ def _automation_mode(model_family: str) -> str:
     return mode if mode in {"disabled", "train_only", "full_auto"} else "disabled"
 
 
+def _automation_balance_strategy() -> str:
+    strategy = (get_setting("MLFLOW_AUTOMATION_BALANCE_STRATEGY", "balanced_50_50") or "balanced_50_50").strip().lower()
+    return strategy if strategy in {"balanced_50_50", "all"} else "balanced_50_50"
+
+
 def _automation_policy(model_family: str) -> Dict[str, Any]:
     return {
         "enabled": get_bool_setting("MLFLOW_AUTOMATION_ENABLED", False),
         "mode": _automation_mode(model_family),
+        "balance_strategy": _automation_balance_strategy(),
         "min_new_rows": get_int_setting("MLFLOW_AUTOMATION_MIN_NEW_ROWS", 50, min_value=1),
         "cooldown_minutes": get_int_setting("MLFLOW_AUTOMATION_COOLDOWN_MINUTES", 1440, min_value=0),
         "dry_run": get_bool_setting("MLFLOW_AUTOMATION_DRY_RUN", True),
@@ -8702,7 +8758,7 @@ def _run_automation_cycle(model_family: str, cause: str) -> Dict[str, Any]:
                 model_kind=model_kind,
                 training_mode="retrain",
                 training_scope="light_only",
-                balance_strategy="balanced_50_50",
+                balance_strategy=policy["balance_strategy"],
                 bundle_scope="all_batches",
                 dry_run=bool(policy["dry_run"]),
             ),
@@ -8729,7 +8785,7 @@ def _run_automation_cycle(model_family: str, cause: str) -> Dict[str, Any]:
                 "dry_run" if terminal else "running",
                 source_run_id=run_id,
                 eligible_count=claim["eligible_count"],
-                detail=f"cause={cause}; mode={policy['mode']}; new_eligible_rows={claim['new_eligible_rows']}; minimum={policy['min_new_rows']}; bundle={result.get('bundle_path') or '-'}",
+                detail=f"cause={cause}; mode={policy['mode']}; balance_strategy={policy['balance_strategy']}; new_eligible_rows={claim['new_eligible_rows']}; minimum={policy['min_new_rows']}; bundle={result.get('bundle_path') or '-'}",
                 conn=conn,
             )
             conn.commit()
@@ -8782,9 +8838,17 @@ def mlflow_kaggle_preflight() -> Dict[str, Any]:
         "KAGGLE_NOTEBOOK_URL": bool((get_setting("KAGGLE_NOTEBOOK_URL", "") or "").strip()),
         "KAGGLE_WEBHOOK_URL": bool(webhook_url),
     }
+    credential_checks: Dict[str, bool] = {}
     if webhook_mode == "real":
-        required["KAGGLE_USERNAME"] = bool((get_setting("KAGGLE_USERNAME", "") or "").strip())
-        required["KAGGLE_KEY"] = bool((get_setting("KAGGLE_KEY", "") or "").strip())
+        kaggle_username = bool((get_setting("KAGGLE_USERNAME", "") or "").strip())
+        kaggle_key = bool((get_setting("KAGGLE_KEY", "") or "").strip())
+        kaggle_api_token = bool((get_setting("KAGGLE_API_TOKEN", "") or "").strip())
+        required["KAGGLE_CREDENTIALS"] = kaggle_api_token or (kaggle_username and kaggle_key)
+        credential_checks = {
+            "KAGGLE_API_TOKEN": kaggle_api_token,
+            "KAGGLE_USERNAME": kaggle_username,
+            "KAGGLE_KEY": kaggle_key,
+        }
     missing = [key for key, ok in required.items() if not ok]
     warnings: List[str] = []
     webhook_reachable = True
@@ -8809,7 +8873,7 @@ def mlflow_kaggle_preflight() -> Dict[str, Any]:
         "ready": len(missing) == 0 and webhook_reachable and public_bundle_reachable,
         "missing": missing,
         "warnings": warnings,
-        "checks": required,
+        "checks": {**required, **credential_checks},
         "config": {"provider": "kaggle", "stages": KAGGLE_STAGES, "webhook_mode": webhook_mode},
         "checked_at": checked_at,
     }
@@ -8831,10 +8895,8 @@ def mlflow_kaggle_bundle_download(
     provided_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
     if not hmac.compare_digest(provided_hash, str(row[1])):
         raise HTTPException(status_code=403, detail="Invalid run bundle token")
-    resolved = (BASE_DIR / str(row[0])).resolve()
-    processed_dir = (BASE_DIR / "data" / "processed").resolve()
     try:
-        resolved.relative_to(processed_dir)
+        resolved = _resolve_mlflow_bundle_path(str(row[0]))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="Invalid run bundle path") from exc
     if not resolved.exists() or not resolved.is_file():
@@ -8864,10 +8926,11 @@ def mlflow_kaggle_trigger(request: MlflowDOTriggerRequest, http_request: Request
     if webhook_mode == "real":
         kaggle_username = (get_setting("KAGGLE_USERNAME", "") or "").strip()
         kaggle_key = (get_setting("KAGGLE_KEY", "") or "").strip()
-        if not kaggle_username or not kaggle_key:
+        kaggle_api_token = (get_setting("KAGGLE_API_TOKEN", "") or "").strip()
+        if not kaggle_api_token and (not kaggle_username or not kaggle_key):
             raise HTTPException(
                 status_code=400,
-                detail="KAGGLE_WEBHOOK_MODE=real requires KAGGLE_USERNAME and KAGGLE_KEY",
+                detail="KAGGLE_WEBHOOK_MODE=real requires KAGGLE_API_TOKEN or KAGGLE_USERNAME and KAGGLE_KEY",
             )
     webhook_url = (get_setting("KAGGLE_WEBHOOK_URL", "") or "").strip()
     if not request.dry_run and not webhook_url:
@@ -9103,8 +9166,11 @@ def mlflow_kaggle_status(run_id: str = Query(..., min_length=1)) -> Dict[str, An
 
     cloud_job_id = str(row["droplet_id"] or "").strip()
     status_url = (get_setting("KAGGLE_STATUS_WEBHOOK_URL", "") or "").strip()
+    artifact_transfer: Dict[str, Any] = {}
 
-    if status_url and cloud_job_id and row["status"] in {"queued", "running"}:
+    # The receiver keeps output-download progress. Fetch it for completed runs too,
+    # so users reopening an old run retain the size and manual recovery command.
+    if status_url and cloud_job_id:
         try:
             prev_status = str(row["status"] or "").strip().lower() or "queued"
             prev_stage = str(row["current_stage"] or "").strip() or KAGGLE_STAGES[0]
@@ -9115,12 +9181,25 @@ def mlflow_kaggle_status(run_id: str = Query(..., min_length=1)) -> Dict[str, An
             artifact_uri = str(remote.get("artifact_uri") or "").strip() or None
             artifact_checksum = str(remote.get("artifact_checksum") or "").strip() or None
             error_message = str(remote.get("error_message") or "").strip() or None
+            artifact_transfer = {
+                key: remote.get(key)
+                for key in (
+                    "artifact_download_bytes",
+                    "artifact_download_file_count",
+                    "artifact_size_bytes",
+                    "artifact_manual_download_command",
+                )
+                if remote.get(key) is not None
+            }
 
             stage = remote_stage if remote_stage in KAGGLE_STAGES else KAGGLE_STAGES[2]
             if remote_status in {"completed", "succeeded", "success"}:
                 remote_status = "completed"
                 stage = KAGGLE_STAGES[-1]
-            elif remote_status in {"failed", "error", "cancelled"}:
+            elif remote_status in {"cancelled", "canceled"}:
+                remote_status = "cancelled"
+                stage = KAGGLE_STAGES[-1]
+            elif remote_status in {"failed", "error"}:
                 remote_status = "failed"
                 stage = KAGGLE_STAGES[-1]
             elif remote_status in {"running", "queued"}:
@@ -9243,6 +9322,7 @@ def mlflow_kaggle_status(run_id: str = Query(..., min_length=1)) -> Dict[str, An
         "artifact_kind": artifact_kind,
         "artifact_download_url": artifact_download_url,
         "artifact_checksum": row["artifact_checksum"],
+        **artifact_transfer,
         "bundle_path": row["bundle_path"],
         "bundle_url": row["bundle_url"],
         "bundle_checksum": row["bundle_checksum"],
@@ -9260,6 +9340,69 @@ def mlflow_kaggle_status(run_id: str = Query(..., min_length=1)) -> Dict[str, An
         "updated_at": row["updated_at"],
         "job_id": (row["droplet_id"] or None),
     }
+
+
+@app.get("/api/mlflow/kaggle/runs", dependencies=[Depends(require_admin)])
+def mlflow_kaggle_runs(limit: int = Query(default=30, ge=1, le=100)) -> Dict[str, Any]:
+    """List persisted Kaggle runs, including dry runs and failed imports."""
+    init_feedback_db()
+    with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT run_id, provider, status, current_stage, logs_json, created_at, updated_at,
+                   artifact_uri, error_message, droplet_id
+            FROM mlflow_do_run
+            ORDER BY updated_at DESC, created_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    items: List[Dict[str, Any]] = []
+    for row in rows:
+        logs = _do_load_logs(row)
+        runtime = _do_extract_runtime_metadata(logs)
+        model_kind = str(runtime.get("model_kind") or "phobert").strip().lower()
+        items.append({
+            "run_id": row["run_id"],
+            "status": row["status"],
+            "current_stage": row["current_stage"],
+            "model_kind": model_kind,
+            "training_mode": "retrain" if model_kind == "lr_smoke" else runtime.get("training_mode") or "retrain",
+            "trigger_source": "automation" if _automation_run_was_started(str(row["run_id"])) else "manual",
+            "artifact_available": bool(row["artifact_uri"]),
+            "error_message": row["error_message"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        })
+    return {"items": items}
+
+
+@app.post("/api/mlflow/kaggle/stop", dependencies=[Depends(require_admin)])
+def mlflow_kaggle_stop(run_id: str = Query(..., min_length=1)) -> Dict[str, Any]:
+    """End local tracking/import for a Kaggle run while retaining its logs and metadata."""
+    init_feedback_db()
+    with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+        row = _do_get_run(conn, run_id.strip())
+    if not row:
+        raise HTTPException(status_code=404, detail=f"Kaggle run not found: {run_id}")
+    job_id = str(row["droplet_id"] or "").strip()
+    status_url = (get_setting("KAGGLE_STATUS_WEBHOOK_URL", "") or "").strip()
+    remote_error = None
+    if job_id and status_url.endswith("/kaggle/status"):
+        try:
+            _kaggle_http_json("POST", f"{status_url[:-len('/status')]}/cancel?job_id={urllib.parse.quote(job_id)}")
+        except Exception as exc:
+            remote_error = str(exc)
+
+    detail = "Stopped by admin: UI tracking cancelled; Kaggle kernel output remains available. Any started local download may finish in the background."
+    if remote_error:
+        detail += " Receiver could not be reached, so only this UI run was stopped."
+    with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
+        _do_update_run(conn, run_id, status="cancelled", stage=KAGGLE_STAGES[-1], error_message=detail)
+        _do_append_log(conn, run_id, detail, stage=KAGGLE_STAGES[-1], source="admin")
+        conn.commit()
+    return {"run_id": run_id, "status": "cancelled", "message": detail}
 
 
 @app.get("/api/mlflow/kaggle/artifact/download", dependencies=[Depends(require_admin)])
@@ -9441,8 +9584,7 @@ def _bundle_test_fingerprint(bundle_path: Optional[str]) -> Tuple[Optional[str],
     if not raw_path:
         return None, None
     try:
-        resolved = resolve_artifact_ref(raw_path)
-        resolved.relative_to(PROCESSED_DATA_DIR.resolve())
+        resolved = _resolve_mlflow_bundle_path(raw_path)
         with zipfile.ZipFile(resolved, "r") as zf:
             members = [name for name in zf.namelist() if Path(name).name == "test.jsonl"]
             if not members:
@@ -10915,7 +11057,10 @@ def run_scheduled_task(task: Dict[str, Any], run_id: str) -> Dict[str, Any]:
         try:
             pipeline_result = run_analysis_pipeline(
                 [url],
-                AnalyzeOptions(collect_for_mlflow=True),
+                AnalyzeOptions(
+                    collect_for_mlflow=True,
+                    model_name=task.get("model_name") or None,
+                ),
                 source="scheduled_vnexpress",
                 crawl_results_override=crawl_override,
                 stage_callback=stage_callback,
@@ -10972,8 +11117,23 @@ def analyze(request: AnalyzeRequest) -> Dict[str, Any]:
 def get_models() -> Dict[str, Any]:
     try:
         model_root = resolve_model_root()
-        models = list_all_models(model_root)
+        hidden_model_ids = _runtime_hidden_model_ids()
+        models = [model for model in list_all_models(model_root) if model["id"] not in hidden_model_ids]
         model_ids = [m["id"] for m in models]
+        # Fine-tuning must start from a complete local PhoBERT checkpoint.  Keep
+        # this list separate from the runtime model catalog because the latter
+        # intentionally includes TF-IDF models and can expose incomplete model
+        # folders for diagnostics.
+        finetune_base_models: List[str] = []
+        for model_id in model_ids:
+            try:
+                model_type, model_name, model_dir = resolve_model_path(model_root, model_id)
+                if model_type != "phobert":
+                    continue
+                _validate_phobert_checkpoint_dir(model_dir, label=model_id)
+                finetune_base_models.append(f"{model_type}/{model_name}")
+            except (FileNotFoundError, OSError, ValueError, RuntimeError):
+                continue
         production_slots = {
             family: get_family_default_model_id(model_root, family)
             for family in ("tfidf_lr", "phobert")
@@ -11037,6 +11197,7 @@ def get_models() -> Dict[str, Any]:
             )
         return {
             "models": model_ids,
+            "finetune_base_models": finetune_base_models,
             "default": default_model_id,
             "production_slots": production_slots,
             "model_details": model_details,

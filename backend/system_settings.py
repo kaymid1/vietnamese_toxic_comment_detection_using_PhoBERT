@@ -56,6 +56,7 @@ DEFAULT_GEMINI_EVALUATE_INSTRUCTION = (
 SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
     SettingDefinition("KAGGLE_USERNAME", "Username", "kaggle_account", "Kaggle Account", "string"),
     SettingDefinition("KAGGLE_KEY", "API Key", "kaggle_account", "Kaggle Account", "string", secret=True),
+    SettingDefinition("KAGGLE_API_TOKEN", "API Token", "kaggle_account", "Kaggle Account", "string", secret=True),
     SettingDefinition("KAGGLE_NOTEBOOK_URL", "Notebook URL", "kaggle_account", "Kaggle Account", "string", required=True),
     SettingDefinition("KAGGLE_KERNEL_OWNER", "Kernel owner", "kaggle_kernel", "Kaggle Kernel", "string"),
     SettingDefinition("KAGGLE_KERNEL_SLUG", "Kernel slug", "kaggle_kernel", "Kaggle Kernel", "string"),
@@ -166,6 +167,15 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         "enum",
         default="disabled",
         options=("disabled", "train_only", "full_auto"),
+    ),
+    SettingDefinition(
+        "MLFLOW_AUTOMATION_BALANCE_STRATEGY",
+        "Automation training data selection",
+        "mlflow_automation",
+        "MLflow Automation",
+        "enum",
+        default="balanced_50_50",
+        options=("balanced_50_50", "all"),
     ),
     SettingDefinition(
         "MLFLOW_AUTOMATION_MIN_NEW_ROWS",
@@ -281,6 +291,7 @@ DEFINITIONS_BY_KEY: Dict[str, SettingDefinition] = {definition.key: definition f
 SETTING_VI_METADATA: Dict[str, tuple[str, str]] = {
     "KAGGLE_USERNAME": ("Tên người dùng", "Tài khoản Kaggle dùng để xác thực khi chạy notebook thật."),
     "KAGGLE_KEY": ("API key", "Khóa bí mật của Kaggle. Chỉ dùng cho backend; giao diện luôn che giá trị."),
+    "KAGGLE_API_TOKEN": ("API token", "Token Kaggle mới dùng bởi Kaggle CLI hiện tại. Ưu tiên token này; giao diện luôn che giá trị."),
     "KAGGLE_NOTEBOOK_URL": ("Đường dẫn notebook", "URL notebook Kaggle mà webhook sẽ kích hoạt."),
     "KAGGLE_KERNEL_OWNER": ("Chủ sở hữu kernel", "Tên tài khoản Kaggle sở hữu kernel/notebook."),
     "KAGGLE_KERNEL_SLUG": ("Kernel slug", "Định danh ngắn của Kaggle kernel, thường là phần cuối URL notebook."),
@@ -301,6 +312,7 @@ SETTING_VI_METADATA: Dict[str, tuple[str, str]] = {
     "MLFLOW_AUTOMATION_ENABLED": ("Công tắc tự động hóa toàn cục", "Tắt là chặn mọi cycle tự động của cả TF-IDF và PhoBERT."),
     "MLFLOW_AUTOMATION_TFIDF_LR_MODE": ("Chế độ TF-IDF/LR", "disabled: không chạy; train_only: train rồi chờ admin; full_auto: đạt gate thì tự promote."),
     "MLFLOW_AUTOMATION_PHOBERT_MODE": ("Chế độ PhoBERT", "disabled: không chạy; train_only: train rồi chờ admin; full_auto: đạt gate thì tự promote."),
+    "MLFLOW_AUTOMATION_BALANCE_STRATEGY": ("Dữ liệu train tự động", "50/50 cân bằng Toxic/Clean bằng cách giảm lớp nhiều hơn; dùng toàn bộ approved giữ mọi dòng accepted đã được chọn cho training."),
     "MLFLOW_AUTOMATION_MIN_NEW_ROWS": ("Tối thiểu mẫu mới", "Số dòng eligible mới cần có kể từ cycle gần nhất trước khi cho phép train."),
     "MLFLOW_AUTOMATION_COOLDOWN_MINUTES": ("Thời gian chờ (phút)", "Khoảng cách tối thiểu giữa hai automation cycle của cùng model family."),
     "MLFLOW_AUTOMATION_DRY_RUN": ("Chạy thử không gọi cloud", "Tạo và kiểm tra bundle nhưng không kích hoạt Kaggle cloud thật."),
