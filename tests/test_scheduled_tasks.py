@@ -16,6 +16,8 @@ from backend.scheduled_tasks import (
     DEFAULT_INTERVAL_MINUTES,
     DEFAULT_MAX_ARTICLES_PER_RUN,
     DEFAULT_TIMEZONE,
+    MAX_ARTICLE_ATTEMPTS,
+    SCHEDULED_ARTICLE_RECRAWL_INTERVAL_HOURS,
     ScheduledTaskConflict,
     ScheduledTaskService,
 )
@@ -34,6 +36,23 @@ def _article(key: str = "vnexpress:4987123"):
     from backend.article_discovery import DiscoveredArticle
 
     return DiscoveredArticle(key, "vnexpress_rss", "https://vnexpress.net/example-4987123.html", "4987123", "One", None)
+
+
+def _utc_text(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _set_article_state(db_path: Path, discovery_key: str, *, stage: str, processed_at: str | None = None) -> None:
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            UPDATE article_discovery_history
+            SET stage = ?, processed_at = ?, updated_at = ?
+            WHERE discovery_key = ?
+            """,
+            (stage, processed_at, _utc_text(datetime.now(timezone.utc)), discovery_key),
+        )
+        conn.commit()
 
 
 def test_rss_parsing_canonicalization_and_duplicate_identity():
@@ -112,11 +131,125 @@ def test_article_retry_due_and_stage_specific_attempts(tmp_path: Path):
             "UPDATE article_discovery_history SET retry_after = ? WHERE discovery_key = ?",
             ((datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat().replace("+00:00", "Z"), "vnexpress:4987123"),
         )
+        conn.execute("UPDATE scheduled_task_runs SET status = 'failed' WHERE status = 'running'")
         conn.commit()
     assert len(service.list_processable_articles(BUILTIN_TASK_ID, 10)) == 1
     second_claim = service._claim_task(BUILTIN_TASK_ID, "manual", force=True)
     assert second_claim is not None
     assert service.begin_article_stage("vnexpress:4987123", second_claim["run_id"], "crawling") == 2
+
+
+def test_completed_article_recrawl_eligibility_respects_success_timestamp_and_active_stages(tmp_path: Path):
+    db_path = tmp_path / "feedback.db"
+    service = ScheduledTaskService(db_path, lambda task, run_id: {})
+    service.ensure_builtin_task()
+    articles = [
+        _article("vnexpress:recent-completed"),
+        _article("vnexpress:old-completed"),
+        _article("vnexpress:active-crawling"),
+        _article("vnexpress:active-inferring"),
+        _article("vnexpress:new-discovered"),
+    ]
+    service.upsert_articles(BUILTIN_TASK_ID, articles)
+    now = datetime.now(timezone.utc)
+    _set_article_state(
+        db_path,
+        "vnexpress:recent-completed",
+        stage="completed",
+        processed_at=_utc_text(now - timedelta(hours=SCHEDULED_ARTICLE_RECRAWL_INTERVAL_HOURS - 1)),
+    )
+    _set_article_state(
+        db_path,
+        "vnexpress:old-completed",
+        stage="completed",
+        processed_at=_utc_text(now - timedelta(hours=SCHEDULED_ARTICLE_RECRAWL_INTERVAL_HOURS + 1)),
+    )
+    _set_article_state(
+        db_path,
+        "vnexpress:active-crawling",
+        stage="crawling",
+        processed_at=_utc_text(now - timedelta(days=7)),
+    )
+    _set_article_state(
+        db_path,
+        "vnexpress:active-inferring",
+        stage="inferring",
+        processed_at=_utc_text(now - timedelta(days=7)),
+    )
+
+    processable = {row["discovery_key"] for row in service.list_processable_articles(BUILTIN_TASK_ID, 10)}
+
+    assert "vnexpress:old-completed" in processable
+    assert "vnexpress:new-discovered" in processable
+    assert "vnexpress:recent-completed" not in processable
+    assert "vnexpress:active-crawling" not in processable
+    assert "vnexpress:active-inferring" not in processable
+
+
+def test_recrawl_reuses_article_identity_and_preserves_running_slot_protection(tmp_path: Path):
+    db_path = tmp_path / "feedback.db"
+    service = ScheduledTaskService(db_path, lambda task, run_id: {})
+    service.ensure_builtin_task()
+    service.upsert_articles(BUILTIN_TASK_ID, [_article()])
+    old_processed_at = _utc_text(
+        datetime.now(timezone.utc) - timedelta(hours=SCHEDULED_ARTICLE_RECRAWL_INTERVAL_HOURS + 1)
+    )
+    _set_article_state(db_path, "vnexpress:4987123", stage="completed", processed_at=old_processed_at)
+    before = service.article_metadata("vnexpress:4987123")
+
+    service.upsert_articles(BUILTIN_TASK_ID, [_article()])
+    processable = service.list_processable_articles(BUILTIN_TASK_ID, 10)
+
+    assert [row["discovery_key"] for row in processable] == ["vnexpress:4987123"]
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            UPDATE article_discovery_history
+            SET crawl_attempt_count = ?, inference_attempt_count = ?
+            WHERE discovery_key = ?
+            """,
+            (MAX_ARTICLE_ATTEMPTS, MAX_ARTICLE_ATTEMPTS, "vnexpress:4987123"),
+        )
+        conn.commit()
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM article_discovery_history").fetchone()[0] == 1
+    after = service.article_metadata("vnexpress:4987123")
+    assert before and after
+    assert after["first_seen_at"] == before["first_seen_at"]
+    assert after["processed_at"] == old_processed_at
+
+    claim = service._claim_task(BUILTIN_TASK_ID, "manual", force=True)
+    assert claim is not None
+    with pytest.raises(ScheduledTaskConflict):
+        service._claim_task(BUILTIN_TASK_ID, "manual", force=True)
+    assert service.begin_article_stage("vnexpress:4987123", claim["run_id"], "crawling") == 1
+    article = service.article_metadata("vnexpress:4987123")
+    assert article and article["crawl_attempt_count"] == 1
+    assert article["inference_attempt_count"] == 0
+    assert service.list_processable_articles(BUILTIN_TASK_ID, 10) == []
+
+
+def test_article_recrawl_interval_override_is_task_configured(tmp_path: Path):
+    db_path = tmp_path / "feedback.db"
+    service = ScheduledTaskService(db_path, lambda task, run_id: {})
+    service.ensure_builtin_task()
+    task = service.get_task(BUILTIN_TASK_ID)
+    assert task["article_recrawl_interval_hours"] == SCHEDULED_ARTICLE_RECRAWL_INTERVAL_HOURS
+
+    service.update_task(BUILTIN_TASK_ID, {"article_recrawl_interval_hours": 1}, "tester")
+    updated = service.get_task(BUILTIN_TASK_ID)
+    assert updated["article_recrawl_interval_hours"] == 1
+    service.upsert_articles(BUILTIN_TASK_ID, [_article("vnexpress:override")])
+    _set_article_state(
+        db_path,
+        "vnexpress:override",
+        stage="completed",
+        processed_at=_utc_text(datetime.now(timezone.utc) - timedelta(hours=2)),
+    )
+
+    assert [row["discovery_key"] for row in service.list_processable_articles(BUILTIN_TASK_ID, 10)] == [
+        "vnexpress:override"
+    ]
 
 
 def test_stale_run_recovery_requeues_article_stages(tmp_path: Path):

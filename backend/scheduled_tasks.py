@@ -24,6 +24,7 @@ MAX_ARTICLE_ATTEMPTS = 3
 RETRY_DELAYS_MINUTES = {1: 30, 2: 120}
 RUN_LEASE_HOURS = 6
 RUN_STALL_TIMEOUT_MINUTES = 15
+SCHEDULED_ARTICLE_RECRAWL_INTERVAL_HOURS = 24
 
 
 class ScheduledTaskNotFound(KeyError):
@@ -70,6 +71,16 @@ def _validate_max_articles(value: Any) -> int:
         raise ValueError("max_articles_per_run must be an integer") from exc
     if not 1 <= parsed <= 100:
         raise ValueError("max_articles_per_run must be between 1 and 100")
+    return parsed
+
+
+def _validate_recrawl_interval_hours(value: Any) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("article_recrawl_interval_hours must be an integer") from exc
+    if not 1 <= parsed <= 8760:
+        raise ValueError("article_recrawl_interval_hours must be between 1 and 8760")
     return parsed
 
 
@@ -198,6 +209,9 @@ def _task_payload(row: sqlite3.Row) -> Dict[str, Any]:
         "config": config,
         "rss_url": config.get("rss_url", DEFAULT_VNEXPRESS_RSS_URL),
         "max_articles_per_run": int(config.get("max_articles_per_run", DEFAULT_MAX_ARTICLES_PER_RUN)),
+        "article_recrawl_interval_hours": int(
+            config.get("article_recrawl_interval_hours", SCHEDULED_ARTICLE_RECRAWL_INTERVAL_HOURS)
+        ),
         "model_name": config.get("model_name"),
         "next_run_at": row["next_run_at"],
         "last_run_at": row["last_run_at"],
@@ -256,7 +270,11 @@ class ScheduledTaskService:
     def ensure_builtin_task(self) -> None:
         now = _iso(_now())
         config = json.dumps(
-            {"rss_url": DEFAULT_VNEXPRESS_RSS_URL, "max_articles_per_run": DEFAULT_MAX_ARTICLES_PER_RUN},
+            {
+                "rss_url": DEFAULT_VNEXPRESS_RSS_URL,
+                "max_articles_per_run": DEFAULT_MAX_ARTICLES_PER_RUN,
+                "article_recrawl_interval_hours": SCHEDULED_ARTICLE_RECRAWL_INTERVAL_HOURS,
+            },
             ensure_ascii=False,
         )
         with self._connect() as conn:
@@ -350,6 +368,10 @@ class ScheduledTaskService:
         config = dict(task["config"])
         if "max_articles_per_run" in values:
             config["max_articles_per_run"] = _validate_max_articles(values["max_articles_per_run"])
+        if "article_recrawl_interval_hours" in values:
+            config["article_recrawl_interval_hours"] = _validate_recrawl_interval_hours(
+                values["article_recrawl_interval_hours"]
+            )
         if "rss_url" in values:
             config["rss_url"] = _validate_rss_url(values["rss_url"])
         if "model_name" in values:
@@ -360,6 +382,7 @@ class ScheduledTaskService:
                 config.pop("model_name", None)
         config.setdefault("rss_url", DEFAULT_VNEXPRESS_RSS_URL)
         config.setdefault("max_articles_per_run", DEFAULT_MAX_ARTICLES_PER_RUN)
+        config.setdefault("article_recrawl_interval_hours", SCHEDULED_ARTICLE_RECRAWL_INTERVAL_HOURS)
         now = _now()
         next_run_at = task["next_run_at"]
         if not enabled:
@@ -668,21 +691,38 @@ class ScheduledTaskService:
         return count
 
     def list_processable_articles(self, task_id: str, limit: int) -> List[Dict[str, Any]]:
-        now_text = _iso(_now())
+        now = _now()
+        now_text = _iso(now)
         with self._connect() as conn:
+            task = conn.execute("SELECT config_json FROM scheduled_tasks WHERE id = ?", (task_id,)).fetchone()
+            if not task:
+                raise ScheduledTaskNotFound(task_id)
+            try:
+                config = json.loads(task["config_json"] or "{}")
+            except (TypeError, json.JSONDecodeError):
+                config = {}
+            recrawl_interval_hours = _validate_recrawl_interval_hours(
+                config.get("article_recrawl_interval_hours", SCHEDULED_ARTICLE_RECRAWL_INTERVAL_HOURS)
+            )
+            recrawl_threshold = _iso(now - timedelta(hours=recrawl_interval_hours))
             rows = conn.execute(
                 """
                 SELECT * FROM article_discovery_history
                 WHERE task_id = ?
-                  AND stage NOT IN ('completed', 'crawling', 'inferring')
+                  AND stage NOT IN ('crawling', 'inferring')
                   AND (retry_after IS NULL OR retry_after <= ?)
-                  AND ((stage IN ('failed_crawl', 'failed_inference') AND
+                  AND (
+                       (stage IN ('failed_crawl', 'failed_inference') AND
                         CASE WHEN stage = 'failed_crawl' THEN crawl_attempt_count ELSE inference_attempt_count END < ?)
-                       OR stage IN ('discovered', 'queued', 'crawled'))
+                       OR stage IN ('discovered', 'queued', 'crawled')
+                       OR (stage = 'completed'
+                           AND processed_at IS NOT NULL
+                           AND julianday(processed_at) <= julianday(?))
+                  )
                 ORDER BY CASE WHEN stage = 'failed_inference' THEN 0 ELSE 1 END, first_seen_at
                 LIMIT ?
                 """,
-                (task_id, now_text, MAX_ARTICLE_ATTEMPTS, max(1, int(limit))),
+                (task_id, now_text, MAX_ARTICLE_ATTEMPTS, recrawl_threshold, max(1, int(limit))),
             ).fetchall()
         return [dict(row) for row in rows]
 
@@ -701,12 +741,14 @@ class ScheduledTaskService:
             if not active_run:
                 return None
             field = "crawl_attempt_count" if stage == "crawling" else "inference_attempt_count"
-            attempt = int(row[field] or 0) + 1
+            is_recrawl_cycle = str(row["stage"] or "") == "completed" and stage == "crawling"
+            attempt = 1 if is_recrawl_cycle else int(row[field] or 0) + 1
             total = int(row["attempt_count"] or 0) + 1
             if attempt > MAX_ARTICLE_ATTEMPTS:
                 return None
+            recrawl_reset = ", inference_attempt_count = 0" if is_recrawl_cycle else ""
             conn.execute(
-                f"UPDATE article_discovery_history SET stage = :stage, attempt_count = :attempt_count, {field} = :stage_attempt, retry_after = NULL, last_run_id = :last_run_id, last_error = NULL, updated_at = :updated_at, "
+                f"UPDATE article_discovery_history SET stage = :stage, attempt_count = :attempt_count, {field} = :stage_attempt{recrawl_reset}, retry_after = NULL, last_run_id = :last_run_id, last_error = NULL, updated_at = :updated_at, "
                 + ("crawl_started_at = :started_at" if stage == "crawling" else "inference_started_at = :started_at")
                 + " WHERE discovery_key = :discovery_key",
                 {
