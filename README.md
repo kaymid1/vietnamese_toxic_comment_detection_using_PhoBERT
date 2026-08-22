@@ -1,4 +1,4 @@
-﻿# VietComment Analyzer
+# VietComment Analyzer
 
 Research + demo system for Vietnamese toxic-content detection from URLs.
 
@@ -68,39 +68,21 @@ Main app: `comprehensive_ui/src/app/App.tsx`
 
 ---
 
-## Active crawl schema
+## Crawling
 
-`comment_crawl.py` currently writes `segments.jsonl` rows like:
+The active crawler (`comment_crawl.py`) collects **comments only** (not article body text). Schema version: `comment_only_v3`. Output: `segments.jsonl` (one comment per line).
 
-```json
-{
-  "text": "...",
-  "segment_index": 0,
-  "url_hash": "<md5_of_url>",
-  "html_tag_effective": "comment",
-  "segment_hash": "<sha256(normalized_text + '|' + html_tag_effective)>"
-}
-```
+For full crawling architecture, supported sources, segment schema, normalization rules, environment variables, and the API-based YouTube integration notes, see:
 
-- `COMMENT_CRAWL_SCHEMA_VERSION = "comment_only_v3"`
-- `text` is kept for compatibility
+**[docs/crawling/README.md](docs/crawling/README.md)**
 
 ---
 
 ## Important behavior notes (code-verified)
 
-1. `AnalyzeRequest` schema is now:
-   - `urls`
-   - `options`
-   - (no `pending_job_id`, no `fallback_decisions` fields)
+> **Crawl layer:** `AnalyzeRequest` accepts `urls` + `options` only. `analyze()` calls `crawl_urls()` in comment-only mode; legacy params (`enable_video`, `enable_asr`, `fallback_decisions`) are accepted but silently discarded. Old docs describing interactive Selenium decisions or active video crawl are outdated. See [docs/crawling/README.md](docs/crawling/README.md) for current crawl architecture.
 
-2. In current active backend path, `analyze()` calls `crawl_urls(urls, out_dir=...)` without forwarding fallback/video controls.
-
-3. `comment_crawl.crawl_urls()` accepts legacy params (`enable_video`, `enable_asr`, `allow_selenium_fallback`, `fallback_decisions`) but currently discards them in comment-only flow.
-
-So old docs describing interactive ask-mode Selenium decisions or active video crawl in `/api/analyze` are outdated for current runtime.
-
-4. `/api/analyze` now defaults to `collect_for_mlflow: true`.
+1. `/api/analyze` now defaults to `collect_for_mlflow: true`.
    - New inferred segments are gated with `mlflow_gate_accept_threshold` / `mlflow_gate_discard_threshold`.
    - A user scan creates an `mlf_auto_*` MLflow batch when it stores at least one new canonical sample or one new per-model prediction.
    - Every inferred segment is resolved by the existing context-sensitive `dedupe_key`; an existing URL no longer suppresses segment processing.

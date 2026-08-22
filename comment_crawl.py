@@ -1,5 +1,5 @@
 """
-comment_crawl.py — Comment-only crawl pipeline for news sites and Facebook.
+comment_crawl.py — Comment-only crawl pipeline for news sites, Facebook, and YouTube.
 
 Outputs segments.jsonl in the same schema as setup_and_crawl.py so that
 infer_crawled_local.py and backend/app.py can consume results with zero refactor.
@@ -7,6 +7,7 @@ infer_crawled_local.py and backend/app.py can consume results with zero refactor
 Usage (standalone):
     python comment_crawl.py "https://vnexpress.net/some-article-123.html"
     python comment_crawl.py "https://www.facebook.com/permalink.php?id=xxx&story_fbid=yyy"
+    python comment_crawl.py "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
 
 Usage (as library):
     from comment_crawl import crawl_comments_from_url
@@ -342,6 +343,10 @@ _FB_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 _X_PATTERNS = re.compile(r"(twitter\.com|x\.com|mobile\.twitter\.com)", re.IGNORECASE)
+_YOUTUBE_PATTERNS = re.compile(
+    r"(?:youtube\.com|youtu\.be|m\.youtube\.com|music\.youtube\.com)",
+    re.IGNORECASE,
+)
 _NEWS_DOMAINS: set[str] = {
     "vnexpress.net",
     "tuoitre.vn",
@@ -366,11 +371,17 @@ _NEWS_DOMAINS: set[str] = {
 
 
 def detect_url_type(url: str) -> str:
-    """Return 'facebook' | 'x_twitter' | 'news' | 'unknown'."""
+    """Return 'facebook' | 'x_twitter' | 'youtube' | 'news' | 'unknown'."""
     if _FB_PATTERNS.search(url):
         return "facebook"
     if _X_PATTERNS.search(url):
         return "x_twitter"
+    if _YOUTUBE_PATTERNS.search(url):
+        # Only classify as 'youtube' when a valid video ID can be extracted.
+        # Bare channel / playlist / homepage URLs fall through to 'unknown'.
+        from comment_crawl_youtube import extract_youtube_video_id
+        if extract_youtube_video_id(url) is not None:
+            return "youtube"
     parsed = urlparse(url)
     host = parsed.hostname or ""
     host_lower = host.lower().lstrip("www.")
@@ -2152,7 +2163,24 @@ def crawl_comments_from_url(
     comments: list[str] = []
     html_tag_effective = "comment"
 
-    if url_type == "facebook":
+    if url_type == "youtube":
+        from comment_crawl_youtube import YouTubeCommentCrawler
+        yt_api_key = os.getenv("YOUTUBE_DATA_API_KEY", "")
+        yt_crawler = YouTubeCommentCrawler(
+            api_key=yt_api_key,
+            max_comments=max_comments_per_url,
+        )
+        yt_result = yt_crawler.crawl_comments(url)
+        comments = yt_result["comments"]
+        result_meta["blocked"] = yt_result["blocked"]
+        result_meta["block_reason"] = yt_result["block_reason"]
+        result_meta["warnings"].extend(yt_result["warnings"])
+        if yt_result["blocked"]:
+            result_meta["status"] = "blocked"
+        elif not comments and not yt_result["blocked"]:
+            result_meta["status"] = "no_comments"
+
+    elif url_type == "facebook":
         crawler = FacebookCommentCrawler(
             headless=headless,
             cookie_file=fb_cookie_file,
