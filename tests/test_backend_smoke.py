@@ -23,8 +23,9 @@ def _seed_mlflow_batch(feedback_db: Path, batch_id: str = "batch_smoke") -> None
             INSERT INTO mlflow_comment_item (
                 batch_id, job_id, url, url_hash, domain_category, segment_id, text, score,
                 pseudo_label, gate_bucket, verification_status, segment_hash, context_segment_hash,
-                html_tag, seg_threshold_used, label_source, label_confidence, created_at, reviewed_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                html_tag, seg_threshold_used, label_source, label_confidence, created_at, reviewed_at,
+                selected_for_training, training_review_status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 batch_id,
@@ -46,6 +47,8 @@ def _seed_mlflow_batch(feedback_db: Path, batch_id: str = "batch_smoke") -> None
                 "high",
                 now,
                 now,
+                1,
+                "manual_approved",
             ),
         )
         conn.execute(
@@ -587,8 +590,9 @@ def test_mlflow_training_preview_and_full_bundle_include_phobert_assets(client, 
                 batch_id, job_id, url, url_hash, domain_category, segment_id, text, score,
                 pseudo_label, constructiveness_score, constructiveness_label, constructiveness_confidence,
                 gate_bucket, verification_status, segment_hash, context_segment_hash,
-                html_tag, seg_threshold_used, label_source, label_confidence, created_at, reviewed_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                html_tag, seg_threshold_used, label_source, label_confidence, created_at, reviewed_at,
+                selected_for_training, training_review_status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 "batch_phobert",
@@ -613,6 +617,8 @@ def test_mlflow_training_preview_and_full_bundle_include_phobert_assets(client, 
                 "high",
                 datetime.utcnow().isoformat() + "Z",
                 None,
+                1,
+                "manual_approved",
             ),
         )
         conn.commit()
@@ -916,6 +922,14 @@ def test_mlflow_bulk_gemini_review_and_apply_preserves_review_origin(client, qa_
             """,
             ("batch_gemini_bulk",),
         )
+        conn.execute(
+            """
+            UPDATE mlflow_comment_item
+            SET training_review_status = 'pending'
+            WHERE batch_id = ? AND text = 'accepted sample'
+            """,
+            ("batch_gemini_bulk",),
+        )
         rows = conn.execute(
             "SELECT id, training_review_status FROM mlflow_comment_item WHERE batch_id = ? ORDER BY id",
             ("batch_gemini_bulk",),
@@ -923,7 +937,7 @@ def test_mlflow_bulk_gemini_review_and_apply_preserves_review_origin(client, qa_
         conn.commit()
 
     ids = [int(row[0]) for row in rows]
-    assert [row[1] for row in rows] == ["auto", "manual_approved"]
+    assert [row[1] for row in rows] == ["pending", "manual_approved"]
 
     def fake_call_gemini(prompt: str) -> str:
         assert "đúng 2 object" in prompt
@@ -1551,6 +1565,8 @@ def test_mlflow_model_reevaluation_agreement_conflict_uncertain_and_human_resolu
             row[1].rsplit("_", 1)[-1]: int(row[0])
             for row in conn.execute("SELECT id, context_segment_hash FROM mlflow_comment_item")
         }
+        conn.execute("UPDATE mlflow_comment_item SET selected_for_training = 1, training_review_status = 'manual_approved'")
+        conn.commit()
 
     monkeypatch.setattr(
         app_module,
@@ -1611,7 +1627,7 @@ def test_mlflow_model_reevaluation_agreement_conflict_uncertain_and_human_resolu
             "SELECT sample_item_id, record_origin FROM mlflow_comment_prediction WHERE model_id = 'phobert/v2'"
         ).fetchall()
         training_ids = {int(row["id"]) for row in app_module.select_mlflow_training_rows(conn, None, "all")[0]}
-    assert states[ids["agree"]] == (1, "accepted", "auto_accepted", 1, "auto", None)
+    assert states[ids["agree"]] == (1, "accepted", "auto_accepted", 1, "manual_approved", None)
     assert states[ids["conflict"]] == (1, "candidate", "unverified", 0, "pending", "model_conflict")
     assert states[ids["uncertain"]] == (1, "candidate", "unverified", 0, "pending", "model_uncertain")
     assert {tuple(row) for row in origins} == {
@@ -1770,10 +1786,12 @@ def test_mlflow_batch_scoped_preview_and_export_include_reused_canonical_sample(
         params={"scope": "batch", "batch_id": "batch_scope_latest", "strict_batch": "true"},
     )
     assert preview.status_code == 200
-    assert preview.json()["counts"]["selected"] == 1
+    assert preview.json()["counts"]["requires_human_review"] == 1
     assert len(preview.json()["items"][0]["prediction_history"]) == 2
 
     with sqlite3.connect(qa_env["feedback_db"]) as conn:
+        conn.execute("UPDATE mlflow_comment_item SET selected_for_training = 1, training_review_status = 'manual_approved'")
+        conn.commit()
         conn.row_factory = sqlite3.Row
         scoped_rows = app_module.select_mlflow_training_rows(conn, "batch_scope_latest", "all")[0]
     assert len(scoped_rows) == 1

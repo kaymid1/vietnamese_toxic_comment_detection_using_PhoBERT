@@ -1118,6 +1118,186 @@ def test_lr_smoke_training_mode_is_always_retrain(qa_env):
     assert qa_env["app_module"]._do_resolve_base_model(request) is None
 
 
+def _insert_training_candidate(
+    feedback_db: Path,
+    *,
+    text: str,
+    pseudo_label: int,
+    selected_for_training: int,
+    training_review_status: str,
+    gate_bucket: str = "accepted",
+    verification_status: str = "auto_accepted",
+    source_type: str = "crawl",
+) -> int:
+    now = datetime.utcnow().isoformat() + "Z"
+    url_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    with sqlite3.connect(feedback_db) as conn:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO mlflow_crawl_batch (
+                batch_id, model_id, status, created_at, completed_at, options_json
+            ) VALUES ('safety-batch', 'tfidf_lr/test', 'completed', ?, ?, '{}')
+            """,
+            (now, now),
+        )
+        cursor = conn.execute(
+            """
+            INSERT INTO mlflow_comment_item (
+                batch_id, url, url_hash, domain_category, segment_id, text, score,
+                pseudo_label, selected_for_training, training_review_status,
+                gate_bucket, verification_status, source_type, created_at
+            ) VALUES (
+                'safety-batch', ?, ?, 'news', ?, ?, 0.9,
+                ?, ?, ?, ?, ?, ?, ?
+            )
+            """,
+            (
+                f"https://example.test/{url_hash}",
+                url_hash,
+                f"seg-{url_hash[:12]}",
+                text,
+                pseudo_label,
+                selected_for_training,
+                training_review_status,
+                gate_bucket,
+                verification_status,
+                source_type,
+                now,
+            ),
+        )
+        conn.commit()
+        return int(cursor.lastrowid)
+
+
+def test_runtime_training_eligibility_requires_human_approved_status(qa_env):
+    app_module = qa_env["app_module"]
+    cases = {
+        "unreviewed-current-pending": _insert_training_candidate(
+            qa_env["feedback_db"],
+            text="runtime pending not selected",
+            pseudo_label=1,
+            selected_for_training=0,
+            training_review_status="pending",
+        ),
+        "historical-auto": _insert_training_candidate(
+            qa_env["feedback_db"],
+            text="historical auto selected",
+            pseudo_label=1,
+            selected_for_training=1,
+            training_review_status="auto",
+        ),
+        "historical-pending": _insert_training_candidate(
+            qa_env["feedback_db"],
+            text="historical pending selected",
+            pseudo_label=0,
+            selected_for_training=1,
+            training_review_status="pending",
+        ),
+        "human-manual-approved": _insert_training_candidate(
+            qa_env["feedback_db"],
+            text="human manual approved selected",
+            pseudo_label=1,
+            selected_for_training=1,
+            training_review_status="manual_approved",
+            verification_status="manual_accepted",
+        ),
+        "human-manual-gemini": _insert_training_candidate(
+            qa_env["feedback_db"],
+            text="human gemini assisted selected",
+            pseudo_label=0,
+            selected_for_training=1,
+            training_review_status="manual_gemini",
+            verification_status="manual_accepted",
+        ),
+        "rejected-runtime": _insert_training_candidate(
+            qa_env["feedback_db"],
+            text="runtime rejected selected",
+            pseudo_label=1,
+            selected_for_training=1,
+            training_review_status="manual_removed",
+            verification_status="manual_rejected",
+        ),
+        "synthetic-auto": _insert_training_candidate(
+            qa_env["feedback_db"],
+            text="synthetic auto status remains eligible",
+            pseudo_label=1,
+            selected_for_training=1,
+            training_review_status="auto",
+            source_type="synthetic",
+        ),
+    }
+
+    with sqlite3.connect(qa_env["feedback_db"]) as conn:
+        conn.row_factory = sqlite3.Row
+        accepted_rows_all, accepted_rows, _ = app_module.select_mlflow_training_rows(conn, None, "all")
+
+    eligible_ids = {int(row["id"]) for row in accepted_rows_all}
+    balanced_ids = {int(row["id"]) for row in accepted_rows}
+    assert cases["human-manual-approved"] in eligible_ids
+    assert cases["human-manual-gemini"] in eligible_ids
+    assert cases["synthetic-auto"] in eligible_ids
+    assert cases["synthetic-auto"] in balanced_ids
+    assert cases["unreviewed-current-pending"] not in eligible_ids
+    assert cases["historical-auto"] not in eligible_ids
+    assert cases["historical-pending"] not in eligible_ids
+    assert cases["rejected-runtime"] not in eligible_ids
+
+
+def test_training_preview_human_label_override_controls_training_target(qa_env):
+    app_module = qa_env["app_module"]
+    toxic_to_clean_id = _insert_training_candidate(
+        qa_env["feedback_db"],
+        text="human override toxic to clean",
+        pseudo_label=1,
+        selected_for_training=0,
+        training_review_status="pending",
+    )
+    clean_to_toxic_id = _insert_training_candidate(
+        qa_env["feedback_db"],
+        text="human override clean to toxic",
+        pseudo_label=0,
+        selected_for_training=0,
+        training_review_status="pending",
+    )
+
+    response = app_module.mlflow_training_preview_review(
+        app_module.MlflowTrainingPreviewReviewRequest(
+            updates=[
+                app_module.MlflowTrainingPreviewReviewItem(
+                    id=toxic_to_clean_id,
+                    selected_for_training=True,
+                    pseudo_label=0,
+                ),
+                app_module.MlflowTrainingPreviewReviewItem(
+                    id=clean_to_toxic_id,
+                    selected_for_training=True,
+                    pseudo_label=1,
+                ),
+            ]
+        )
+    )
+    assert response["updated"] == 2
+
+    with sqlite3.connect(qa_env["feedback_db"]) as conn:
+        conn.row_factory = sqlite3.Row
+        accepted_rows_all, accepted_rows, _ = app_module.select_mlflow_training_rows(conn, None, "all")
+
+    selected_labels = {int(row["id"]): int(row["pseudo_label"]) for row in accepted_rows_all}
+    assert selected_labels[toxic_to_clean_id] == 0
+    assert selected_labels[clean_to_toxic_id] == 1
+
+    train_rows, _, _, _, row_statuses = app_module.build_training_merge_plan(accepted_rows)
+    rows_by_id = {
+        int(row["meta"]["mlflow_comment_id"]): row
+        for row in train_rows
+        if row.get("meta", {}).get("source") == "MLFlowAccepted"
+    }
+    assert rows_by_id[toxic_to_clean_id]["toxicity"] == 0
+    assert rows_by_id[clean_to_toxic_id]["toxicity"] == 1
+    assert row_statuses[toxic_to_clean_id]["will_finetune"] is True
+    assert row_statuses[clean_to_toxic_id]["will_finetune"] is True
+
+
 def test_automation_is_disabled_by_default_and_does_not_start_a_cycle(client, admin_headers):
     status_response = client.get("/api/mlflow/automation/status", headers=admin_headers)
 
@@ -1167,8 +1347,9 @@ def test_automation_balance_strategy_setting_is_exposed_and_used(qa_env, client,
         conn.execute(
             """
             INSERT INTO mlflow_comment_item (
-                batch_id, text, gate_bucket, pseudo_label, selected_for_training, created_at
-            ) VALUES (?, ?, 'accepted', 1, 1, ?)
+                batch_id, text, gate_bucket, pseudo_label, selected_for_training, created_at,
+                url, url_hash, domain_category, segment_id, score, verification_status, training_review_status
+            ) VALUES (?, ?, 'accepted', 1, 1, ?, 'http://x.com', 'hash', 'news', 's1', 0.9, 'manual_accepted', 'manual_approved')
             """,
             ("automation-balance", "approved automation sample", "2026-08-18T00:00:00Z"),
         )

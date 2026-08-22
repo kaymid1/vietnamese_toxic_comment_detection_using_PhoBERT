@@ -4826,8 +4826,8 @@ def classify_mlflow_gate(
             "pseudo_label": 1,
             "label_source": "auto_gate",
             "label_confidence": "high",
-            "selected_for_training": 1,
-            "training_review_status": "auto",
+            "selected_for_training": 0,
+            "training_review_status": "pending",
         }
     if score <= discard_threshold:
         return {
@@ -4836,8 +4836,8 @@ def classify_mlflow_gate(
             "pseudo_label": 0,
             "label_source": "auto_gate",
             "label_confidence": "high",
-            "selected_for_training": 1,
-            "training_review_status": "auto",
+            "selected_for_training": 0,
+            "training_review_status": "pending",
         }
     return {
         "gate_bucket": "candidate",
@@ -5293,7 +5293,8 @@ def select_mlflow_training_rows(
 ) -> Tuple[List[sqlite3.Row], List[sqlite3.Row], Dict[str, Any]]:
     accepted_where = (
         "item.gate_bucket = 'accepted' AND item.pseudo_label IN (0, 1) "
-        "AND COALESCE(item.selected_for_training, 1) = 1"
+        "AND COALESCE(item.selected_for_training, 1) = 1 "
+        "AND (item.source_type = 'synthetic' OR item.training_review_status IN ('manual_approved', 'manual_gemini'))"
     )
     accepted_params: List[Any] = []
     if resolved_batch_id:
@@ -6908,7 +6909,7 @@ def mlflow_model_re_evaluate(request: MlflowModelReEvaluationRequest) -> Dict[st
             [
                 "item.verification_status = 'auto_accepted'",
                 "item.gate_bucket = 'accepted'",
-                "COALESCE(item.selected_for_training, 1) = 1",
+                "item.training_review_status IN ('auto', 'pending')",
                 "item.pseudo_label IN (0, 1)",
             ]
         )
@@ -7644,7 +7645,7 @@ def mlflow_training_preview_review(request: MlflowTrainingPreviewReviewRequest) 
                 if not item.reviewed_by_gemini:
                     next_review_status = "manual_approved"
             if item.reviewed_by_gemini and item.pseudo_label in {0, 1}:
-                next_review_status = "auto_gemini" if current_review_status in {"auto", "auto_gemini"} else "manual_gemini"
+                next_review_status = "auto_gemini" if current_review_status in {"auto", "pending", "auto_gemini"} else "manual_gemini"
             if next_review_status is not None:
                 fields.append("training_review_status = ?")
                 values.append(next_review_status)
